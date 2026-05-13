@@ -1,0 +1,35 @@
+{
+	"$schema": "https://aka.ms/vscode-mcp-config-schema",
+	"inputs": [
+		{
+			"id": "wp_url",
+			"type": "promptString",
+			"description": "WordPress site URL (e.g. https://your-site.example)"
+		},
+		{
+			"id": "wp_username",
+			"type": "promptString",
+			"description": "WordPress username"
+		},
+		{
+			"id": "wp_app_password",
+			"type": "promptString",
+			"description": "WordPress Application Password (Users > Profile > Application Passwords)",
+			"password": true
+		}
+	],
+	"servers": {
+		"full-elementor-mcp": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/bin/full-elementor-mcp-proxy.mjs"
+			],
+			"env": {
+				"WP_URL": "${input:wp_url}",
+				"WP_USERNAME": "${input:wp_username}",
+				"WP_APP_PASSWORD": "${input:wp_app_password}"
+			}
+		}
+	}
+}

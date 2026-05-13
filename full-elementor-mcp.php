@@ -3,7 +3,7 @@
  * Plugin Name:       Full Elementor MCP
  * Plugin URI:        https://github.com/Zainulabidin90/full-elementor-mcp
  * Description:       A WordPress MCP server that exposes the full surface of Elementor and Elementor Pro (131+ tools) to AI agents over the Model Context Protocol.
- * Version:           1.7.0
+ * Version:           1.7.1
  * Requires at least: 6.9
  * Tested up to:      6.9
  * Requires PHP:      8.0
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Plugin constants.
-define( 'FULL_ELEMENTOR_MCP_VERSION', '1.7.0' );
+define( 'FULL_ELEMENTOR_MCP_VERSION', '1.7.1' );
 define( 'FULL_ELEMENTOR_MCP_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_URL', plugin_dir_url( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_BASENAME', plugin_basename( __FILE__ ) );

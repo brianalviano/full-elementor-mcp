@@ -4,7 +4,7 @@ Tags: elementor, mcp, ai, model-context-protocol, page-builder, claude, ai-agent
 Requires at least: 6.9
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.7.0
+Stable tag: 1.7.1
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -33,7 +33,8 @@ Full Elementor MCP does all of that and exposes it as MCP tools any agent can ca
 * **131+ MCP tools** across Query, Page, Layout, Widget, Template, Global, Composite, Stock Image, SVG, Custom Code, Atomic Layout and Atomic Widget groups.
 * **Elementor 4.0 atomic support** out of the box — typed prop wrapping, `styles` map generation, class-ID issuance.
 * **Elementor 3.x legacy support** — sections, columns, containers, full-fat widgets with auto-generated JSON schemas from the live control registry.
-* **Two transports** — HTTP (REST) for any client, plus an optional **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop clients that only speak stdio (Claude Desktop, etc.).
+* **Two transports** — HTTP (REST) for any client, plus an optional **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop clients that only speak stdio (Claude Desktop, VS Code MCP, etc.).
+* **VS Code-ready** — bundled `.vscode/mcp.json` registers the stdio proxy as a workspace MCP server with masked credential prompts.
 * **Schema sanitiser** for Gemini / Antigravity compatibility (strips empty enum strings, normalises empty `properties` objects).
 * **Permission-aware** — every write tool defers to `current_user_can( 'edit_post', $post_id )`. Application Passwords and capability rules are respected.
 * **Per-tool admin toggle** — disable any of the 131 tools individually from the WP Admin UI.
@@ -126,6 +127,10 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 
 == Changelog ==
 
+= 1.7.1 =
+* Added bundled `.vscode/mcp.json` that registers the stdio proxy as a workspace MCP server for VS Code (Copilot Chat / MCP), with masked prompts for `WP_URL`, `WP_USERNAME` and `WP_APP_PASSWORD`.
+* Updated README with a VS Code connection section.
+
 = 1.7.0 =
 * Repackaged and rebranded under new maintainer (Zain Ul Abidin / Progressive Robot).
 * Updated plugin metadata: Plugin URI, Author, Author URI, Description, Contributors.
@@ -156,6 +161,9 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 * Initial release with the legacy Elementor 3.x tool set.
 
 == Upgrade Notice ==
+
+= 1.7.1 =
+Adds a bundled VS Code MCP workspace config (`.vscode/mcp.json`). No code or data changes; safe drop-in upgrade from 1.7.0.
 
 = 1.7.0 =
 Maintainer rebrand. No data migration required; safe drop-in upgrade from 1.6.x.

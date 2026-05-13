@@ -2,7 +2,7 @@
 
 > A WordPress plugin that exposes the full surface of Elementor and Elementor Pro to AI agents over the **Model Context Protocol (MCP)** — 131+ tools across pages, containers, widgets, templates, popups, theme parts, custom code, stock images and SVG icons.
 
-[![Plugin Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](full-elementor-mcp.php)
+[![Plugin Version](https://img.shields.io/badge/version-1.7.1-blue.svg)](full-elementor-mcp.php)
 [![PHP](https://img.shields.io/badge/php-%3E%3D8.0-777BB4.svg)](https://www.php.net/)
 [![WordPress](https://img.shields.io/badge/wordpress-%3E%3D6.9-21759B.svg)](https://wordpress.org/)
 [![Elementor](https://img.shields.io/badge/elementor-3.20%2B%20%7C%204.0%20atomic-D8358F.svg)](https://elementor.com/)
@@ -119,6 +119,34 @@ Use the bundled stdio→HTTP proxy:
 ```
 
 The exact paths, the endpoint URL, and a copy-paste config are also auto-generated under **WP Admin → Settings → Full Elementor MCP → Connection**.
+
+### VS Code (GitHub Copilot Chat / MCP)
+
+The repo ships a ready-to-use [.vscode/mcp.json](.vscode/mcp.json) that registers the bundled stdio proxy as an MCP server scoped to this workspace. Open the `full-elementor-mcp` folder in VS Code, then run **MCP: List Servers → full-elementor-mcp → Start**. VS Code will prompt once for your `WP_URL`, `WP_USERNAME` and `WP_APP_PASSWORD` (the password input is masked) and reuse them for the session.
+
+To use the same proxy from another VS Code workspace, drop this into that workspace's own `.vscode/mcp.json`:
+
+```jsonc
+{
+  "inputs": [
+    { "id": "wp_url",          "type": "promptString", "description": "WordPress site URL" },
+    { "id": "wp_username",     "type": "promptString", "description": "WordPress username" },
+    { "id": "wp_app_password", "type": "promptString", "description": "Application Password", "password": true }
+  ],
+  "servers": {
+    "full-elementor-mcp": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:\\path\\to\\full-elementor-mcp\\bin\\full-elementor-mcp-proxy.mjs"],
+      "env": {
+        "WP_URL": "${input:wp_url}",
+        "WP_USERNAME": "${input:wp_username}",
+        "WP_APP_PASSWORD": "${input:wp_app_password}"
+      }
+    }
+  }
+}
+```
 
 ## Quick example
 
