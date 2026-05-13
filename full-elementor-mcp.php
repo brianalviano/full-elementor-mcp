@@ -1,14 +1,14 @@
 <?php
 /**
  * Plugin Name:       Full Elementor MCP
- * Plugin URI:        https://github.com/msrbuilds/full-elementor-mcp
- * Description:       Extends the WordPress MCP Adapter to expose Elementor data, widgets, and page design tools as MCP tools for AI agents.
- * Version:           1.6.1
+ * Plugin URI:        https://github.com/Zainulabidin90/full-elementor-mcp
+ * Description:       A WordPress MCP server that exposes the full surface of Elementor and Elementor Pro (131+ tools) to AI agents over the Model Context Protocol.
+ * Version:           1.7.0
  * Requires at least: 6.9
  * Tested up to:      6.9
  * Requires PHP:      8.0
- * Author:            Mian Shahzad Raza
- * Author URI:        https://msrbuilds.com
+ * Author:            Zain Ul Abidin
+ * Author URI:        https://www.progressiverobot.com
  * License:           GPL-3.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-3.0.html
  * Text Domain:       full-elementor-mcp
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Plugin constants.
-define( 'FULL_ELEMENTOR_MCP_VERSION', '1.6.1' );
+define( 'FULL_ELEMENTOR_MCP_VERSION', '1.7.0' );
 define( 'FULL_ELEMENTOR_MCP_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_URL', plugin_dir_url( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_BASENAME', plugin_basename( __FILE__ ) );

@@ -1,10 +1,10 @@
 === Full Elementor MCP ===
-Contributors: msrbuilds
+Contributors: zainulabidin
 Tags: elementor, mcp, ai, model-context-protocol, page-builder, claude, ai-agent, openai, gemini
 Requires at least: 6.9
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.6.1
+Stable tag: 1.7.0
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -126,6 +126,17 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 
 == Changelog ==
 
+= 1.7.0 =
+* Repackaged and rebranded under new maintainer (Zain Ul Abidin / Progressive Robot).
+* Updated plugin metadata: Plugin URI, Author, Author URI, Description, Contributors.
+* Refreshed admin header links to point at the new maintainer.
+
+= 1.6.1 =
+* Bugfix: stripped accidental double `Full_` prefix introduced by the v1.6.0 rename across every PHP class (`Full_Full_Elementor_MCP_*` -> `Full_Elementor_MCP_*`).
+* Bugfix: corrected admin Connection page proxyPath to `bin/full-elementor-mcp-proxy.mjs` (was generating broken MCP client config snippets).
+* Updated Openverse HTTP User-Agent to `Full-Elementor-MCP/<version>`.
+* Removed dead `delete_option` call in `uninstall.php` for an option that is never written.
+
 = 1.6.0 =
 * Added 21 new MCP tools (find-element, batch-update, reorder-elements, wrap/unwrap/replace, set/add/remove-element-class, dynamic tags, popup settings, theme-builder conditions, and more).
 * Added Elementor 4.0 atomic group (flexbox, div-block, atomic widgets) with `$$type` wrapping and `styles` map generation.
@@ -145,6 +156,12 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 * Initial release with the legacy Elementor 3.x tool set.
 
 == Upgrade Notice ==
+
+= 1.7.0 =
+Maintainer rebrand. No data migration required; safe drop-in upgrade from 1.6.x.
+
+= 1.6.1 =
+Fixes a critical naming bug from 1.6.0 (double `Full_` class prefix) and corrects the admin Connection page proxy path. Recommended upgrade.
 
 = 1.6.0 =
 Adds 21 new tools, full Elementor 4.0 atomic support, and several correctness/security fixes. No data migration required.

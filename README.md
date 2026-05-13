@@ -2,7 +2,7 @@
 
 > A WordPress plugin that exposes the full surface of Elementor and Elementor Pro to AI agents over the **Model Context Protocol (MCP)** — 131+ tools across pages, containers, widgets, templates, popups, theme parts, custom code, stock images and SVG icons.
 
-[![Plugin Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](full-elementor-mcp.php)
+[![Plugin Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](full-elementor-mcp.php)
 [![PHP](https://img.shields.io/badge/php-%3E%3D8.0-777BB4.svg)](https://www.php.net/)
 [![WordPress](https://img.shields.io/badge/wordpress-%3E%3D6.9-21759B.svg)](https://wordpress.org/)
 [![Elementor](https://img.shields.io/badge/elementor-3.20%2B%20%7C%204.0%20atomic-D8358F.svg)](https://elementor.com/)
