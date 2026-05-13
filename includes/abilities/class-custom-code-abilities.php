@@ -1,0 +1,968 @@
+<?php
+/**
+ * Custom code MCP abilities for Elementor.
+ *
+ * Registers tools for adding custom CSS, JavaScript, and site-wide
+ * code snippets via the Full Elementor MCP server.
+ *
+ * @package Full_Elementor_MCP
+ * @since   1.3.0
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+/**
+ * Registers and implements the custom code abilities.
+ *
+ * @since 1.3.0
+ */
+class Full_Full_Elementor_MCP_Custom_Code_Abilities {
+
+	/**
+	 * @var Full_Full_Elementor_MCP_Data
+	 */
+	private $data;
+
+	/**
+	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 */
+	private $factory;
+
+	/**
+	 * Dynamically built list of ability names.
+	 *
+	 * @var string[]
+	 */
+	private $ability_names = array();
+
+	/**
+	 * Constructor.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 */
+	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+		$this->data    = $data;
+		$this->factory = $factory;
+	}
+
+	/**
+	 * Returns the ability names registered by this class.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @return string[]
+	 */
+	public function get_ability_names(): array {
+		return $this->ability_names;
+	}
+
+	/**
+	 * Registers all custom code abilities.
+	 *
+	 * @since 1.3.0
+	 */
+	public function register(): void {
+		// Custom JS works with free Elementor (uses HTML widget).
+		$this->register_add_custom_js();
+
+		// Pro-only tools require Elementor Pro.
+		if ( defined( 'ELEMENTOR_PRO_VERSION' ) ) {
+			$this->register_add_custom_css();
+			$this->register_add_code_snippet();
+			$this->register_list_code_snippets();
+			$this->register_update_code_snippet();
+			$this->register_delete_code_snippet();
+			$this->register_toggle_code_snippet_status();
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// Permission callbacks
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Permission check for page/element editing.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param array|null $input The input data.
+	 * @return bool
+	 */
+	public function check_edit_permission( $input = null ): bool {
+		if ( ! current_user_can( 'edit_posts' ) ) {
+			return false;
+		}
+
+		$post_id = absint( $input['post_id'] ?? 0 );
+		if ( $post_id && ! current_user_can( 'edit_post', $post_id ) ) {
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Permission check for creating site-wide code snippets.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @return bool
+	 */
+	public function check_snippet_permission(): bool {
+		return current_user_can( 'manage_options' ) && current_user_can( 'unfiltered_html' );
+	}
+
+	/**
+	 * Permission check for listing snippets (read-only).
+	 *
+	 * @since 1.3.0
+	 *
+	 * @return bool
+	 */
+	public function check_manage_permission(): bool {
+		return current_user_can( 'manage_options' );
+	}
+
+	/**
+	 * Stricter permission check for arbitrary code injection on a post.
+	 *
+	 * Custom CSS / Custom JS write attacker-controlled markup that gets
+	 * served to every visitor. `edit_posts` is too permissive (Authors,
+	 * Editors); writing executable styles or scripts requires the same
+	 * `unfiltered_html` capability WordPress itself gates raw <script> on,
+	 * which is normally only granted to Administrators (and Editors on
+	 * single-site).
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param array|null $input The input data.
+	 * @return bool
+	 */
+	public function check_unfiltered_edit_permission( $input = null ): bool {
+		if ( ! current_user_can( 'unfiltered_html' ) ) {
+			return false;
+		}
+		return $this->check_edit_permission( $input );
+	}
+
+	// -------------------------------------------------------------------------
+	// add-custom-css (Pro only)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Registers the add-custom-css ability.
+	 *
+	 * @since 1.3.0
+	 */
+	private function register_add_custom_css(): void {
+		$this->ability_names[] = 'full-elementor-mcp/add-custom-css';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/add-custom-css',
+			array(
+				'label'               => __( 'Add Custom CSS', 'full-elementor-mcp' ),
+				'description'         => __( 'Adds custom CSS to a specific element or to the entire page. Requires Elementor Pro. For element-level CSS, use the keyword "selector" as a placeholder for the element\'s CSS wrapper (e.g. "selector .heading { color: red; }" or "selector:hover { transform: scale(1.05); }"). For page-level CSS, omit element_id. Appends to existing CSS by default; set replace=true to overwrite.', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_add_custom_css' ),
+				'permission_callback' => array( $this, 'check_unfiltered_edit_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'post_id'    => array(
+							'type'        => 'integer',
+							'description' => __( 'The post/page ID.', 'full-elementor-mcp' ),
+						),
+						'element_id' => array(
+							'type'        => 'string',
+							'description' => __( 'Optional element ID to apply CSS to. If omitted, CSS is applied at the page level.', 'full-elementor-mcp' ),
+						),
+						'css'        => array(
+							'type'        => 'string',
+							'description' => __( 'CSS rules to add. Use "selector" as the element wrapper placeholder for element-level CSS.', 'full-elementor-mcp' ),
+						),
+						'replace'    => array(
+							'type'        => 'boolean',
+							'description' => __( 'If true, replaces existing custom CSS instead of appending. Default: false.', 'full-elementor-mcp' ),
+						),
+					),
+					'required'   => array( 'post_id', 'css' ),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'success' => array( 'type' => 'boolean' ),
+						'target'  => array( 'type' => 'string' ),
+						'css'     => array( 'type' => 'string' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => false,
+						'idempotent'  => false,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	/**
+	 * Executes the add-custom-css ability.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param array $input The input parameters.
+	 * @return array|\WP_Error
+	 */
+	public function execute_add_custom_css( $input ) {
+		$post_id    = absint( $input['post_id'] ?? 0 );
+		$element_id = sanitize_text_field( $input['element_id'] ?? '' );
+		$css        = $input['css'] ?? '';
+		$replace    = ! empty( $input['replace'] );
+
+		if ( ! $post_id || empty( $css ) ) {
+			return new \WP_Error( 'missing_params', __( 'post_id and css are required.', 'full-elementor-mcp' ) );
+		}
+
+		// We deliberately do NOT regex-strip PHP open/close tags or script tags
+		// from CSS payloads here. The previous regex-based stripper was a false
+		// sense of security (trivially bypassed by string concatenation, comment
+		// breaks, etc.) and Elementor stores `custom_css` as plain text inside
+		// JSON page-data, so PHP/JS injected as a literal string never executes.
+		// Capability gating (`unfiltered_html`) is the real defense; that is now
+		// enforced in `check_unfiltered_edit_permission()` above.
+
+		if ( ! empty( $element_id ) ) {
+			// Element-level custom CSS.
+			$page_data = $this->data->get_page_data( $post_id );
+
+			if ( is_wp_error( $page_data ) ) {
+				return $page_data;
+			}
+
+			$element = $this->data->find_element_by_id( $page_data, $element_id );
+
+			if ( null === $element ) {
+				return new \WP_Error( 'element_not_found', __( 'Element not found.', 'full-elementor-mcp' ) );
+			}
+
+			$existing_css = $element['settings']['custom_css'] ?? '';
+			$new_css      = $replace ? $css : trim( $existing_css . "\n" . $css );
+
+			$updated = $this->data->update_element_settings(
+				$page_data,
+				$element_id,
+				array( 'custom_css' => $new_css )
+			);
+
+			if ( ! $updated ) {
+				return new \WP_Error( 'update_failed', __( 'Failed to update element settings.', 'full-elementor-mcp' ) );
+			}
+
+			$result = $this->data->save_page_data( $post_id, $page_data );
+
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			return array(
+				'success' => true,
+				'target'  => 'element:' . $element_id,
+				'css'     => $new_css,
+			);
+		}
+
+		// Page-level custom CSS.
+		$page_settings = $this->data->get_page_settings( $post_id );
+
+		if ( is_wp_error( $page_settings ) ) {
+			return $page_settings;
+		}
+
+		$existing_css = $page_settings['custom_css'] ?? '';
+		$new_css      = $replace ? $css : trim( $existing_css . "\n" . $css );
+
+		$result = $this->data->save_page_settings(
+			$post_id,
+			array( 'custom_css' => $new_css )
+		);
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		return array(
+			'success' => true,
+			'target'  => 'page:' . $post_id,
+			'css'     => $new_css,
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// add-custom-js (Free — uses HTML widget)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Registers the add-custom-js ability.
+	 *
+	 * @since 1.3.0
+	 */
+	private function register_add_custom_js(): void {
+		$this->ability_names[] = 'full-elementor-mcp/add-custom-js';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/add-custom-js',
+			array(
+				'label'               => __( 'Add Custom JavaScript', 'full-elementor-mcp' ),
+				'description'         => __( 'Adds a custom JavaScript snippet to a page by inserting an HTML widget containing a <script> tag. Works with free Elementor (no Pro required). The JS code is automatically wrapped in <script> tags — do NOT include them yourself. Use wrap_dom_ready=true to wrap in a DOMContentLoaded listener. For site-wide JS, use add-code-snippet instead (requires Pro).', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_add_custom_js' ),
+				'permission_callback' => array( $this, 'check_unfiltered_edit_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'post_id'        => array(
+							'type'        => 'integer',
+							'description' => __( 'The post/page ID.', 'full-elementor-mcp' ),
+						),
+						'parent_id'      => array(
+							'type'        => 'string',
+							'description' => __( 'Parent container element ID.', 'full-elementor-mcp' ),
+						),
+						'js'             => array(
+							'type'        => 'string',
+							'description' => __( 'JavaScript code to inject. Do NOT include <script> tags — they are added automatically.', 'full-elementor-mcp' ),
+						),
+						'position'       => array(
+							'type'        => 'integer',
+							'description' => __( 'Insert position within parent. -1 = append (default).', 'full-elementor-mcp' ),
+						),
+						'wrap_dom_ready' => array(
+							'type'        => 'boolean',
+							'description' => __( 'Wrap the code in a DOMContentLoaded listener. Default: false.', 'full-elementor-mcp' ),
+						),
+					),
+					'required'   => array( 'post_id', 'parent_id', 'js' ),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'element_id' => array( 'type' => 'string' ),
+						'post_id'    => array( 'type' => 'integer' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => false,
+						'idempotent'  => false,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	/**
+	 * Executes the add-custom-js ability.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param array $input The input parameters.
+	 * @return array|\WP_Error
+	 */
+	public function execute_add_custom_js( $input ) {
+		$post_id        = absint( $input['post_id'] ?? 0 );
+		$parent_id      = sanitize_text_field( $input['parent_id'] ?? '' );
+		$js             = $input['js'] ?? '';
+		$position       = intval( $input['position'] ?? -1 );
+		$wrap_dom_ready = ! empty( $input['wrap_dom_ready'] );
+
+		if ( ! $post_id || empty( $parent_id ) || empty( $js ) ) {
+			return new \WP_Error( 'missing_params', __( 'post_id, parent_id, and js are required.', 'full-elementor-mcp' ) );
+		}
+
+		// Strip any existing script tags the caller may have included.
+		$js = preg_replace( '/<\/?script[^>]*>/i', '', $js );
+
+		// Defensively escape any literal `</script>` sequences in the body
+		// (e.g. inside string literals) so they can't break out of the
+		// wrapper `<script>` tag below.
+		$js = preg_replace( '#</(script)#i', '<\\/$1', $js );
+
+		// Optionally wrap in DOMContentLoaded.
+		if ( $wrap_dom_ready ) {
+			$js = "document.addEventListener('DOMContentLoaded', function() {\n" . $js . "\n});";
+		}
+
+		$html_content = "<script>\n" . $js . "\n</script>";
+
+		$page_data = $this->data->get_page_data( $post_id );
+
+		if ( is_wp_error( $page_data ) ) {
+			return $page_data;
+		}
+
+		$widget = $this->factory->create_widget( 'html', array( 'html' => $html_content ) );
+
+		$inserted = $this->data->insert_element( $page_data, $parent_id, $widget, $position );
+
+		if ( ! $inserted ) {
+			return new \WP_Error(
+				'parent_not_found',
+				sprintf(
+					/* translators: %s: parent element ID */
+					__( 'Parent element "%s" not found.', 'full-elementor-mcp' ),
+					$parent_id
+				)
+			);
+		}
+
+		$result = $this->data->save_page_data( $post_id, $page_data );
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		return array(
+			'element_id' => $widget['id'],
+			'post_id'    => $post_id,
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// add-code-snippet (Pro only)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Registers the add-code-snippet ability.
+	 *
+	 * @since 1.3.0
+	 */
+	private function register_add_code_snippet(): void {
+		$this->ability_names[] = 'full-elementor-mcp/add-code-snippet';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/add-code-snippet',
+			array(
+				'label'               => __( 'Add Code Snippet', 'full-elementor-mcp' ),
+				'description'         => __( 'Creates a site-wide Custom Code snippet using Elementor Pro. Injects CSS or JavaScript into the <head>, after <body> open, or before </body> close on ALL pages. Use this for analytics scripts, site-wide CSS overrides, meta tags, or tracking pixels. Requires Elementor Pro and manage_options capability.', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_add_code_snippet' ),
+				'permission_callback' => array( $this, 'check_snippet_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'title'         => array(
+							'type'        => 'string',
+							'description' => __( 'Descriptive title for the snippet (e.g. "Google Analytics", "Global CSS overrides").', 'full-elementor-mcp' ),
+						),
+						'code'          => array(
+							'type'        => 'string',
+							'description' => __( 'The full code to inject. Include <script>, <style>, or <meta> tags as needed.', 'full-elementor-mcp' ),
+						),
+						'location'      => array(
+							'type'        => 'string',
+							'enum'        => array( 'head', 'body_start', 'body_end' ),
+							'description' => __( 'Where to inject: "head" = <head> tag, "body_start" = after <body>, "body_end" = before </body>. Default: head.', 'full-elementor-mcp' ),
+						),
+						'priority'      => array(
+							'type'        => 'integer',
+							'description' => __( 'Load order priority (1-10, lower = earlier). Default: 1.', 'full-elementor-mcp' ),
+						),
+						'status'        => array(
+							'type'        => 'string',
+							'enum'        => array( 'publish', 'draft' ),
+							'description' => __( 'Post status. "publish" = active immediately. "draft" = saved but not active. Default: publish.', 'full-elementor-mcp' ),
+						),
+						'ensure_jquery' => array(
+							'type'        => 'boolean',
+							'description' => __( 'If true, ensures jQuery is loaded before this snippet runs. Default: false.', 'full-elementor-mcp' ),
+						),
+					),
+					'required'   => array( 'title', 'code' ),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'snippet_id' => array( 'type' => 'integer' ),
+						'title'      => array( 'type' => 'string' ),
+						'location'   => array( 'type' => 'string' ),
+						'priority'   => array( 'type' => 'integer' ),
+						'status'     => array( 'type' => 'string' ),
+						'edit_url'   => array( 'type' => 'string' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => false,
+						'idempotent'  => false,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	/**
+	 * Executes the add-code-snippet ability.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param array $input The input parameters.
+	 * @return array|\WP_Error
+	 */
+	public function execute_add_code_snippet( $input ) {
+		$title         = sanitize_text_field( $input['title'] ?? '' );
+		$code          = $input['code'] ?? '';
+		$location_key  = sanitize_key( $input['location'] ?? 'head' );
+		$priority      = absint( $input['priority'] ?? 1 );
+		$status        = sanitize_key( $input['status'] ?? 'publish' );
+		$ensure_jquery = ! empty( $input['ensure_jquery'] );
+
+		if ( empty( $title ) || empty( $code ) ) {
+			return new \WP_Error( 'missing_params', __( 'title and code are required.', 'full-elementor-mcp' ) );
+		}
+
+		// Map user-friendly location names to Elementor's internal values.
+		$location_map = array(
+			'head'       => 'elementor_head',
+			'body_start' => 'elementor_body_start',
+			'body_end'   => 'elementor_body_end',
+		);
+
+		$elementor_location = $location_map[ $location_key ] ?? 'elementor_head';
+
+		// Clamp priority to 1-10.
+		$priority = max( 1, min( 10, $priority ) );
+
+		// Validate status.
+		if ( ! in_array( $status, array( 'publish', 'draft' ), true ) ) {
+			$status = 'publish';
+		}
+
+		// Create the elementor_snippet CPT post.
+		$post_id = wp_insert_post(
+			array(
+				'post_title'  => $title,
+				'post_type'   => 'elementor_snippet',
+				'post_status' => $status,
+			),
+			true
+		);
+
+		if ( is_wp_error( $post_id ) ) {
+			return $post_id;
+		}
+
+		// Set the custom code meta fields (matching Elementor Pro's Custom Code module).
+		update_post_meta( $post_id, '_elementor_location', $elementor_location );
+		update_post_meta( $post_id, '_elementor_priority', $priority );
+		update_post_meta( $post_id, '_elementor_code', $code );
+		update_post_meta( $post_id, '_elementor_template_type', 'code_snippet' );
+		update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+
+		// Set ensure_jquery extra option if requested. Elementor Pro reads
+		// this as an associative map (`['ensure_jquery' => 'yes']`), not a
+		// numerically-indexed list — the previous shape made the option
+		// silently inert.
+		if ( $ensure_jquery ) {
+			update_post_meta( $post_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+		}
+
+		$edit_url = admin_url( 'post.php?post=' . $post_id . '&action=edit' );
+
+		return array(
+			'snippet_id' => $post_id,
+			'title'      => $title,
+			'location'   => $location_key,
+			'priority'   => $priority,
+			'status'     => $status,
+			'edit_url'   => $edit_url,
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// list-code-snippets (Pro only)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Registers the list-code-snippets ability.
+	 *
+	 * @since 1.3.0
+	 */
+	private function register_list_code_snippets(): void {
+		$this->ability_names[] = 'full-elementor-mcp/list-code-snippets';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/list-code-snippets',
+			array(
+				'label'               => __( 'List Code Snippets', 'full-elementor-mcp' ),
+				'description'         => __( 'Lists all existing Elementor Pro Custom Code snippets with their titles, locations, priorities, and statuses. Requires Elementor Pro.', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_list_code_snippets' ),
+				'permission_callback' => array( $this, 'check_manage_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'location' => array(
+							'type'        => 'string',
+							'enum'        => array( 'head', 'body_start', 'body_end' ),
+							'description' => __( 'Optional filter by location.', 'full-elementor-mcp' ),
+						),
+						'status'   => array(
+							'type'        => 'string',
+							'enum'        => array( 'publish', 'draft', 'any' ),
+							'description' => __( 'Filter by post status. Default: any.', 'full-elementor-mcp' ),
+						),
+					),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'snippets' => array(
+							'type'  => 'array',
+							'items' => array(
+								'type'       => 'object',
+								'properties' => array(
+									'id'       => array( 'type' => 'integer' ),
+									'title'    => array( 'type' => 'string' ),
+									'location' => array( 'type' => 'string' ),
+									'priority' => array( 'type' => 'integer' ),
+									'status'   => array( 'type' => 'string' ),
+									'code'     => array( 'type' => 'string' ),
+									'edit_url' => array( 'type' => 'string' ),
+								),
+							),
+						),
+						'count'    => array( 'type' => 'integer' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => true,
+						'destructive' => false,
+						'idempotent'  => true,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	/**
+	 * Executes the list-code-snippets ability.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param array $input The input parameters.
+	 * @return array|\WP_Error
+	 */
+	public function execute_list_code_snippets( $input ) {
+		$location_filter = sanitize_key( $input['location'] ?? '' );
+		$status_filter   = sanitize_key( $input['status'] ?? 'any' );
+
+		$location_map = array(
+			'head'       => 'elementor_head',
+			'body_start' => 'elementor_body_start',
+			'body_end'   => 'elementor_body_end',
+		);
+
+		$location_labels = array(
+			'elementor_head'       => 'head',
+			'elementor_body_start' => 'body_start',
+			'elementor_body_end'   => 'body_end',
+		);
+
+		$query_args = array(
+			'post_type'      => 'elementor_snippet',
+			'posts_per_page' => 100,
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+		);
+
+		if ( 'any' !== $status_filter && ! empty( $status_filter ) ) {
+			$query_args['post_status'] = $status_filter;
+		} else {
+			$query_args['post_status'] = array( 'publish', 'draft' );
+		}
+
+		if ( ! empty( $location_filter ) && isset( $location_map[ $location_filter ] ) ) {
+			$query_args['meta_query'] = array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query
+				array(
+					'key'   => '_elementor_location',
+					'value' => $location_map[ $location_filter ],
+				),
+			);
+		}
+
+		$posts    = get_posts( $query_args );
+		$snippets = array();
+
+		foreach ( $posts as $post ) {
+			$raw_location = get_post_meta( $post->ID, '_elementor_location', true );
+			$priority     = absint( get_post_meta( $post->ID, '_elementor_priority', true ) );
+			$code         = get_post_meta( $post->ID, '_elementor_code', true );
+
+			$snippets[] = array(
+				'id'       => $post->ID,
+				'title'    => $post->post_title,
+				'location' => $location_labels[ $raw_location ] ?? $raw_location,
+				'priority' => $priority ? $priority : 1,
+				'status'   => $post->post_status,
+				'code'     => $code ? $code : '',
+				'edit_url' => admin_url( 'post.php?post=' . $post->ID . '&action=edit' ),
+			);
+		}
+
+		return array(
+			'snippets' => $snippets,
+			'count'    => count( $snippets ),
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// update-code-snippet (Pro)
+	// -------------------------------------------------------------------------
+
+	private function register_update_code_snippet(): void {
+		$this->ability_names[] = 'full-elementor-mcp/update-code-snippet';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/update-code-snippet',
+			array(
+				'label'               => __( 'Update Code Snippet', 'full-elementor-mcp' ),
+				'description'         => __( 'Updates an existing Elementor Pro Custom Code snippet. Only the fields you provide are touched (title, code, location, priority, status, ensure_jquery). Refuses to operate on non-snippet posts.', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_update_code_snippet' ),
+				'permission_callback' => array( $this, 'check_snippet_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'snippet_id'    => array( 'type' => 'integer' ),
+						'title'         => array( 'type' => 'string' ),
+						'code'          => array( 'type' => 'string' ),
+						'location'      => array(
+							'type' => 'string',
+							'enum' => array( 'head', 'body_start', 'body_end' ),
+						),
+						'priority'      => array( 'type' => 'integer' ),
+						'status'        => array(
+							'type' => 'string',
+							'enum' => array( 'publish', 'draft' ),
+						),
+						'ensure_jquery' => array( 'type' => 'boolean' ),
+					),
+					'required'   => array( 'snippet_id' ),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'success' => array( 'type' => 'boolean' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => false,
+						'idempotent'  => true,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	public function execute_update_code_snippet( $input ) {
+		$snippet_id = absint( $input['snippet_id'] ?? 0 );
+		if ( ! $snippet_id ) {
+			return new \WP_Error( 'missing_snippet_id', __( 'snippet_id is required.', 'full-elementor-mcp' ) );
+		}
+
+		$post = get_post( $snippet_id );
+		if ( ! $post || 'elementor_snippet' !== $post->post_type ) {
+			return new \WP_Error( 'not_a_snippet', __( 'The given post is not an Elementor code snippet.', 'full-elementor-mcp' ) );
+		}
+
+		$post_update = array( 'ID' => $snippet_id );
+		if ( array_key_exists( 'title', $input ) ) {
+			$post_update['post_title'] = sanitize_text_field( $input['title'] );
+		}
+		if ( array_key_exists( 'status', $input ) ) {
+			$post_update['post_status'] = sanitize_key( $input['status'] );
+		}
+		if ( count( $post_update ) > 1 ) {
+			$res = wp_update_post( $post_update, true );
+			if ( is_wp_error( $res ) ) {
+				return $res;
+			}
+		}
+
+		if ( array_key_exists( 'code', $input ) ) {
+			update_post_meta( $snippet_id, '_elementor_code', (string) $input['code'] );
+		}
+
+		if ( array_key_exists( 'location', $input ) ) {
+			$location_map = array(
+				'head'       => 'elementor_head',
+				'body_start' => 'elementor_body_start',
+				'body_end'   => 'elementor_body_end',
+			);
+			$location_key = sanitize_key( $input['location'] );
+			if ( isset( $location_map[ $location_key ] ) ) {
+				update_post_meta( $snippet_id, '_elementor_location', $location_map[ $location_key ] );
+			}
+		}
+
+		if ( array_key_exists( 'priority', $input ) ) {
+			update_post_meta( $snippet_id, '_elementor_priority', max( 1, (int) $input['priority'] ) );
+		}
+
+		if ( array_key_exists( 'ensure_jquery', $input ) ) {
+			if ( ! empty( $input['ensure_jquery'] ) ) {
+				update_post_meta( $snippet_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+			} else {
+				delete_post_meta( $snippet_id, '_elementor_extra_options' );
+			}
+		}
+
+		return array( 'success' => true );
+	}
+
+	// -------------------------------------------------------------------------
+	// delete-code-snippet (Pro)
+	// -------------------------------------------------------------------------
+
+	private function register_delete_code_snippet(): void {
+		$this->ability_names[] = 'full-elementor-mcp/delete-code-snippet';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/delete-code-snippet',
+			array(
+				'label'               => __( 'Delete Code Snippet', 'full-elementor-mcp' ),
+				'description'         => __( 'Deletes an Elementor Pro Custom Code snippet. Defaults to Trash; pass force=true to delete permanently.', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_delete_code_snippet' ),
+				'permission_callback' => array( $this, 'check_snippet_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'snippet_id' => array( 'type' => 'integer' ),
+						'force'      => array( 'type' => 'boolean' ),
+					),
+					'required'   => array( 'snippet_id' ),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'success' => array( 'type' => 'boolean' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => true,
+						'idempotent'  => false,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	public function execute_delete_code_snippet( $input ) {
+		$snippet_id = absint( $input['snippet_id'] ?? 0 );
+		$force      = ! empty( $input['force'] );
+
+		if ( ! $snippet_id ) {
+			return new \WP_Error( 'missing_snippet_id', __( 'snippet_id is required.', 'full-elementor-mcp' ) );
+		}
+
+		$post = get_post( $snippet_id );
+		if ( ! $post || 'elementor_snippet' !== $post->post_type ) {
+			return new \WP_Error( 'not_a_snippet', __( 'The given post is not an Elementor code snippet.', 'full-elementor-mcp' ) );
+		}
+
+		$result = wp_delete_post( $snippet_id, $force );
+		if ( false === $result || null === $result ) {
+			return new \WP_Error( 'delete_failed', __( 'Failed to delete the snippet.', 'full-elementor-mcp' ) );
+		}
+
+		return array( 'success' => true );
+	}
+
+	// -------------------------------------------------------------------------
+	// toggle-code-snippet-status (Pro)
+	// -------------------------------------------------------------------------
+
+	private function register_toggle_code_snippet_status(): void {
+		$this->ability_names[] = 'full-elementor-mcp/toggle-code-snippet-status';
+
+		full_elementor_mcp_register_ability(
+			'full-elementor-mcp/toggle-code-snippet-status',
+			array(
+				'label'               => __( 'Toggle Code Snippet Status', 'full-elementor-mcp' ),
+				'description'         => __( 'Flips a snippet between publish (active) and draft (inactive). Provides a quick way to disable a misbehaving snippet without deleting it.', 'full-elementor-mcp' ),
+				'category'            => 'full-elementor-mcp',
+				'execute_callback'    => array( $this, 'execute_toggle_code_snippet_status' ),
+				'permission_callback' => array( $this, 'check_snippet_permission' ),
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'snippet_id' => array( 'type' => 'integer' ),
+					),
+					'required'   => array( 'snippet_id' ),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'success' => array( 'type' => 'boolean' ),
+						'status'  => array( 'type' => 'string' ),
+					),
+				),
+				'meta'                => array(
+					'annotations'  => array(
+						'readonly'    => false,
+						'destructive' => false,
+						'idempotent'  => false,
+					),
+					'show_in_rest' => true,
+				),
+			)
+		);
+	}
+
+	public function execute_toggle_code_snippet_status( $input ) {
+		$snippet_id = absint( $input['snippet_id'] ?? 0 );
+		if ( ! $snippet_id ) {
+			return new \WP_Error( 'missing_snippet_id', __( 'snippet_id is required.', 'full-elementor-mcp' ) );
+		}
+
+		$post = get_post( $snippet_id );
+		if ( ! $post || 'elementor_snippet' !== $post->post_type ) {
+			return new \WP_Error( 'not_a_snippet', __( 'The given post is not an Elementor code snippet.', 'full-elementor-mcp' ) );
+		}
+
+		$new_status = ( 'publish' === $post->post_status ) ? 'draft' : 'publish';
+
+		$res = wp_update_post(
+			array(
+				'ID'          => $snippet_id,
+				'post_status' => $new_status,
+			),
+			true
+		);
+		if ( is_wp_error( $res ) ) {
+			return $res;
+		}
+
+		return array( 'success' => true, 'status' => $new_status );
+	}
+}
