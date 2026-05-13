@@ -18,22 +18,22 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.5.0
  */
-class Full_Full_Elementor_MCP_Atomic_Layout_Abilities {
+class Full_Elementor_MCP_Atomic_Layout_Abilities {
 
-	/** @var Full_Full_Elementor_MCP_Data */
+	/** @var Full_Elementor_MCP_Data */
 	private $data;
 
-	/** @var Full_Full_Elementor_MCP_Element_Factory */
+	/** @var Full_Elementor_MCP_Element_Factory */
 	private $factory;
 
 	/** @var string[] */
 	private $ability_names = array();
 
 	/**
-	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 * @param Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory $factory The element factory.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Element_Factory $factory ) {
 		$this->data    = $data;
 		$this->factory = $factory;
 	}
@@ -49,7 +49,7 @@ class Full_Full_Elementor_MCP_Atomic_Layout_Abilities {
 	 * Skips registration if Elementor < 4.0.
 	 */
 	public function register(): void {
-		if ( ! Full_Full_Elementor_MCP_Atomic_Props::is_atomic_supported() ) {
+		if ( ! Full_Elementor_MCP_Atomic_Props::is_atomic_supported() ) {
 			return;
 		}
 
@@ -138,10 +138,10 @@ class Full_Full_Elementor_MCP_Atomic_Layout_Abilities {
 		$settings = array();
 
 		if ( ! empty( $input['tag'] ) ) {
-			$settings['tag'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['tag'] ) );
+			$settings['tag'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['tag'] ) );
 		}
 		if ( ! empty( $input['css_id'] ) ) {
-			$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+			$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 		}
 
 		// Style props extracted from input.
@@ -243,10 +243,10 @@ class Full_Full_Elementor_MCP_Atomic_Layout_Abilities {
 		$settings = array();
 
 		if ( ! empty( $input['tag'] ) ) {
-			$settings['tag'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['tag'] ) );
+			$settings['tag'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['tag'] ) );
 		}
 		if ( ! empty( $input['css_id'] ) ) {
-			$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+			$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 		}
 
 		$style_params = array();
@@ -311,8 +311,8 @@ class Full_Full_Elementor_MCP_Atomic_Layout_Abilities {
 					return array(
 						'elementor_version'     => $core_version,
 						'elementor_pro_version' => $pro_version,
-						'supports_atomic'       => Full_Full_Elementor_MCP_Atomic_Props::is_atomic_supported(),
-						'recommended_mode'      => Full_Full_Elementor_MCP_Atomic_Props::is_atomic_supported() ? 'atomic' : 'legacy',
+						'supports_atomic'       => Full_Elementor_MCP_Atomic_Props::is_atomic_supported(),
+						'recommended_mode'      => Full_Elementor_MCP_Atomic_Props::is_atomic_supported() ? 'atomic' : 'legacy',
 					);
 				},
 				'permission_callback' => function () {

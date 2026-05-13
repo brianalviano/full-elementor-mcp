@@ -18,15 +18,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Layout_Abilities {
+class Full_Elementor_MCP_Layout_Abilities {
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 * @var Full_Elementor_MCP_Element_Factory
 	 */
 	private $factory;
 
@@ -35,10 +35,10 @@ class Full_Full_Elementor_MCP_Layout_Abilities {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 * @param Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory $factory The element factory.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Element_Factory $factory ) {
 		$this->data    = $data;
 		$this->factory = $factory;
 	}
@@ -597,7 +597,7 @@ class Full_Full_Elementor_MCP_Layout_Abilities {
 			return new \WP_Error( 'element_not_found', __( 'Container not found.', 'full-elementor-mcp' ) );
 		}
 
-		if ( 'container' !== ( $container['elType'] ?? '' ) && ! Full_Full_Elementor_MCP_Element_Factory::is_atomic_container_type( $container['elType'] ?? '' ) ) {
+		if ( 'container' !== ( $container['elType'] ?? '' ) && ! Full_Elementor_MCP_Element_Factory::is_atomic_container_type( $container['elType'] ?? '' ) ) {
 			return new \WP_Error( 'not_container', __( 'Element is not a container.', 'full-elementor-mcp' ) );
 		}
 
@@ -972,7 +972,7 @@ class Full_Full_Elementor_MCP_Layout_Abilities {
 
 		// Deep-clone and reassign all IDs. Reserve the existing tree's IDs
 		// first so the freshly generated ones cannot collide with siblings.
-		Full_Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $page_data ) );
+		Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $page_data ) );
 		$clone = $this->data->reassign_element_ids( $element );
 
 		// Find parent and insert after original.
@@ -1168,7 +1168,7 @@ class Full_Full_Elementor_MCP_Layout_Abilities {
 		}
 
 		$el_type = $element['elType'] ?? '';
-		if ( 'container' !== $el_type && ! Full_Full_Elementor_MCP_Element_Factory::is_atomic_container_type( $el_type ) ) {
+		if ( 'container' !== $el_type && ! Full_Elementor_MCP_Element_Factory::is_atomic_container_type( $el_type ) ) {
 			return new \WP_Error( 'not_container', __( 'Only containers can be unwrapped.', 'full-elementor-mcp' ) );
 		}
 
@@ -1292,7 +1292,7 @@ class Full_Full_Elementor_MCP_Layout_Abilities {
 		}
 
 		// Reassign IDs in the incoming subtree to prevent collisions.
-		Full_Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $page_data ) );
+		Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $page_data ) );
 		$replacement = $this->data->reassign_ids( array( $replacement ) );
 		$replacement = $this->data->normalize_tree_containers( $replacement );
 		$new_node    = $replacement[0];

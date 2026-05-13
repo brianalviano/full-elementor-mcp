@@ -15,4 +15,3 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 
 // Remove plugin options.
 delete_option( 'full_elementor_mcp_disabled_tools' );
-delete_option( 'full_elementor_mcp_openverse_api_key' );

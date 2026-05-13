@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Data {
+class Full_Elementor_MCP_Data {
 
 	/**
 	 * Gets the Elementor document for a post.
@@ -245,8 +245,8 @@ class Full_Full_Elementor_MCP_Data {
 		// Reset the per-request ID dedupe pool so subsequent calls reseed
 		// from the freshly-saved tree (avoids unbounded memory growth in
 		// long-running CLI/agents).
-		if ( method_exists( 'Full_Full_Elementor_MCP_Id_Generator', 'reserve' ) ) {
-			Full_Full_Elementor_MCP_Id_Generator::reserve( $this->collect_ids( $data ) );
+		if ( method_exists( 'Full_Elementor_MCP_Id_Generator', 'reserve' ) ) {
+			Full_Elementor_MCP_Id_Generator::reserve( $this->collect_ids( $data ) );
 		}
 
 		return true;
@@ -374,7 +374,7 @@ class Full_Full_Elementor_MCP_Data {
 	 */
 	public function reassign_ids( array $elements ): array {
 		foreach ( $elements as &$element ) {
-			$element['id'] = Full_Full_Elementor_MCP_Id_Generator::generate();
+			$element['id'] = Full_Elementor_MCP_Id_Generator::generate();
 
 			if ( ! empty( $element['elements'] ) && is_array( $element['elements'] ) ) {
 				$element['elements'] = $this->reassign_ids( $element['elements'] );
@@ -505,7 +505,7 @@ class Full_Full_Elementor_MCP_Data {
 	public function normalize_tree_containers( array $elements ): array {
 		foreach ( $elements as &$element ) {
 			if ( 'container' === ( $element['elType'] ?? '' ) && ! empty( $element['settings'] ) && is_array( $element['settings'] ) ) {
-				$element['settings'] = Full_Full_Elementor_MCP_Element_Factory::normalize_container_settings( $element['settings'] );
+				$element['settings'] = Full_Elementor_MCP_Element_Factory::normalize_container_settings( $element['settings'] );
 			}
 
 			if ( ! empty( $element['elements'] ) && is_array( $element['elements'] ) ) {
@@ -524,7 +524,7 @@ class Full_Full_Elementor_MCP_Data {
 	 * @return array The element with new IDs.
 	 */
 	public function reassign_element_ids( array $element ): array {
-		$element['id'] = Full_Full_Elementor_MCP_Id_Generator::generate();
+		$element['id'] = Full_Elementor_MCP_Id_Generator::generate();
 
 		if ( ! empty( $element['elements'] ) && is_array( $element['elements'] ) ) {
 			$element['elements'] = $this->reassign_ids( $element['elements'] );
@@ -578,7 +578,7 @@ class Full_Full_Elementor_MCP_Data {
 				// keys before merging. Without this, the values are saved
 				// but never read by Elementor's CSS generator (issue #32).
 				if ( 'container' === ( $item['elType'] ?? '' ) ) {
-					$settings = Full_Full_Elementor_MCP_Element_Factory::normalize_container_settings( $settings );
+					$settings = Full_Elementor_MCP_Element_Factory::normalize_container_settings( $settings );
 				}
 
 				$item['settings'] = array_merge( $item['settings'], $settings );

@@ -12,7 +12,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-/** @var Full_Full_Elementor_MCP_Admin $this */
+/** @var Full_Elementor_MCP_Admin $this */
 $full_elementor_mcp_endpoint      = rest_url( 'mcp/full-elementor-mcp-server' );
 $full_elementor_mcp_enabled_count = $this->get_enabled_tool_count();
 $full_elementor_mcp_total_count   = $this->get_total_tool_count();
@@ -154,7 +154,7 @@ $full_elementor_mcp_has_adapter   = class_exists( '\WP\MCP\Core\McpAdapter' );
 
 			<p class="description">
 				<strong><?php esc_html_e( 'Note:', 'full-elementor-mcp' ); ?></strong>
-				<?php esc_html_e( 'Replace the proxy path with the absolute path to bin/mcp-proxy.mjs in your plugin installation directory.', 'full-elementor-mcp' ); ?>
+				<?php esc_html_e( 'Replace the proxy path with the absolute path to bin/full-elementor-mcp-proxy.mjs in your plugin installation directory.', 'full-elementor-mcp' ); ?>
 			</p>
 
 		</div>

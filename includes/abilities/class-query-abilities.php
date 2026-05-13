@@ -18,19 +18,19 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Query_Abilities {
+class Full_Elementor_MCP_Query_Abilities {
 
 	/**
 	 * The data access layer.
 	 *
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
 	 * The schema generator.
 	 *
-	 * @var Full_Full_Elementor_MCP_Schema_Generator
+	 * @var Full_Elementor_MCP_Schema_Generator
 	 */
 	private $schema_generator;
 
@@ -39,10 +39,10 @@ class Full_Full_Elementor_MCP_Query_Abilities {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data             $data             The data access layer.
-	 * @param Full_Full_Elementor_MCP_Schema_Generator $schema_generator The schema generator.
+	 * @param Full_Elementor_MCP_Data             $data             The data access layer.
+	 * @param Full_Elementor_MCP_Schema_Generator $schema_generator The schema generator.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Schema_Generator $schema_generator ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Schema_Generator $schema_generator ) {
 		$this->data             = $data;
 		$this->schema_generator = $schema_generator;
 	}

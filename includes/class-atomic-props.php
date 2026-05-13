@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.5.0
  */
-class Full_Full_Elementor_MCP_Atomic_Props {
+class Full_Elementor_MCP_Atomic_Props {
 
 	/**
 	 * Wraps a plain string into a typed prop.

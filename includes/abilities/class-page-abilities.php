@@ -18,15 +18,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Page_Abilities {
+class Full_Elementor_MCP_Page_Abilities {
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 * @var Full_Elementor_MCP_Element_Factory
 	 */
 	private $factory;
 
@@ -35,10 +35,10 @@ class Full_Full_Elementor_MCP_Page_Abilities {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 * @param Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory $factory The element factory.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Element_Factory $factory ) {
 		$this->data    = $data;
 		$this->factory = $factory;
 	}
@@ -469,7 +469,7 @@ class Full_Full_Elementor_MCP_Page_Abilities {
 		// Reserve existing IDs so the freshly-generated ones don't collide
 		// with anything already on the page, then assign new IDs and
 		// normalize legacy container flex shorthand keys.
-		Full_Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $data ) );
+		Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $data ) );
 		$template_json = $this->data->reassign_ids( $template_json );
 		$template_json = $this->data->normalize_tree_containers( $template_json );
 		$count         = $this->data->count_elements( $template_json );
@@ -716,7 +716,7 @@ class Full_Full_Elementor_MCP_Page_Abilities {
 			// Reserve the source IDs before reassigning so the freshly generated
 			// duplicate IDs cannot collide with the source page's IDs (which
 			// matter when the same request later touches the source).
-			Full_Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $source_data ) );
+			Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $source_data ) );
 			$duplicate_data = $this->data->reassign_ids( $source_data );
 			$save           = $this->data->save_page_data( $new_id, $duplicate_data );
 			if ( is_wp_error( $save ) ) {

@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Control_Mapper {
+class Full_Elementor_MCP_Control_Mapper {
 
 	/**
 	 * Control types that are structural/UI-only and should be skipped.

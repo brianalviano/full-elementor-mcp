@@ -19,25 +19,25 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Widget_Abilities {
+class Full_Elementor_MCP_Widget_Abilities {
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 * @var Full_Elementor_MCP_Element_Factory
 	 */
 	private $factory;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Schema_Generator
+	 * @var Full_Elementor_MCP_Schema_Generator
 	 */
 	private $schema_generator;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Settings_Validator
+	 * @var Full_Elementor_MCP_Settings_Validator
 	 */
 	private $validator;
 
@@ -53,16 +53,16 @@ class Full_Full_Elementor_MCP_Widget_Abilities {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data               $data             The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory    $factory          The element factory.
-	 * @param Full_Full_Elementor_MCP_Schema_Generator   $schema_generator The schema generator.
-	 * @param Full_Full_Elementor_MCP_Settings_Validator $validator        The settings validator.
+	 * @param Full_Elementor_MCP_Data               $data             The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory    $factory          The element factory.
+	 * @param Full_Elementor_MCP_Schema_Generator   $schema_generator The schema generator.
+	 * @param Full_Elementor_MCP_Settings_Validator $validator        The settings validator.
 	 */
 	public function __construct(
-		Full_Full_Elementor_MCP_Data $data,
-		Full_Full_Elementor_MCP_Element_Factory $factory,
-		Full_Full_Elementor_MCP_Schema_Generator $schema_generator,
-		Full_Full_Elementor_MCP_Settings_Validator $validator
+		Full_Elementor_MCP_Data $data,
+		Full_Elementor_MCP_Element_Factory $factory,
+		Full_Elementor_MCP_Schema_Generator $schema_generator,
+		Full_Elementor_MCP_Settings_Validator $validator
 	) {
 		$this->data             = $data;
 		$this->factory          = $factory;

@@ -18,20 +18,20 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.1.0
  */
-class Full_Full_Elementor_MCP_Stock_Image_Abilities {
+class Full_Elementor_MCP_Stock_Image_Abilities {
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 * @var Full_Elementor_MCP_Element_Factory
 	 */
 	private $factory;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Openverse_Client
+	 * @var Full_Elementor_MCP_Openverse_Client
 	 */
 	private $openverse;
 
@@ -40,13 +40,13 @@ class Full_Full_Elementor_MCP_Stock_Image_Abilities {
 	 *
 	 * @since 1.1.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 * @param Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory $factory The element factory.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Element_Factory $factory ) {
 		$this->data      = $data;
 		$this->factory   = $factory;
-		$this->openverse = new Full_Full_Elementor_MCP_Openverse_Client();
+		$this->openverse = new Full_Elementor_MCP_Openverse_Client();
 	}
 
 	/**

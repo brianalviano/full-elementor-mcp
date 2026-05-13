@@ -17,15 +17,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Template_Abilities {
+class Full_Elementor_MCP_Template_Abilities {
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 * @var Full_Elementor_MCP_Element_Factory
 	 */
 	private $factory;
 
@@ -34,10 +34,10 @@ class Full_Full_Elementor_MCP_Template_Abilities {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 * @param Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory $factory The element factory.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Element_Factory $factory ) {
 		$this->data    = $data;
 		$this->factory = $factory;
 	}
@@ -331,7 +331,7 @@ class Full_Full_Elementor_MCP_Template_Abilities {
 
 		// Reserve existing IDs to prevent collisions, reassign new IDs,
 		// and normalize legacy container flex shorthand keys.
-		Full_Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $page_data ) );
+		Full_Elementor_MCP_Id_Generator::reserve( $this->data->collect_ids( $page_data ) );
 		$template_data = $this->data->reassign_ids( $template_data );
 		$template_data = $this->data->normalize_tree_containers( $template_data );
 		$count         = $this->data->count_elements( $template_data );

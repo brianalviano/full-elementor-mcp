@@ -3,7 +3,7 @@
  * Plugin Name:       Full Elementor MCP
  * Plugin URI:        https://github.com/msrbuilds/full-elementor-mcp
  * Description:       Extends the WordPress MCP Adapter to expose Elementor data, widgets, and page design tools as MCP tools for AI agents.
- * Version:           1.6.0
+ * Version:           1.6.1
  * Requires at least: 6.9
  * Tested up to:      6.9
  * Requires PHP:      8.0
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Plugin constants.
-define( 'FULL_ELEMENTOR_MCP_VERSION', '1.6.0' );
+define( 'FULL_ELEMENTOR_MCP_VERSION', '1.6.1' );
 define( 'FULL_ELEMENTOR_MCP_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_URL', plugin_dir_url( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_BASENAME', plugin_basename( __FILE__ ) );
@@ -197,6 +197,6 @@ function full_elementor_mcp_init(): void {
 	}
 
 	// Boot the plugin.
-	Full_Full_Elementor_MCP_Plugin::instance();
+	Full_Elementor_MCP_Plugin::instance();
 }
 add_action( 'plugins_loaded', 'full_elementor_mcp_init', 20 );

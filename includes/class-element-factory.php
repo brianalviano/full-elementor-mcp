@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Element_Factory {
+class Full_Elementor_MCP_Element_Factory {
 
 	/**
 	 * Creates a container element.
@@ -49,7 +49,7 @@ class Full_Full_Elementor_MCP_Element_Factory {
 		}
 
 		return array(
-			'id'         => Full_Full_Elementor_MCP_Id_Generator::generate(),
+			'id'         => Full_Elementor_MCP_Id_Generator::generate(),
 			'elType'     => 'container',
 			'widgetType' => null,
 			'isInner'    => false,
@@ -79,7 +79,7 @@ class Full_Full_Elementor_MCP_Element_Factory {
 		}
 
 		return array(
-			'id'         => Full_Full_Elementor_MCP_Id_Generator::generate(),
+			'id'         => Full_Elementor_MCP_Id_Generator::generate(),
 			'elType'     => 'widget',
 			'widgetType' => $widget_type,
 			'isInner'    => false,
@@ -124,7 +124,7 @@ class Full_Full_Elementor_MCP_Element_Factory {
 	 */
 	public function create_section( array $settings = array(), array $columns = array() ): array {
 		return array(
-			'id'         => Full_Full_Elementor_MCP_Id_Generator::generate(),
+			'id'         => Full_Elementor_MCP_Id_Generator::generate(),
 			'elType'     => 'section',
 			'widgetType' => null,
 			'isInner'    => false,
@@ -148,7 +148,7 @@ class Full_Full_Elementor_MCP_Element_Factory {
 		);
 
 		return array(
-			'id'         => Full_Full_Elementor_MCP_Id_Generator::generate(),
+			'id'         => Full_Elementor_MCP_Id_Generator::generate(),
 			'elType'     => 'column',
 			'widgetType' => null,
 			'isInner'    => false,
@@ -222,11 +222,11 @@ class Full_Full_Elementor_MCP_Element_Factory {
 	 */
 	public function create_atomic_widget( string $widget_type, array $settings = array() ): array {
 		if ( ! isset( $settings['classes'] ) ) {
-			$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+			$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 		}
 
 		return array(
-			'id'              => Full_Full_Elementor_MCP_Id_Generator::generate(),
+			'id'              => Full_Elementor_MCP_Id_Generator::generate(),
 			'elType'          => 'widget',
 			'widgetType'      => $widget_type,
 			'isInner'         => false,
@@ -250,13 +250,13 @@ class Full_Full_Elementor_MCP_Element_Factory {
 	 * @return array The flexbox element structure.
 	 */
 	public function create_flexbox( array $settings = array(), array $children = array(), array $style_props = array() ): array {
-		$id = Full_Full_Elementor_MCP_Id_Generator::generate();
+		$id = Full_Elementor_MCP_Id_Generator::generate();
 
 		if ( ! isset( $settings['tag'] ) ) {
-			$settings['tag'] = Full_Full_Elementor_MCP_Atomic_Props::string( 'div' );
+			$settings['tag'] = Full_Elementor_MCP_Atomic_Props::string( 'div' );
 		}
 		if ( ! isset( $settings['classes'] ) ) {
-			$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+			$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 		}
 
 		$element = array(
@@ -272,13 +272,13 @@ class Full_Full_Elementor_MCP_Element_Factory {
 		);
 
 		// Build and apply flex layout styles if provided.
-		$flex_css = Full_Full_Elementor_MCP_Atomic_Styles::build_flex_props( $style_props );
-		$common_css = Full_Full_Elementor_MCP_Atomic_Styles::build_common_props( $style_props );
+		$flex_css = Full_Elementor_MCP_Atomic_Styles::build_flex_props( $style_props );
+		$common_css = Full_Elementor_MCP_Atomic_Styles::build_common_props( $style_props );
 		$all_css = array_merge( $flex_css, $common_css );
 
 		if ( ! empty( $all_css ) ) {
-			$style = Full_Full_Elementor_MCP_Atomic_Styles::create_local_class( $id, $all_css );
-			Full_Full_Elementor_MCP_Atomic_Styles::apply_to_element( $element, $style['class_id'], $style['style_def'] );
+			$style = Full_Elementor_MCP_Atomic_Styles::create_local_class( $id, $all_css );
+			Full_Elementor_MCP_Atomic_Styles::apply_to_element( $element, $style['class_id'], $style['style_def'] );
 		}
 
 		return $element;
@@ -295,13 +295,13 @@ class Full_Full_Elementor_MCP_Element_Factory {
 	 * @return array The div-block element structure.
 	 */
 	public function create_div_block( array $settings = array(), array $children = array(), array $style_props = array() ): array {
-		$id = Full_Full_Elementor_MCP_Id_Generator::generate();
+		$id = Full_Elementor_MCP_Id_Generator::generate();
 
 		if ( ! isset( $settings['tag'] ) ) {
-			$settings['tag'] = Full_Full_Elementor_MCP_Atomic_Props::string( 'div' );
+			$settings['tag'] = Full_Elementor_MCP_Atomic_Props::string( 'div' );
 		}
 		if ( ! isset( $settings['classes'] ) ) {
-			$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+			$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 		}
 
 		$element = array(
@@ -316,11 +316,11 @@ class Full_Full_Elementor_MCP_Element_Factory {
 			'version'         => defined( 'ELEMENTOR_VERSION' ) ? ELEMENTOR_VERSION : '',
 		);
 
-		$common_css = Full_Full_Elementor_MCP_Atomic_Styles::build_common_props( $style_props );
+		$common_css = Full_Elementor_MCP_Atomic_Styles::build_common_props( $style_props );
 
 		if ( ! empty( $common_css ) ) {
-			$style = Full_Full_Elementor_MCP_Atomic_Styles::create_local_class( $id, $common_css );
-			Full_Full_Elementor_MCP_Atomic_Styles::apply_to_element( $element, $style['class_id'], $style['style_def'] );
+			$style = Full_Elementor_MCP_Atomic_Styles::create_local_class( $id, $common_css );
+			Full_Elementor_MCP_Atomic_Styles::apply_to_element( $element, $style['class_id'], $style['style_def'] );
 		}
 
 		return $element;

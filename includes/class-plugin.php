@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Plugin {
+class Full_Elementor_MCP_Plugin {
 
 	/**
 	 * Singleton instance.
@@ -30,35 +30,35 @@ class Full_Full_Elementor_MCP_Plugin {
 	/**
 	 * The data access layer.
 	 *
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
 	/**
 	 * The element factory.
 	 *
-	 * @var Full_Full_Elementor_MCP_Element_Factory
+	 * @var Full_Elementor_MCP_Element_Factory
 	 */
 	private $factory;
 
 	/**
 	 * The schema generator.
 	 *
-	 * @var Full_Full_Elementor_MCP_Schema_Generator
+	 * @var Full_Elementor_MCP_Schema_Generator
 	 */
 	private $schema_generator;
 
 	/**
 	 * The ability registrar.
 	 *
-	 * @var Full_Full_Elementor_MCP_Ability_Registrar
+	 * @var Full_Elementor_MCP_Ability_Registrar
 	 */
 	private $registrar;
 
 	/**
 	 * The admin settings page handler.
 	 *
-	 * @var Full_Full_Elementor_MCP_Admin|null
+	 * @var Full_Elementor_MCP_Admin|null
 	 */
 	private $admin = null;
 
@@ -99,15 +99,15 @@ class Full_Full_Elementor_MCP_Plugin {
 	 */
 	private function init(): void {
 		// Instantiate core components.
-		$this->data             = new Full_Full_Elementor_MCP_Data();
-		$this->factory          = new Full_Full_Elementor_MCP_Element_Factory();
-		$this->schema_generator = new Full_Full_Elementor_MCP_Schema_Generator();
-		$validator              = new Full_Full_Elementor_MCP_Settings_Validator( $this->schema_generator );
-		$this->registrar        = new Full_Full_Elementor_MCP_Ability_Registrar( $this->data, $this->factory, $this->schema_generator, $validator );
+		$this->data             = new Full_Elementor_MCP_Data();
+		$this->factory          = new Full_Elementor_MCP_Element_Factory();
+		$this->schema_generator = new Full_Elementor_MCP_Schema_Generator();
+		$validator              = new Full_Elementor_MCP_Settings_Validator( $this->schema_generator );
+		$this->registrar        = new Full_Elementor_MCP_Ability_Registrar( $this->data, $this->factory, $this->schema_generator, $validator );
 
 		// Admin settings page.
-		if ( is_admin() && class_exists( 'Full_Full_Elementor_MCP_Admin' ) ) {
-			$this->admin = new Full_Full_Elementor_MCP_Admin();
+		if ( is_admin() && class_exists( 'Full_Elementor_MCP_Admin' ) ) {
+			$this->admin = new Full_Elementor_MCP_Admin();
 			$this->admin->init();
 		}
 
@@ -164,7 +164,7 @@ class Full_Full_Elementor_MCP_Plugin {
 			return;
 		}
 
-		// Optional STDIO transport (used by the bundled `bin/mcp-proxy.mjs`
+		// Optional STDIO transport (used by the bundled `bin/full-elementor-mcp-proxy.mjs`
 		// for desktop AI clients like Claude Desktop). Only register the
 		// class when the MCP Adapter ships it — older versions only had
 		// HttpTransport.
@@ -195,9 +195,9 @@ class Full_Full_Elementor_MCP_Plugin {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @return Full_Full_Elementor_MCP_Data
+	 * @return Full_Elementor_MCP_Data
 	 */
-	public function get_data(): Full_Full_Elementor_MCP_Data {
+	public function get_data(): Full_Elementor_MCP_Data {
 		return $this->data;
 	}
 
@@ -206,9 +206,9 @@ class Full_Full_Elementor_MCP_Plugin {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @return Full_Full_Elementor_MCP_Element_Factory
+	 * @return Full_Elementor_MCP_Element_Factory
 	 */
-	public function get_factory(): Full_Full_Elementor_MCP_Element_Factory {
+	public function get_factory(): Full_Elementor_MCP_Element_Factory {
 		return $this->factory;
 	}
 
@@ -217,9 +217,9 @@ class Full_Full_Elementor_MCP_Plugin {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @return Full_Full_Elementor_MCP_Schema_Generator
+	 * @return Full_Elementor_MCP_Schema_Generator
 	 */
-	public function get_schema_generator(): Full_Full_Elementor_MCP_Schema_Generator {
+	public function get_schema_generator(): Full_Elementor_MCP_Schema_Generator {
 		return $this->schema_generator;
 	}
 

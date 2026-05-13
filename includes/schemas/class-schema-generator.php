@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Schema_Generator {
+class Full_Elementor_MCP_Schema_Generator {
 
 	/**
 	 * Generates a JSON Schema for a widget type's settings.
@@ -47,11 +47,11 @@ class Full_Full_Elementor_MCP_Schema_Generator {
 			foreach ( $controls as $control_id => $control ) {
 				$control_type = $control['type'] ?? '';
 
-				if ( Full_Full_Elementor_MCP_Control_Mapper::should_skip( $control_type ) ) {
+				if ( Full_Elementor_MCP_Control_Mapper::should_skip( $control_type ) ) {
 					continue;
 				}
 
-				$schema_fragment = Full_Full_Elementor_MCP_Control_Mapper::map( $control );
+				$schema_fragment = Full_Elementor_MCP_Control_Mapper::map( $control );
 				if ( ! empty( $schema_fragment ) ) {
 					$properties[ $control_id ] = $schema_fragment;
 				}

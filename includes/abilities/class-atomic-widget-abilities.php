@@ -19,22 +19,22 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.5.0
  */
-class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
+class Full_Elementor_MCP_Atomic_Widget_Abilities {
 
-	/** @var Full_Full_Elementor_MCP_Data */
+	/** @var Full_Elementor_MCP_Data */
 	private $data;
 
-	/** @var Full_Full_Elementor_MCP_Element_Factory */
+	/** @var Full_Elementor_MCP_Element_Factory */
 	private $factory;
 
 	/** @var string[] */
 	private $ability_names = array();
 
 	/**
-	 * @param Full_Full_Elementor_MCP_Data            $data    The data access layer.
-	 * @param Full_Full_Elementor_MCP_Element_Factory $factory The element factory.
+	 * @param Full_Elementor_MCP_Data            $data    The data access layer.
+	 * @param Full_Elementor_MCP_Element_Factory $factory The element factory.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data, Full_Full_Elementor_MCP_Element_Factory $factory ) {
+	public function __construct( Full_Elementor_MCP_Data $data, Full_Elementor_MCP_Element_Factory $factory ) {
 		$this->data    = $data;
 		$this->factory = $factory;
 	}
@@ -50,7 +50,7 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 	 * Skips registration entirely if Elementor < 4.0.
 	 */
 	public function register(): void {
-		if ( ! Full_Full_Elementor_MCP_Atomic_Props::is_atomic_supported() ) {
+		if ( ! Full_Elementor_MCP_Atomic_Props::is_atomic_supported() ) {
 			return;
 		}
 
@@ -269,10 +269,10 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 					$element  = $this->factory->create_atomic_widget( $widget_type, $settings );
 
 					// Apply styles if style params are present.
-					$common_css = Full_Full_Elementor_MCP_Atomic_Styles::build_common_props( $input );
+					$common_css = Full_Elementor_MCP_Atomic_Styles::build_common_props( $input );
 					if ( ! empty( $common_css ) ) {
-						$style = Full_Full_Elementor_MCP_Atomic_Styles::create_local_class( $element['id'], $common_css );
-						Full_Full_Elementor_MCP_Atomic_Styles::apply_to_element( $element, $style['class_id'], $style['style_def'] );
+						$style = Full_Elementor_MCP_Atomic_Styles::create_local_class( $element['id'], $common_css );
+						Full_Elementor_MCP_Atomic_Styles::apply_to_element( $element, $style['class_id'], $style['style_def'] );
 					}
 
 					$post_id   = absint( $input['post_id'] ?? 0 );
@@ -332,17 +332,17 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 			'e-heading',
 			function ( $input ) {
 				$settings = array();
-				$settings['title'] = Full_Full_Elementor_MCP_Atomic_Props::html( sanitize_text_field( $input['title'] ?? 'Heading' ) );
-				$settings['tag']   = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['tag'] ?? 'h2' ) );
+				$settings['title'] = Full_Elementor_MCP_Atomic_Props::html( sanitize_text_field( $input['title'] ?? 'Heading' ) );
+				$settings['tag']   = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['tag'] ?? 'h2' ) );
 
 				if ( ! empty( $input['link'] ) ) {
-					$settings['link'] = Full_Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ) );
+					$settings['link'] = Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ) );
 				}
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -362,16 +362,16 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 			'e-paragraph',
 			function ( $input ) {
 				$settings = array();
-				$settings['text'] = Full_Full_Elementor_MCP_Atomic_Props::html( sanitize_text_field( $input['content'] ?? 'Paragraph text' ) );
+				$settings['text'] = Full_Elementor_MCP_Atomic_Props::html( sanitize_text_field( $input['content'] ?? 'Paragraph text' ) );
 
 				if ( ! empty( $input['link'] ) ) {
-					$settings['link'] = Full_Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ) );
+					$settings['link'] = Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ) );
 				}
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -392,17 +392,17 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 			'e-button',
 			function ( $input ) {
 				$settings = array();
-				$settings['text'] = Full_Full_Elementor_MCP_Atomic_Props::html( sanitize_text_field( $input['text'] ?? 'Click Here' ) );
+				$settings['text'] = Full_Elementor_MCP_Atomic_Props::html( sanitize_text_field( $input['text'] ?? 'Click Here' ) );
 
 				if ( ! empty( $input['link'] ) ) {
 					$target_blank = ! empty( $input['target_blank'] );
-					$settings['link'] = Full_Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ), $target_blank );
+					$settings['link'] = Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ), $target_blank );
 				}
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -430,22 +430,22 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 
 				if ( $image_id ) {
 					$url = wp_get_attachment_url( $image_id );
-					$settings['image'] = Full_Full_Elementor_MCP_Atomic_Props::image( $image_id, $url ?: '' );
+					$settings['image'] = Full_Elementor_MCP_Atomic_Props::image( $image_id, $url ?: '' );
 				} elseif ( $image_url ) {
-					$settings['image'] = Full_Full_Elementor_MCP_Atomic_Props::image( 0, $image_url );
+					$settings['image'] = Full_Elementor_MCP_Atomic_Props::image( 0, $image_url );
 				}
 
 				if ( ! empty( $input['alt'] ) ) {
-					$settings['alt'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['alt'] ) );
+					$settings['alt'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['alt'] ) );
 				}
 				if ( ! empty( $input['link'] ) ) {
-					$settings['link'] = Full_Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ) );
+					$settings['link'] = Full_Elementor_MCP_Atomic_Props::link( esc_url_raw( $input['link'] ) );
 				}
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -471,16 +471,16 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 
 				if ( $svg_id ) {
 					$url = wp_get_attachment_url( $svg_id );
-					$settings['svg'] = Full_Full_Elementor_MCP_Atomic_Props::image( $svg_id, $url ?: '' );
+					$settings['svg'] = Full_Elementor_MCP_Atomic_Props::image( $svg_id, $url ?: '' );
 				} elseif ( $svg_url ) {
-					$settings['svg'] = Full_Full_Elementor_MCP_Atomic_Props::image( 0, $svg_url );
+					$settings['svg'] = Full_Elementor_MCP_Atomic_Props::image( 0, $svg_url );
 				}
 
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -499,13 +499,13 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 			'e-youtube',
 			function ( $input ) {
 				$settings = array();
-				$settings['url'] = Full_Full_Elementor_MCP_Atomic_Props::url( esc_url_raw( $input['video_url'] ?? '' ) );
+				$settings['url'] = Full_Elementor_MCP_Atomic_Props::url( esc_url_raw( $input['video_url'] ?? '' ) );
 
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -531,16 +531,16 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 
 				if ( $video_id ) {
 					$url = wp_get_attachment_url( $video_id );
-					$settings['source'] = Full_Full_Elementor_MCP_Atomic_Props::url( $url ?: '' );
+					$settings['source'] = Full_Elementor_MCP_Atomic_Props::url( $url ?: '' );
 				} elseif ( $video_url ) {
-					$settings['source'] = Full_Full_Elementor_MCP_Atomic_Props::url( $video_url );
+					$settings['source'] = Full_Elementor_MCP_Atomic_Props::url( $video_url );
 				}
 
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);
@@ -560,10 +560,10 @@ class Full_Full_Elementor_MCP_Atomic_Widget_Abilities {
 				$settings = array();
 
 				if ( ! empty( $input['css_id'] ) ) {
-					$settings['_cssid'] = Full_Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
+					$settings['_cssid'] = Full_Elementor_MCP_Atomic_Props::string( sanitize_text_field( $input['css_id'] ) );
 				}
 
-				$settings['classes'] = Full_Full_Elementor_MCP_Atomic_Props::classes();
+				$settings['classes'] = Full_Elementor_MCP_Atomic_Props::classes();
 				return $settings;
 			}
 		);

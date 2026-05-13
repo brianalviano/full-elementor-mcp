@@ -14,7 +14,7 @@
  *                                   Set to "2024-11-05" if your client doesn't support "2025-06-18".
  *
  * Usage:
- *   node bin/mcp-proxy.mjs
+ *   node bin/full-elementor-mcp-proxy.mjs
  *
  * The proxy reads JSON-RPC messages (one per line) from stdin,
  * forwards them to the WordPress REST API, and writes responses to stdout.

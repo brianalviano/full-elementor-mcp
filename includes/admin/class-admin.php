@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Admin {
+class Full_Elementor_MCP_Admin {
 
 	/**
 	 * The page hook suffix returned by add_options_page().
@@ -154,7 +154,7 @@ class Full_Full_Elementor_MCP_Admin {
 				'copied'      => __( 'Copied!', 'full-elementor-mcp' ),
 				'mcpEndpoint' => rest_url( 'mcp/full-elementor-mcp-server' ),
 				'siteUrl'     => site_url(),
-				'proxyPath'   => FULL_ELEMENTOR_MCP_DIR . 'bin' . DIRECTORY_SEPARATOR . 'mcp-proxy.mjs',
+				'proxyPath'   => FULL_ELEMENTOR_MCP_DIR . 'bin' . DIRECTORY_SEPARATOR . 'full-elementor-mcp-proxy.mjs',
 			)
 		);
 	}

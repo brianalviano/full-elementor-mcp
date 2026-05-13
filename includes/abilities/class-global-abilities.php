@@ -18,10 +18,10 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Global_Abilities {
+class Full_Elementor_MCP_Global_Abilities {
 
 	/**
-	 * @var Full_Full_Elementor_MCP_Data
+	 * @var Full_Elementor_MCP_Data
 	 */
 	private $data;
 
@@ -30,9 +30,9 @@ class Full_Full_Elementor_MCP_Global_Abilities {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param Full_Full_Elementor_MCP_Data $data The data access layer.
+	 * @param Full_Elementor_MCP_Data $data The data access layer.
 	 */
-	public function __construct( Full_Full_Elementor_MCP_Data $data ) {
+	public function __construct( Full_Elementor_MCP_Data $data ) {
 		$this->data = $data;
 	}
 

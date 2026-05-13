@@ -12,15 +12,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-/** @var Full_Full_Elementor_MCP_Admin $this */
+/** @var Full_Elementor_MCP_Admin $this */
 $full_elementor_mcp_all_tools     = $this->get_all_tools();
-$full_elementor_mcp_disabled      = get_option( Full_Full_Elementor_MCP_Admin::OPTION_DISABLED_TOOLS, array() );
+$full_elementor_mcp_disabled      = get_option( Full_Elementor_MCP_Admin::OPTION_DISABLED_TOOLS, array() );
 $full_elementor_mcp_enabled_count = $this->get_enabled_tool_count();
 $full_elementor_mcp_total_count   = $this->get_total_tool_count();
 ?>
 
 <form method="post" action="options.php" id="full-elementor-mcp-tools-form">
-	<?php settings_fields( Full_Full_Elementor_MCP_Admin::SETTINGS_GROUP ); ?>
+	<?php settings_fields( Full_Elementor_MCP_Admin::SETTINGS_GROUP ); ?>
 
 	<p class="full-elementor-mcp-tools-summary">
 		<?php
@@ -74,7 +74,7 @@ $full_elementor_mcp_total_count   = $this->get_total_tool_count();
 					<label class="full-elementor-mcp-tool-card <?php echo esc_attr( $full_elementor_mcp_is_enabled ? 'is-enabled' : 'is-disabled' ); ?>">
 						<input
 							type="checkbox"
-							name="<?php echo esc_attr( Full_Full_Elementor_MCP_Admin::OPTION_DISABLED_TOOLS ); ?>[]"
+							name="<?php echo esc_attr( Full_Elementor_MCP_Admin::OPTION_DISABLED_TOOLS ); ?>[]"
 							value="<?php echo esc_attr( $full_elementor_mcp_slug ); ?>"
 							<?php checked( $full_elementor_mcp_is_enabled ); ?>
 						/>

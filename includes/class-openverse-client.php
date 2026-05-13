@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.1.0
  */
-class Full_Full_Elementor_MCP_Openverse_Client {
+class Full_Elementor_MCP_Openverse_Client {
 
 	/**
 	 * Openverse API base URL.
@@ -111,7 +111,7 @@ class Full_Full_Elementor_MCP_Openverse_Client {
 			$url,
 			array(
 				'timeout'    => self::TIMEOUT,
-				'user-agent' => 'Elementor-MCP/' . FULL_ELEMENTOR_MCP_VERSION . ' (WordPress/' . get_bloginfo( 'version' ) . ')',
+				'user-agent' => 'Full-Elementor-MCP/' . FULL_ELEMENTOR_MCP_VERSION . ' (WordPress/' . get_bloginfo( 'version' ) . ')',
 				'headers'    => array(
 					'Accept' => 'application/json',
 				),

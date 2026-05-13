@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Id_Generator {
+class Full_Elementor_MCP_Id_Generator {
 
 	/**
 	 * Tracks IDs already issued during the current request to avoid in-batch

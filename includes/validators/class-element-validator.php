@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  *
  * @since 1.0.0
  */
-class Full_Full_Elementor_MCP_Element_Validator {
+class Full_Elementor_MCP_Element_Validator {
 
 	/**
 	 * Validates an element structure.
