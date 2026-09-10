@@ -265,7 +265,35 @@ class Mock_WPDB {
 		try {
 			if ( preg_match( '/SHOW INDEX(?:ES)? FROM\s+([^\s;]+)/i', $query, $m ) ) {
 				$table = trim( $m[1], '`' );
-				$query = "SELECT name AS Key_name FROM pragma_index_list('{$table}')";
+				$rows  = array();
+				$info_stmt = $this->pdo->query( "PRAGMA table_info('{$table}')" );
+				if ( $info_stmt ) {
+					$cols = $info_stmt->fetchAll( \PDO::FETCH_ASSOC );
+					foreach ( $cols as $col ) {
+						if ( ! empty( $col['pk'] ) ) {
+							$rows[] = array(
+								'Key_name'    => 'PRIMARY',
+								'Column_name' => $col['name'],
+								'Non_unique'  => 0,
+							);
+						}
+					}
+				}
+				$idx_stmt = $this->pdo->query( "PRAGMA index_list('{$table}')" );
+				if ( $idx_stmt ) {
+					$indices = $idx_stmt->fetchAll( \PDO::FETCH_ASSOC );
+					foreach ( $indices as $idx ) {
+						$rows[] = array(
+							'Key_name'    => $idx['name'],
+							'Column_name' => '',
+							'Non_unique'  => 1,
+						);
+					}
+				}
+				if ( 'ARRAY_A' === $output ) {
+					return $rows;
+				}
+				return array_map( static fn( $r ) => (object) $r, $rows );
 			}
 			$stmt = $this->pdo->query( $query );
 			if ( ! $stmt ) {
@@ -1258,7 +1286,7 @@ run_test( 'Lock Manager: 0 affected rows on re-entry is rejected if persisted DB
 	$wpdb->simulate_zero_affected_rows = true;
 
 	// 3. Re-entry attempts UPDATE -> 0 affected rows -> recheck sees DB expiry < target -> retry also gets 0 rows -> rejected!
-	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 120 );
 	$wpdb->simulate_zero_affected_rows = false;
 
 	assert_true( is_wp_error( $reentry ), '0 affected rows without meeting target expiry must fail.' );
@@ -1336,6 +1364,335 @@ run_test( 'Security Guard: default scope without mapping is read_only for non-ad
 	$filtered_scope = Full_Elementor_MCP_Security_Guard::resolve_scope_for_user_and_credential( 42, 'unmapped-app-uuid-1' );
 	assert_equals( 'full', $filtered_scope['mode'], 'Filter hook must be able to customize default fallback mode.' );
 	remove_all_filters( 'full_elementor_mcp_default_scope_mode' );
+} );
+
+run_test( 'Security Guard: unknown/malformed scope mode strictly fails closed', function () {
+	// Mode 'garbage' must be denied for both mutations and queries.
+	$garbage_scope = array(
+		'mode'          => 'garbage',
+		'user_id'       => 1,
+		'allowed_tools' => array(),
+		'blocked_tools' => array(),
+	);
+	assert_false(
+		Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/create-page', array( 'readonly' => false ), $garbage_scope ),
+		'Mode garbage must be denied for mutation.'
+	);
+	assert_false(
+		Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/get-page', array( 'readonly' => true ), $garbage_scope ),
+		'Mode garbage must be denied even for readonly abilities.'
+	);
+
+	// Missing mode must be denied.
+	$missing_mode_scope = array(
+		'user_id' => 1,
+	);
+	assert_false(
+		Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/create-page', array( 'readonly' => false ), $missing_mode_scope ),
+		'Missing mode must be denied.'
+	);
+
+	// Explicit 'full' mode allows.
+	$full_scope = array(
+		'mode'          => 'full',
+		'user_id'       => 1,
+		'allowed_tools' => array(),
+		'blocked_tools' => array(),
+	);
+	assert_true(
+		Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/create-page', array( 'readonly' => false ), $full_scope ),
+		'Explicit full mode must allow abilities.'
+	);
+} );
+
+run_test( 'Security Guard: malformed filtered scope is normalized safely to read_only', function () {
+	add_filter( 'full_elementor_mcp_current_scope', function () {
+		return array( 'mode' => 'corrupted_injected_mode', 'allowed_tools' => 'not_an_array' );
+	} );
+
+	$resolved = Full_Elementor_MCP_Security_Guard::resolve_current_scope();
+	assert_equals( 'read_only', $resolved['mode'], 'Corrupted mode in filter must fall back to read_only.' );
+	assert_true( is_array( $resolved['allowed_tools'] ), 'allowed_tools must be normalized to array.' );
+
+	remove_all_filters( 'full_elementor_mcp_current_scope' );
+} );
+
+run_test( 'Lock Manager: pruning expired tokens preserves lock rows and fencing monotonicity permanently', function () {
+	global $wpdb;
+	$res_key = 'fencing_prune_' . uniqid();
+	$table   = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+	// 1. Initial acquisition: fence = 1.
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, 'owner_1', 60 );
+	assert_true( $lock1['acquired'] );
+	assert_equals( 1, $lock1['fencing_token'] );
+
+	// 2. Release lock and takeover: fence = 2.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, 'owner_1', 1 );
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, 'owner_2', 60 );
+	assert_true( $lock2['acquired'] );
+	assert_equals( 2, $lock2['fencing_token'] );
+
+	// 3. Artificially expire the lock row and insert an expired temporary token.
+	$past_dt  = gmdate( 'Y-m-d H:i:s', time() - 100000 );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$wpdb->query( "UPDATE {$table} SET expires_at = '{$past_dt}' WHERE token_key = '{$lock_key}'" );
+	$wpdb->query( "INSERT INTO {$table} (token_key, token_type, owner_id, fencing_token, created_at, expires_at, used) VALUES ('temp_token_123', 'idempotency', 'tmp', 0, '{$past_dt}', '{$past_dt}', 0)" );
+
+	// 4. Run prune_expired().
+	$pruned = Full_Elementor_MCP_Lock_Manager::prune_expired( 86400 );
+	assert_true( $pruned >= 1, 'Pruned count must include the expired idempotency token.' );
+
+	// Verify temporary token was deleted, but the lock row tombstone was PRESERVED!
+	$temp_exists = $wpdb->get_var( "SELECT token_key FROM {$table} WHERE token_key = 'temp_token_123'" );
+	assert_true( empty( $temp_exists ), 'Expired idempotency token must be deleted.' );
+
+	$lock_row = $wpdb->get_row( "SELECT fencing_token, token_type FROM {$table} WHERE token_key = '{$lock_key}'", ARRAY_A );
+	assert_false( empty( $lock_row ), 'Lock row must be preserved across pruning.' );
+	assert_equals( 2, (int) $lock_row['fencing_token'] );
+
+	// 5. Subsequent takeover after pruning: fencing token MUST strictly increment to 3, never resetting to 1!
+	$lock3 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, 'owner_3', 60 );
+	assert_true( $lock3['acquired'] );
+	assert_equals( 3, $lock3['fencing_token'], 'Fencing token must increment to 3 after pruning, never reset!' );
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, 'owner_3', 3 );
+} );
+
+run_test( 'Schema Verification: rejects missing tokens PRIMARY KEY constraint and critical columns', function () {
+	global $wpdb;
+
+	// 1. Missing PRIMARY KEY on tokens table.
+	$tokens_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$wpdb->query( "DROP TABLE IF EXISTS {$tokens_table}" );
+	$wpdb->query( "CREATE TABLE {$tokens_table} ( token_key TEXT, token_type TEXT, owner_id TEXT, fencing_token INTEGER, payload TEXT, created_at TEXT, expires_at TEXT, used INTEGER )" );
+	$wpdb->query( "CREATE INDEX idx_type_expires ON {$tokens_table} (token_type, expires_at)" );
+
+	assert_false(
+		Full_Elementor_MCP_Database_Installer::verify_schema(),
+		'verify_schema must fail when tokens table lacks PRIMARY KEY.'
+	);
+
+	// 2. Missing 'used' or 'payload' column.
+	$wpdb->query( "DROP TABLE IF EXISTS {$tokens_table}" );
+	$wpdb->query( "CREATE TABLE {$tokens_table} ( token_key TEXT PRIMARY KEY, token_type TEXT, owner_id TEXT, fencing_token INTEGER, created_at TEXT, expires_at TEXT )" );
+	$wpdb->query( "CREATE INDEX idx_type_expires ON {$tokens_table} (token_type, expires_at)" );
+
+	assert_false(
+		Full_Elementor_MCP_Database_Installer::verify_schema(),
+		'verify_schema must fail when tokens table lacks used or payload column.'
+	);
+
+	// 3. Missing critical index idx_type_expires.
+	$wpdb->query( "DROP TABLE IF EXISTS {$tokens_table}" );
+	$wpdb->query( "CREATE TABLE {$tokens_table} ( token_key TEXT PRIMARY KEY, token_type TEXT, owner_id TEXT, fencing_token INTEGER, payload TEXT, created_at TEXT, expires_at TEXT, used INTEGER )" );
+
+	assert_false(
+		Full_Elementor_MCP_Database_Installer::verify_schema(),
+		'verify_schema must fail when tokens table lacks idx_type_expires index.'
+	);
+
+	// Reinstall complete schema.
+	$wpdb->query( "DROP TABLE IF EXISTS {$tokens_table}" );
+	Full_Elementor_MCP_Database_Installer::install();
+	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema() );
+} );
+
+run_test( 'Lock Manager: expired lease cannot be revived with same fencing token on same-owner acquire_lock', function () {
+	global $wpdb;
+	$res_key = 'revive_fence_' . uniqid();
+	$owner   = 'owner_revive_test';
+	$table   = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+	// 1. Initial acquisition: fence = 1.
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock1['acquired'] );
+	assert_equals( 1, $lock1['fencing_token'] );
+
+	// 2. Artificially expire the lease in DB.
+	$past_dt  = gmdate( 'Y-m-d H:i:s', time() - 30 );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$wpdb->query( "UPDATE {$table} SET expires_at = '{$past_dt}' WHERE token_key = '{$lock_key}'" );
+
+	// 3. Same owner calls renew_lease() on expired lock: MUST return false!
+	$renewed = Full_Elementor_MCP_Lock_Manager::renew_lease( $res_key, $owner, 1, 30 );
+	assert_false( $renewed, 'renew_lease on an expired lease must return false.' );
+
+	// 4. Same owner calls acquire_lock(): MUST NOT renew with fence = 1!
+	// It must go through expired takeover and receive NEW fence = 2!
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock2['acquired'] );
+	assert_equals( 2, $lock2['fencing_token'], 'Reacquisition after expiration must increment fencing token to 2!' );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, 2 );
+} );
+
+run_test( 'Lock Manager: bounded lease refresh prevents unbounded lease horizon under rapid heartbeats', function () {
+	$res_key = 'bounded_heartbeat_' . uniqid();
+	$owner   = 'owner_bounded';
+
+	// 1. Acquire lock with TTL = 30 seconds.
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+	assert_true( $lock['acquired'] );
+
+	// 2. Rapidly send 10 renew_lease() heartbeat calls (extra_seconds = 30).
+	for ( $i = 0; $i < 10; $i++ ) {
+		$ok = Full_Elementor_MCP_Lock_Manager::renew_lease( $res_key, $owner, $lock['fencing_token'], 30 );
+		assert_true( $ok );
+	}
+
+	global $wpdb;
+	$table     = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key  = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$row       = $wpdb->get_row( "SELECT expires_at FROM {$table} WHERE token_key = '{$lock_key}'", ARRAY_A );
+	$expiry_ts = strtotime( $row['expires_at'] . ' UTC' );
+
+	// Bounded refresh rule: lease horizon must be capped near time() + 30, NOT accumulated into time() + 300!
+	$max_allowed = time() + 35;
+	assert_true(
+		$expiry_ts <= $max_allowed,
+		"Bounded refresh expiry ({$row['expires_at']}) must not accumulate past max bound (" . gmdate( 'Y-m-d H:i:s', $max_allowed ) . ")."
+	);
+
+	// 3. Rapidly call acquire_lock() re-entry 5 times (ttl = 30).
+	for ( $i = 0; $i < 5; $i++ ) {
+		$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+		assert_true( $reentry['acquired'] );
+	}
+
+	$row2       = $wpdb->get_row( "SELECT expires_at FROM {$table} WHERE token_key = '{$lock_key}'", ARRAY_A );
+	$expiry_ts2 = strtotime( $row2['expires_at'] . ' UTC' );
+	assert_true(
+		$expiry_ts2 <= time() + 35,
+		'Bounded re-entry expiry must not accumulate unbounded future horizon.'
+	);
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
+} );
+
+run_test( 'Critical Asset Guard: allow_critical_override requires literal boolean true', function () {
+	// Set front page ID = 999.
+	update_option( 'page_on_front', 999 );
+	$GLOBALS['wp_test_user_caps']['manage_options'] = true;
+
+	// String "true" -> REJECTED
+	$res_str_true = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 999, array( 'allow_critical_override' => 'true' ) );
+	assert_true( is_wp_error( $res_str_true ), 'String "true" must be rejected.' );
+	assert_equals( 'critical_override_required', $res_str_true->get_error_code() );
+
+	// String "false" -> REJECTED
+	$res_str_false = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 999, array( 'allow_critical_override' => 'false' ) );
+	assert_true( is_wp_error( $res_str_false ), 'String "false" must be rejected.' );
+
+	// Integer 1 -> REJECTED
+	$res_int_1 = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 999, array( 'allow_critical_override' => 1 ) );
+	assert_true( is_wp_error( $res_int_1 ), 'Integer 1 must be rejected.' );
+
+	// String "1" -> REJECTED
+	$res_str_1 = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 999, array( 'allow_critical_override' => '1' ) );
+	assert_true( is_wp_error( $res_str_1 ), 'String "1" must be rejected.' );
+
+	// Literal boolean true -> ALLOWED
+	$res_bool_true = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 999, array( 'allow_critical_override' => true ) );
+	assert_true( true === $res_bool_true, 'Literal boolean true must be allowed.' );
+
+	delete_option( 'page_on_front' );
+} );
+
+run_test( 'Safety Settings: boolean sanitization maps string representations safely', function () {
+	// Helper test
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( false ) );
+	assert_true( Full_Elementor_MCP_Safety_Settings::sanitize_bool( true ) );
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( 0 ) );
+	assert_true( Full_Elementor_MCP_Safety_Settings::sanitize_bool( 1 ) );
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( '0' ) );
+	assert_true( Full_Elementor_MCP_Safety_Settings::sanitize_bool( '1' ) );
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( 'false' ) );
+	assert_true( Full_Elementor_MCP_Safety_Settings::sanitize_bool( 'true' ) );
+
+	// Test array sanitization for allow_permanent_delete
+	$sanitized_false = Full_Elementor_MCP_Safety_Settings::sanitize( array( 'allow_permanent_delete' => 'false' ) );
+	assert_false( $sanitized_false['allow_permanent_delete'], '"false" must sanitize to boolean false.' );
+
+	$sanitized_zero = Full_Elementor_MCP_Safety_Settings::sanitize( array( 'allow_permanent_delete' => '0' ) );
+	assert_false( $sanitized_zero['allow_permanent_delete'], '"0" must sanitize to boolean false.' );
+
+	$sanitized_true = Full_Elementor_MCP_Safety_Settings::sanitize( array( 'allow_permanent_delete' => 'true' ) );
+	assert_true( $sanitized_true['allow_permanent_delete'], '"true" must sanitize to boolean true.' );
+} );
+
+run_test( 'Lock Manager: get_idempotent_result fails closed on malformed payload structure', function () {
+	global $wpdb;
+	$table     = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$idemp_key = 'malformed_' . uniqid();
+	$ability   = 'full-elementor-mcp/create-page';
+	$user_id   = 5;
+	$cred_uuid = 'cred-abc';
+	$args      = array( 'title' => 'Test' );
+	$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key( $idemp_key, $ability, $user_id, $cred_uuid );
+	$future_dt = gmdate( 'Y-m-d H:i:s', time() + 300 );
+
+	// 1. Corrupted non-array payload
+	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '\"just_a_string\"', '{$future_dt}', '{$future_dt}', 0)" );
+	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Corrupted JSON string must fail closed (return null).' );
+
+	// 2. Missing args_hash
+	$bad_payload = wp_json_encode( array( 'ability' => $ability, 'user_id' => $user_id, 'credential_uuid' => $cred_uuid, 'result' => array( 'ok' => 1 ) ) );
+	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '{$bad_payload}', '{$future_dt}', '{$future_dt}', 0)" );
+	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Missing args_hash must fail closed.' );
+
+	// 3. Ability mismatch in payload
+	$mismatch_payload = wp_json_encode( array( 'args_hash' => Full_Elementor_MCP_Lock_Manager::hash_args( $args ), 'ability' => 'other/ability', 'user_id' => $user_id, 'credential_uuid' => $cred_uuid, 'result' => array( 'ok' => 1 ) ) );
+	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '{$mismatch_payload}', '{$future_dt}', '{$future_dt}', 0)" );
+	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Ability mismatch must fail closed.' );
+
+	// 4. Non-array result in payload
+	$bad_result_payload = wp_json_encode( array( 'args_hash' => Full_Elementor_MCP_Lock_Manager::hash_args( $args ), 'ability' => $ability, 'user_id' => $user_id, 'credential_uuid' => $cred_uuid, 'result' => 'scalar_result' ) );
+	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '{$bad_result_payload}', '{$future_dt}', '{$future_dt}', 0)" );
+	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Non-array result must fail closed.' );
+} );
+
+run_test( 'Database Installer: maybe_upgrade rejects unsupported downgrade state', function () {
+	// Simulate future schema version installed (e.g. 2.0.0 when code is 1.0.0).
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '2.0.0' );
+
+	$res = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+	assert_false( $res, 'maybe_upgrade must return false for unsupported downgrade state.' );
+
+	// Restore current version.
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, Full_Elementor_MCP_Database_Installer::DB_VERSION );
+} );
+
+run_test( 'Lock Manager: get_lock_token_key contains full 64-character SHA-256 hash', function () {
+	$key       = 'test_post_42';
+	$token_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $key );
+	$hash      = hash( 'sha256', $key );
+
+	assert_true( str_ends_with( $token_key, $hash ), 'Lock key must end with full 64-character SHA-256 hash.' );
+	assert_true( strlen( $token_key ) <= 102, 'Lock key length must be <= 102 characters.' );
+} );
+
+run_test( 'Uninstall Handler: drops tables and deletes Phase 1 options', function () {
+	// Set mock options.
+	update_option( 'full_elementor_mcp_disabled_tools', array( 'tool1' ) );
+	update_option( 'full_elementor_mcp_safety_settings', array( 'safe_mode' => true ) );
+	update_option( 'full_elementor_mcp_credential_scopes', array( '1' => array() ) );
+
+	// Run uninstall logic directly.
+	if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
+		define( 'WP_UNINSTALL_PLUGIN', true );
+	}
+	require dirname( __DIR__ ) . '/uninstall.php';
+
+	// Verify all Phase 1 options were deleted.
+	assert_false( get_option( 'full_elementor_mcp_disabled_tools', false ) );
+	assert_false( get_option( 'full_elementor_mcp_safety_settings', false ) );
+	assert_false( get_option( 'full_elementor_mcp_credential_scopes', false ) );
+	assert_false( get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, false ) );
+
+	// Re-install tables for clean state.
+	Full_Elementor_MCP_Database_Installer::install();
 } );
 
 // ---------------------------------------------------------------------

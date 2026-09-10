@@ -212,15 +212,108 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Checks if schema upgrade is needed and executes it.
 	 *
+	/**
+	 * Centralized specification of required safety schema constraints across all 4 tables.
+	 *
+	 * Ensures tokens, journal, checkpoints, and audit log tables contain all safety-critical
+	 * columns, indexes, and primary key / uniqueness constraints before marking DB_VERSION installed.
+	 *
+	 * @return array<string, array{columns: string[], indexes: string[], primary: string}>
+	 */
+	public static function get_expected_schema(): array {
+		return array(
+			// Tokens table: enforces atomicity, locking, fencing, and idempotency.
+			self::get_tokens_table()      => array(
+				'columns' => array(
+					'token_key',
+					'token_type',
+					'owner_id',
+					'fencing_token',
+					'payload',
+					'created_at',
+					'expires_at',
+					'used',
+				),
+				'indexes' => array(
+					'idx_type_expires',
+				),
+				'primary' => 'token_key',
+			),
+			// Journal table: Write-Ahead Journaling for atomicity and crash recovery.
+			self::get_journal_table()     => array(
+				'columns' => array(
+					'id',
+					'created_at',
+					'updated_at',
+					'ability',
+					'action',
+					'object_type',
+					'object_id',
+					'fencing_token',
+					'before_state',
+					'before_hash',
+					'after_hash',
+					'status',
+					'user_id',
+					'credential_uuid',
+				),
+				'indexes' => array(
+					'idx_status',
+					'idx_object',
+				),
+				'primary' => 'id',
+			),
+			// Checkpoints table: full-site rollback points.
+			self::get_checkpoints_table() => array(
+				'columns' => array(
+					'id',
+					'created_at',
+					'label',
+					'trigger_type',
+					'file_path',
+					'file_hash_hmac',
+					'key_version',
+					'key_id',
+				),
+				'indexes' => array(),
+				'primary' => 'id',
+			),
+			// Audit log table: forensic mutation history.
+			self::get_audit_log_table()   => array(
+				'columns' => array(
+					'id',
+					'timestamp',
+					'event',
+					'ability',
+					'user_id',
+					'credential_uuid',
+					'ip_address',
+					'args_sanitized',
+				),
+				'indexes' => array(),
+				'primary' => 'id',
+			),
+		);
+	}
+
+	/**
+	 * Checks if schema upgrade is needed and executes it.
+	 *
 	 * Uses fast-path comparison to eliminate database overhead on ordinary requests.
+	 * Rejects unsupported downgrade states if installed version is higher than code version.
 	 *
 	 * @return bool True if schema is up to date and verified.
 	 */
 	public static function maybe_upgrade(): bool {
 		$installed_version = get_option( self::OPTION_DB_VERSION, '0.0.0' );
 
+		// Reject unsupported downgrade state: database schema is from a newer future version than this code.
+		if ( version_compare( (string) $installed_version, self::DB_VERSION, '>' ) ) {
+			return false;
+		}
+
 		// Fast path for runtime requests: if version matches, return immediately with zero DB query overhead!
-		if ( version_compare( (string) $installed_version, self::DB_VERSION, '>=' ) ) {
+		if ( version_compare( (string) $installed_version, self::DB_VERSION, '=' ) ) {
 			return true;
 		}
 
@@ -285,11 +378,49 @@ class Full_Elementor_MCP_Database_Installer {
 	}
 
 	/**
-	 * Verifies that all required tables, critical columns, and critical indexes exist.
+	 * Verifies that a table possesses a PRIMARY KEY constraint (or unique constraint on expected column).
+	 *
+	 * @param string $table        Table name.
+	 * @param string $expected_col Expected column name (e.g. 'token_key' or 'id').
+	 * @return bool True if primary key constraint exists on expected column.
+	 */
+	public static function verify_table_has_primary_key( string $table, string $expected_col = '' ): bool {
+		global $wpdb;
+
+		// 1. MySQL / MariaDB standard index inspection.
+		$indices = $wpdb->get_results( "SHOW INDEX FROM {$table}", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $indices ) && is_array( $indices ) ) {
+			foreach ( $indices as $row ) {
+				$key_name = strtolower( (string) ( $row['Key_name'] ?? '' ) );
+				if ( 'primary' === $key_name ) {
+					if ( '' === $expected_col || strtolower( (string) ( $row['Column_name'] ?? '' ) ) === strtolower( $expected_col ) ) {
+						return true;
+					}
+				}
+			}
+		}
+
+		// 2. SQLite PRAGMA table_info fallback (inspects pk column flag).
+		$info = $wpdb->get_results( "PRAGMA table_info({$table})", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $info ) && is_array( $info ) ) {
+			foreach ( $info as $col ) {
+				if ( ! empty( $col['pk'] ) ) {
+					if ( '' === $expected_col || strtolower( (string) ( $col['name'] ?? '' ) ) === strtolower( $expected_col ) ) {
+						return true;
+					}
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Verifies that all required tables, critical columns, critical indexes, and PRIMARY constraints exist.
 	 *
 	 * Ensures migration was completely successful before updating DB_VERSION option.
 	 *
-	 * @return bool True if all tables, critical columns, and critical indexes exist.
+	 * @return bool True if all tables, critical columns, indexes, and primary constraints exist.
 	 */
 	public static function verify_schema(): bool {
 		// 1. Check table existence.
@@ -297,38 +428,36 @@ class Full_Elementor_MCP_Database_Installer {
 			return false;
 		}
 
-		// 2. Critical columns per table.
-		$critical_columns = array(
-			self::get_journal_table()     => array( 'fencing_token', 'before_state', 'before_hash', 'after_hash', 'status' ),
-			self::get_checkpoints_table() => array( 'key_version', 'key_id' ),
-			self::get_tokens_table()      => array( 'token_key', 'token_type', 'owner_id', 'fencing_token', 'expires_at' ),
-		);
+		$expected_schema = self::get_expected_schema();
 
-		foreach ( $critical_columns as $table => $required_cols ) {
+		foreach ( $expected_schema as $table => $spec ) {
+			// 2. Verify all required columns.
 			$actual_cols = self::get_table_columns( $table );
 			if ( empty( $actual_cols ) ) {
 				return false;
 			}
-			foreach ( $required_cols as $req_col ) {
-				if ( ! in_array( strtolower( $req_col ), $actual_cols, true ) ) {
+			foreach ( $spec['columns'] as $col ) {
+				if ( ! in_array( strtolower( $col ), $actual_cols, true ) ) {
 					return false;
 				}
 			}
-		}
 
-		// 3. Critical indexes per table.
-		$critical_indexes = array(
-			self::get_journal_table() => array( 'idx_status', 'idx_object' ),
-			self::get_tokens_table()  => array( 'idx_type_expires' ),
-		);
-
-		foreach ( $critical_indexes as $table => $required_indexes ) {
-			$actual_indexes = self::get_table_indexes( $table );
-			if ( empty( $actual_indexes ) ) {
-				return false;
+			// 3. Verify all required indexes.
+			if ( ! empty( $spec['indexes'] ) ) {
+				$actual_indexes = self::get_table_indexes( $table );
+				if ( empty( $actual_indexes ) ) {
+					return false;
+				}
+				foreach ( $spec['indexes'] as $idx ) {
+					if ( ! in_array( strtolower( $idx ), $actual_indexes, true ) ) {
+						return false;
+					}
+				}
 			}
-			foreach ( $required_indexes as $req_index ) {
-				if ( ! in_array( strtolower( $req_index ), $actual_indexes, true ) ) {
+
+			// 4. Verify primary key constraint.
+			if ( ! empty( $spec['primary'] ) ) {
+				if ( ! self::verify_table_has_primary_key( $table, $spec['primary'] ) ) {
 					return false;
 				}
 			}

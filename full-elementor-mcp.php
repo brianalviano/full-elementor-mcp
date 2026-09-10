@@ -203,7 +203,17 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-security-guard.php';
 
 	// Execute runtime schema upgrade check to support in-place updates.
-	Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+	// Fail-closed policy: block MCP initialization if safety database cannot be verified.
+	$db_ready = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+	if ( ! $db_ready ) {
+		add_action( 'admin_notices', function () {
+			printf(
+				'<div class="notice notice-error"><p>%s</p></div>',
+				esc_html__( 'Full Elementor MCP: Safety database tables failed verification or are incompatible with this version. MCP server initialization has been blocked to protect site integrity.', 'full-elementor-mcp' )
+			);
+		} );
+		return;
+	}
 
 	// Boot the plugin.
 	Full_Elementor_MCP_Plugin::instance();

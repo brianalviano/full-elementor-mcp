@@ -108,6 +108,34 @@ class Full_Elementor_MCP_Safety_Settings {
 	}
 
 	/**
+	 * Sanitizes a boolean value predictably, preventing false positives from string representations.
+	 *
+	 * Explicitly maps:
+	 * - false, 0, '0', 'false', 'off', 'no', '' => false
+	 * - true, 1, '1', 'true', 'on', 'yes'       => true
+	 *
+	 * @param mixed $value   Input value.
+	 * @param bool  $default Fallback if null or unparseable.
+	 * @return bool Sanitized boolean.
+	 */
+	public static function sanitize_bool( mixed $value, bool $default = false ): bool {
+		if ( null === $value ) {
+			return $default;
+		}
+		if ( is_bool( $value ) ) {
+			return $value;
+		}
+		if ( is_numeric( $value ) ) {
+			return 1 === (int) $value;
+		}
+		if ( is_string( $value ) ) {
+			$filtered = filter_var( trim( $value ), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE );
+			return null !== $filtered ? $filtered : $default;
+		}
+		return (bool) $value;
+	}
+
+	/**
 	 * Sanitizes safety settings array.
 	 *
 	 * @param array<string, mixed> $input Raw input.
@@ -117,9 +145,9 @@ class Full_Elementor_MCP_Safety_Settings {
 		$defaults = self::get_defaults();
 		$clean    = array();
 
-		$clean['safe_mode']                  = ! empty( $input['safe_mode'] );
-		$clean['undo_enabled']               = ! empty( $input['undo_enabled'] );
-		$clean['allow_permanent_delete']     = ! empty( $input['allow_permanent_delete'] );
+		$clean['safe_mode']              = isset( $input['safe_mode'] ) ? self::sanitize_bool( $input['safe_mode'], true ) : true;
+		$clean['undo_enabled']           = isset( $input['undo_enabled'] ) ? self::sanitize_bool( $input['undo_enabled'], true ) : true;
+		$clean['allow_permanent_delete'] = isset( $input['allow_permanent_delete'] ) ? self::sanitize_bool( $input['allow_permanent_delete'], false ) : false;
 
 		$valid_policies = array(
 			self::POLICY_AGENT_CONFIRMATION,

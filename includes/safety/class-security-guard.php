@@ -137,11 +137,38 @@ class Full_Elementor_MCP_Security_Guard {
 		 *
 		 * @param array $scope Scope details array.
 		 */
-		return apply_filters( 'full_elementor_mcp_current_scope', $scope );
+		$filtered = apply_filters( 'full_elementor_mcp_current_scope', $scope );
+
+		// Harden against malformed filter return: ensure array structure and strictly validate mode.
+		if ( ! is_array( $filtered ) || empty( $filtered['mode'] ) || ! is_string( $filtered['mode'] ) ) {
+			$filtered = array( 'mode' => 'read_only' );
+		}
+
+		$mode          = sanitize_key( (string) $filtered['mode'] );
+		$allowed_tools = isset( $filtered['allowed_tools'] ) && is_array( $filtered['allowed_tools'] )
+			? array_values( array_map( 'sanitize_text_field', $filtered['allowed_tools'] ) )
+			: array();
+		$blocked_tools = isset( $filtered['blocked_tools'] ) && is_array( $filtered['blocked_tools'] )
+			? array_values( array_map( 'sanitize_text_field', $filtered['blocked_tools'] ) )
+			: array();
+
+		return array(
+			'mode'            => in_array( $mode, array( 'full', 'read_only', 'custom' ), true ) ? $mode : 'read_only',
+			'user_id'         => (int) ( $filtered['user_id'] ?? $user_id ),
+			'credential_uuid' => isset( $filtered['credential_uuid'] ) && is_string( $filtered['credential_uuid'] ) ? sanitize_text_field( $filtered['credential_uuid'] ) : null,
+			'allowed_tools'   => $allowed_tools,
+			'blocked_tools'   => $blocked_tools,
+		);
 	}
 
 	/**
 	 * Checks whether a specific ability is permitted under the given scope.
+	 *
+	 * Strict fail-closed policy:
+	 * - 'read_only': only abilities with annotations['readonly'] = true
+	 * - 'custom': requires non-empty allowlist containing ability, not blocked
+	 * - 'full': explicitly permitted
+	 * - missing / malformed / unknown mode: strictly DENIED (fail closed)
 	 *
 	 * @param string     $ability     The ability slug (e.g. 'full-elementor-mcp/create-page').
 	 * @param array      $annotations Ability annotations array (from ability registration).
@@ -157,6 +184,11 @@ class Full_Elementor_MCP_Security_Guard {
 
 		if ( null === $scope ) {
 			$scope = self::resolve_current_scope();
+		}
+
+		// Fail closed on missing, malformed, or non-array scope.
+		if ( ! is_array( $scope ) || empty( $scope['mode'] ) || ! is_string( $scope['mode'] ) ) {
+			return false;
 		}
 
 		$is_readonly = ! empty( $annotations['readonly'] );
@@ -181,8 +213,13 @@ class Full_Elementor_MCP_Security_Guard {
 			return true;
 		}
 
-		// 4. Full scope: all non-globally-disabled abilities allowed.
-		return true;
+		// 4. Full scope: explicitly allowed (subject to global disabled gate).
+		if ( 'full' === $scope['mode'] ) {
+			return true;
+		}
+
+		// 5. Unknown / malformed mode: STRICTLY DENY (fail closed). Never fallback to permissive true.
+		return false;
 	}
 
 	/**
@@ -307,7 +344,7 @@ class Full_Elementor_MCP_Security_Guard {
 			);
 		}
 
-		if ( empty( $input['allow_critical_override'] ) ) {
+		if ( ! isset( $input['allow_critical_override'] ) || true !== $input['allow_critical_override'] ) {
 			return new \WP_Error(
 				'critical_override_required',
 				sprintf(
