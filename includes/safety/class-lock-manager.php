@@ -430,13 +430,15 @@ class Full_Elementor_MCP_Lock_Manager {
 	/**
 	 * Stores mutation result for idempotency caching with identity and argument binding.
 	 *
-	 * @param string      $idempotency_key Caller idempotency UUID or key.
-	 * @param string      $ability         Target ability name.
-	 * @param int         $user_id         Authenticated user ID.
-	 * @param string|null $credential_uuid Authenticated credential UUID.
-	 * @param array       $args            Arguments passed to the mutation.
-	 * @param array       $result          Response data to cache.
-	 * @param int         $ttl_seconds     Cache TTL in seconds.
+	 * Supports both strict identity signature and convenience ($idempotency_key, $result, $ttl_seconds) overload.
+	 *
+	 * @param string            $idempotency_key   Caller idempotency UUID or key.
+	 * @param string|array      $ability_or_result Target ability name, or result array for convenience call.
+	 * @param int|array         $user_id_or_args   Authenticated user ID, or TTL seconds for convenience call.
+	 * @param string|null       $credential_uuid   Authenticated credential UUID.
+	 * @param array             $args              Arguments passed to the mutation.
+	 * @param array             $result            Response data to cache.
+	 * @param int               $ttl_seconds       Cache TTL in seconds.
 	 * @return bool True if stored, false on DB failure.
 	 */
 	public static function set_idempotent_result(
