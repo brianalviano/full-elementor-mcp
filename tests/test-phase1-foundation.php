@@ -162,6 +162,17 @@ class Mock_WPDB {
 
 		try {
 			if ( str_contains( $query, 'CREATE TABLE' ) ) {
+				$table_name = '';
+				if ( preg_match( '/CREATE\s+TABLE\s+([^\s(]+)/i', $query, $tm ) ) {
+					$table_name = trim( $tm[1], '`' );
+				}
+				$indexes_to_create = array();
+				if ( ! empty( $table_name ) && preg_match_all( '/\bKEY\s+([a-zA-Z0-9_]+)\s*\(([^)]+)\)/i', $query, $km, PREG_SET_ORDER ) ) {
+					foreach ( $km as $key_match ) {
+						$indexes_to_create[] = "CREATE INDEX IF NOT EXISTS {$key_match[1]} ON {$table_name} ({$key_match[2]});";
+					}
+				}
+
 				$q = preg_replace( '/id\s+bigint\([^)]+\)\s+unsigned\s+NOT\s+NULL\s+auto_increment/i', 'id INTEGER PRIMARY KEY AUTOINCREMENT', $query );
 				$q = preg_replace( '/id\s+BIGINT\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT/i', 'id INTEGER PRIMARY KEY AUTOINCREMENT', $q );
 				$q = preg_replace( '/bigint\([^)]+\)\s*(?:unsigned)?/i', 'INTEGER', $q );
@@ -177,11 +188,53 @@ class Mock_WPDB {
 				$q = preg_replace( '/(?<!PRIMARY\s)\bKEY\s+[a-zA-Z0-9_]+\s*\([^)]+\),?/i', '', $q );
 				$q = preg_replace( '/,\s*\)/', ')', $q );
 				$q = preg_replace( '/(?:\)\s*(?:DEFAULT\s+CHARACTER\s+SET|COLLATE|ENGINE)[^;]*;|\)\s*;)/i', ');', $q );
-				return $this->pdo->exec( $q );
+
+				$res = $this->pdo->exec( $q );
+				foreach ( $indexes_to_create as $idx_q ) {
+					try {
+						$this->pdo->exec( $idx_q );
+					} catch ( \Throwable $e ) {
+						// Ignore index creation errors if any.
+					}
+				}
+				return $res;
 			}
 			return $this->pdo->exec( $query );
 		} catch ( \Throwable $e ) {
 			return false;
+		}
+	}
+
+	public function get_col( string $query, int $x = 0 ): array {
+		try {
+			if ( preg_match( '/SHOW COLUMNS FROM\s+([^\s;]+)/i', $query, $m ) ) {
+				$table = trim( $m[1], '`' );
+				$query = "SELECT name FROM pragma_table_info('{$table}')";
+			}
+			$stmt = $this->pdo->query( $query );
+			return $stmt ? $stmt->fetchAll( \PDO::FETCH_COLUMN, $x ) : array();
+		} catch ( \Throwable $e ) {
+			return array();
+		}
+	}
+
+	public function get_results( string $query, string $output = 'OBJECT' ): mixed {
+		try {
+			if ( preg_match( '/SHOW INDEX(?:ES)? FROM\s+([^\s;]+)/i', $query, $m ) ) {
+				$table = trim( $m[1], '`' );
+				$query = "SELECT name AS Key_name FROM pragma_index_list('{$table}')";
+			}
+			$stmt = $this->pdo->query( $query );
+			if ( ! $stmt ) {
+				return array();
+			}
+			$rows = $stmt->fetchAll( \PDO::FETCH_ASSOC );
+			if ( 'ARRAY_A' === $output ) {
+				return $rows;
+			}
+			return array_map( static fn( $r ) => (object) $r, $rows );
+		} catch ( \Throwable $e ) {
+			return array();
 		}
 	}
 
@@ -764,6 +817,240 @@ run_test( 'Database Installer: maybe_upgrade detects older version and upgrades 
 } );
 
 // ---------------------------------------------------------------------
+// TEST GROUP 7: Corrective Phase 1 #2 Regressions
+// ---------------------------------------------------------------------
+
+run_test( 'Lock Manager: idempotency empty-args verification enforces args_hash check', function () {
+	$idemp_key = 'idem_empty_' . uniqid();
+	$ability   = 'full-elementor-mcp/get-settings';
+	$user_id   = 1;
+	$cred_uuid = 'cred-test-empty';
+
+	// Case A: Stored with non-empty args, replayed with empty args []
+	$saved_a = Full_Elementor_MCP_Lock_Manager::set_idempotent_result(
+		$idemp_key . '_a',
+		$ability,
+		$user_id,
+		$cred_uuid,
+		array( 'scope' => 'all' ),
+		array( 'result' => 'ok' ),
+		60
+	);
+	assert_true( $saved_a );
+
+	$replay_empty = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key . '_a',
+		$ability,
+		$user_id,
+		$cred_uuid,
+		array() // incoming empty args must NOT bypass args_hash check!
+	);
+	assert_true( is_wp_error( $replay_empty ), 'Empty args replay against non-empty original must return error.' );
+	assert_equals( 'idempotency_conflict', $replay_empty->get_error_code() );
+
+	// Case B: Stored with empty args [], replayed with empty args [] -> succeeds
+	$saved_b = Full_Elementor_MCP_Lock_Manager::set_idempotent_result(
+		$idemp_key . '_b',
+		$ability,
+		$user_id,
+		$cred_uuid,
+		array(),
+		array( 'result' => 'empty_ok' ),
+		60
+	);
+	assert_true( $saved_b );
+
+	$replay_match = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key . '_b',
+		$ability,
+		$user_id,
+		$cred_uuid,
+		array()
+	);
+	assert_equals( array( 'result' => 'empty_ok' ), $replay_match );
+
+	// Case C: Stored with empty args [], replayed with non-empty args -> conflict
+	$replay_tampered = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key . '_b',
+		$ability,
+		$user_id,
+		$cred_uuid,
+		array( 'injected' => 123 )
+	);
+	assert_true( is_wp_error( $replay_tampered ) );
+	assert_equals( 'idempotency_conflict', $replay_tampered->get_error_code() );
+} );
+
+run_test( 'Lock Manager: recursive canonical hashing produces identical hash for different key order', function () {
+	$args1 = array(
+		'z_index'  => 10,
+		'settings' => array(
+			'padding' => '10px',
+			'margin'  => '5px',
+			'colors'  => array(
+				'primary'   => '#fff',
+				'secondary' => '#000',
+			),
+		),
+		'title'    => 'Hero Section',
+	);
+
+	$args2 = array(
+		'title'    => 'Hero Section',
+		'settings' => array(
+			'margin'  => '5px',
+			'colors'  => array(
+				'secondary' => '#000',
+				'primary'   => '#fff',
+			),
+			'padding' => '10px',
+		),
+		'z_index'  => 10,
+	);
+
+	$hash1 = Full_Elementor_MCP_Lock_Manager::hash_args( $args1 );
+	$hash2 = Full_Elementor_MCP_Lock_Manager::hash_args( $args2 );
+
+	assert_equals( $hash1, $hash2, 'Recursive key reordering must generate identical argument hash.' );
+} );
+
+run_test( 'Lock Manager: list ordering remains significant during canonicalization', function () {
+	$list_a = array(
+		'elements' => array( 'section_1', 'section_2', 'section_3' ),
+	);
+	$list_b = array(
+		'elements' => array( 'section_3', 'section_2', 'section_1' ),
+	);
+
+	$hash_a = Full_Elementor_MCP_Lock_Manager::hash_args( $list_a );
+	$hash_b = Full_Elementor_MCP_Lock_Manager::hash_args( $list_b );
+
+	assert_true( $hash_a !== $hash_b, 'Indexed list element order must produce different hashes.' );
+} );
+
+run_test( 'Database Installer: maybe_upgrade fast-path executes without table verification queries', function () {
+	// Set installed DB version to current.
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, Full_Elementor_MCP_Database_Installer::DB_VERSION );
+
+	// Drop one of the tables in SQLite to prove verify_tables_exist() is NOT called on fast-path!
+	global $wpdb;
+	$wpdb->query( 'DROP TABLE IF EXISTS ' . Full_Elementor_MCP_Database_Installer::get_audit_log_table() );
+
+	// maybe_upgrade() should return true immediately via fast-path without checking tables.
+	$fast_res = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+	assert_true( $fast_res, 'Fast path must return true immediately when DB_VERSION is up to date.' );
+
+	// Reinstall table for subsequent tests.
+	Full_Elementor_MCP_Database_Installer::install();
+	assert_true( Full_Elementor_MCP_Database_Installer::verify_tables_exist() );
+} );
+
+run_test( 'Database Installer: migration fails and aborts DB version update if required column or index is missing', function () {
+	global $wpdb;
+
+	// Reset option DB version.
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '0.5.0' );
+
+	// Create a damaged journal table missing the 'fencing_token' column.
+	$journal_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->query( "DROP TABLE IF EXISTS {$journal_table}" );
+	$wpdb->query( "CREATE TABLE {$journal_table} ( id INTEGER PRIMARY KEY, ability TEXT, status TEXT )" );
+
+	// Run schema verification directly.
+	$schema_ok = Full_Elementor_MCP_Database_Installer::verify_schema();
+	assert_false( $schema_ok, 'verify_schema must return false when required columns are missing.' );
+
+	// Run upgrade: must fail and NOT save DB_VERSION.
+	$upgraded = Full_Elementor_MCP_Database_Installer::upgrade( '0.5.0' );
+	assert_false( $upgraded, 'Upgrade must return false when schema verification fails.' );
+	assert_equals( '0.5.0', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
+
+	// Clean up and reinstall complete tables.
+	$wpdb->query( "DROP TABLE IF EXISTS {$journal_table}" );
+	Full_Elementor_MCP_Database_Installer::install();
+	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema() );
+	assert_equals( Full_Elementor_MCP_Database_Installer::DB_VERSION, get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
+} );
+
+run_test( 'Lock Manager: lease renewal never shortens active lease duration', function () {
+	global $wpdb;
+
+	$res_key = 'lease_ttl_test_' . uniqid();
+	$owner   = 'owner_lease_tester';
+
+	// Acquire lock with initial TTL of 120 seconds.
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 120 );
+	assert_true( $lock['acquired'] );
+	$initial_expires = $lock['expires_at'];
+	$initial_ts      = strtotime( $initial_expires . ' UTC' );
+
+	// Attempt to renew lease with smaller extra_seconds = 10.
+	// Heartbeat semantics MUST extend from max(current_expiry, now) + extra_seconds, never shortening!
+	$renewed = Full_Elementor_MCP_Lock_Manager::renew_lease( $res_key, $owner, $lock['fencing_token'], 10 );
+	assert_true( $renewed );
+
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = 'lock_' . sanitize_key( $res_key );
+	$row      = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+
+	$renewed_ts = strtotime( $row['expires_at'] . ' UTC' );
+	assert_true(
+		$renewed_ts >= $initial_ts,
+		"Renewed lease expiry ({$row['expires_at']}) must be >= initial expiry ({$initial_expires})."
+	);
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
+} );
+
+run_test( 'Lock Manager: stale fencing token cannot release newer generation lock', function () {
+	global $wpdb;
+
+	$res_key = 'lock_fencing_release_' . uniqid();
+	$owner   = 'owner_fencing_tester';
+
+	// Acquire Generation 1 lock.
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock1['acquired'] );
+	assert_equals( 1, $lock1['fencing_token'] );
+
+	// Simulate lock advancement to Generation 2 (e.g. after takeover or lease generation bump).
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = 'lock_' . sanitize_key( $res_key );
+	$wpdb->query(
+		$wpdb->prepare(
+			"UPDATE {$table} SET fencing_token = 2 WHERE token_key = %s",
+			$lock_key
+		)
+	);
+
+	// Stale Generation 1 attempts to release lock: MUST fail!
+	$released_stale = Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, 1 );
+	assert_false( $released_stale, 'Release with stale fencing token=1 must return false.' );
+
+	// Verify lock in database is STILL active (used = 0, fencing_token = 2).
+	$current_row = $wpdb->get_row(
+		$wpdb->prepare( "SELECT fencing_token, used FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	assert_equals( 2, (int) $current_row['fencing_token'] );
+	assert_equals( 0, (int) $current_row['used'], 'Lock must remain active after failed release.' );
+
+	// Valid Generation 2 releases lock: MUST succeed!
+	$released_valid = Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, 2 );
+	assert_true( $released_valid, 'Release with matching fencing token=2 must succeed.' );
+
+	$released_row = $wpdb->get_row(
+		$wpdb->prepare( "SELECT used FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	assert_equals( 1, (int) $released_row['used'], 'Lock must now be marked used/released.' );
+} );
+
+// ---------------------------------------------------------------------
 // Test Summary
 // ---------------------------------------------------------------------
 echo "\n=======================================================\n";
@@ -774,3 +1061,4 @@ if ( $passed_tests !== $total_tests ) {
 	exit( 1 );
 }
 exit( 0 );
+

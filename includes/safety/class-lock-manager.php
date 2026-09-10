@@ -276,28 +276,58 @@ class Full_Elementor_MCP_Lock_Manager {
 	/**
 	 * Extends lease expiration for a currently held lock (heartbeat).
 	 *
+	 * Guaranteed to never shorten an active lease duration: extends from max(current_expiry, now) + extra_seconds.
+	 *
 	 * @param string $resource_key  Identifier for resource.
 	 * @param string $owner_id      Caller request UUID.
 	 * @param int    $fencing_token Caller fencing token.
 	 * @param int    $extra_seconds Additional seconds to extend lease.
-	 * @return bool True if extended, false if lock not owned.
+	 * @return bool True if extended, false if lock not owned or expired.
 	 */
 	public static function renew_lease( string $resource_key, string $owner_id, int $fencing_token, int $extra_seconds = 30 ): bool {
 		global $wpdb;
 
-		$table      = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$lock_key   = 'lock_' . sanitize_key( $resource_key );
-		$now_ts     = time();
-		$expires_dt = gmdate( 'Y-m-d H:i:s', $now_ts + max( 5, $extra_seconds ) );
+		if ( '' === trim( $resource_key ) || '' === trim( $owner_id ) || $fencing_token < 1 ) {
+			return false;
+		}
+
+		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+		$lock_key = 'lock_' . sanitize_key( $resource_key );
+		$now_ts   = time();
+
+		// Fetch current active lease for owner and fencing token.
+		$current = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT expires_at FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$lock_key,
+				$owner_id,
+				$fencing_token
+			),
+			ARRAY_A
+		);
+
+		if ( empty( $current ) || empty( $current['expires_at'] ) ) {
+			return false;
+		}
+
+		$current_expires_ts = strtotime( $current['expires_at'] . ' UTC' );
+		if ( false === $current_expires_ts || $current_expires_ts <= $now_ts ) {
+			return false; // Already expired, cannot renew.
+		}
+
+		// Never shorten active lease: extend from max(current_expires_ts, now_ts).
+		$base_ts   = max( $current_expires_ts, $now_ts );
+		$target_ts = $base_ts + max( 5, $extra_seconds );
+		$target_dt = gmdate( 'Y-m-d H:i:s', $target_ts );
 
 		$updated = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET expires_at = %s WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND expires_at > %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				$expires_dt,
+				"UPDATE {$table} SET expires_at = %s WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0 AND expires_at < %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$target_dt,
 				$lock_key,
 				$owner_id,
 				$fencing_token,
-				gmdate( 'Y-m-d H:i:s', $now_ts )
+				$target_dt
 			)
 		);
 
@@ -307,14 +337,19 @@ class Full_Elementor_MCP_Lock_Manager {
 	/**
 	 * Releases an acquired lock.
 	 *
-	 * Only releases if owner matches, ensuring a stale caller never unlocks a new transaction.
+	 * Strictly binds to token_key, owner_id, and fencing_token so stale generations cannot release newer leases.
 	 *
-	 * @param string $resource_key Identifier for resource.
-	 * @param string $owner_id     Caller request UUID.
+	 * @param string $resource_key  Identifier for resource.
+	 * @param string $owner_id      Caller request UUID.
+	 * @param int    $fencing_token Optional caller fencing token for generation verification.
 	 * @return bool True if released.
 	 */
-	public static function release_lock( string $resource_key, string $owner_id ): bool {
+	public static function release_lock( string $resource_key, string $owner_id, int $fencing_token = 0 ): bool {
 		global $wpdb;
+
+		if ( '' === trim( $resource_key ) || '' === trim( $owner_id ) ) {
+			return false;
+		}
 
 		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 		$lock_key = 'lock_' . sanitize_key( $resource_key );
@@ -322,28 +357,82 @@ class Full_Elementor_MCP_Lock_Manager {
 
 		// Rather than hard-deleting the row, we expire the lock and mark it used
 		// while retaining the fencing_token counter to ensure strict monotonic increase.
-		$updated = $wpdb->query(
-			$wpdb->prepare(
-				"UPDATE {$table} SET expires_at = %s, used = 1 WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				$past_dt,
-				$lock_key,
-				$owner_id
-			)
-		);
+		if ( $fencing_token > 0 ) {
+			$updated = $wpdb->query(
+				$wpdb->prepare(
+					"UPDATE {$table} SET expires_at = %s, used = 1 WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$past_dt,
+					$lock_key,
+					$owner_id,
+					$fencing_token
+				)
+			);
+		} else {
+			$updated = $wpdb->query(
+				$wpdb->prepare(
+					"UPDATE {$table} SET expires_at = %s, used = 1 WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$past_dt,
+					$lock_key,
+					$owner_id
+				)
+			);
+		}
 
 		return false !== $updated && $updated > 0;
 	}
 
 	/**
-	 * Generates a normalized SHA-256 hash of mutation arguments.
+	 * Recursively canonicalizes data structures: sorts associative keys alphabetically
+	 * while strictly preserving sequential/indexed list array ordering.
+	 *
+	 * @param mixed $data Arbitrary input data.
+	 * @return mixed Canonical representation.
+	 */
+	public static function canonicalize_args( mixed $data ): mixed {
+		if ( is_object( $data ) ) {
+			$data = get_object_vars( $data );
+		}
+
+		if ( ! is_array( $data ) ) {
+			return $data;
+		}
+
+		if ( empty( $data ) ) {
+			return array();
+		}
+
+		// Check if sequential indexed list.
+		$is_list = function_exists( 'array_is_list' )
+			? array_is_list( $data )
+			: ( array_keys( $data ) === range( 0, count( $data ) - 1 ) );
+
+		if ( $is_list ) {
+			$canonical = array();
+			foreach ( $data as $item ) {
+				$canonical[] = self::canonicalize_args( $item );
+			}
+			return $canonical;
+		}
+
+		// Associative array: sort keys recursively.
+		ksort( $data, SORT_STRING );
+		$canonical = array();
+		foreach ( $data as $key => $value ) {
+			$canonical[ (string) $key ] = self::canonicalize_args( $value );
+		}
+		return $canonical;
+	}
+
+	/**
+	 * Generates a normalized SHA-256 hash of mutation arguments using recursive canonicalization.
 	 *
 	 * @param array $args Mutation arguments.
 	 * @return string 64-character SHA-256 hex hash.
 	 */
 	public static function hash_args( array $args ): string {
-		ksort( $args );
-		$json = wp_json_encode( $args );
-		return hash( 'sha256', false !== $json ? $json : serialize( $args ) );
+		$canonical = self::canonicalize_args( $args );
+		$json      = wp_json_encode( $canonical );
+		return hash( 'sha256', false !== $json ? $json : serialize( $canonical ) );
 	}
 
 	/**
@@ -407,8 +496,8 @@ class Full_Elementor_MCP_Lock_Manager {
 			return null;
 		}
 
-		// Verify args_hash to prevent argument substitution / payload confusion.
-		if ( ! empty( $args ) && isset( $payload['args_hash'] ) ) {
+		// Always verify args_hash when present in payload, even for empty args.
+		if ( isset( $payload['args_hash'] ) ) {
 			$incoming_hash = self::hash_args( $args );
 			if ( ! hash_equals( (string) $payload['args_hash'], $incoming_hash ) ) {
 				return new \WP_Error(

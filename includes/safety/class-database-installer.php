@@ -173,7 +173,7 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Executes schema installation/upgrade via dbDelta or direct query fallback.
 	 *
-	 * Updates the DB version option ONLY after verification succeeds.
+	 * Updates the DB version option ONLY after full schema verification succeeds.
 	 *
 	 * @param string $from_version Currently installed version.
 	 * @return bool True if upgrade was successful and verified.
@@ -196,12 +196,12 @@ class Full_Elementor_MCP_Database_Installer {
 			}
 		}
 
-		// Verify that all 4 required tables exist before updating the version option!
-		if ( ! self::verify_tables_exist() ) {
+		// Verify that all 4 required tables and critical columns exist before updating version!
+		if ( ! self::verify_schema() ) {
 			return false;
 		}
 
-		// Only record new version after migration + verification succeeds.
+		// Only record new version after full schema verification succeeds.
 		update_option( self::OPTION_DB_VERSION, self::DB_VERSION );
 
 		return true;
@@ -210,18 +210,19 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Checks if schema upgrade is needed and executes it.
 	 *
-	 * Safe to call on every plugin boot (`plugins_loaded`) to handle in-place updates.
+	 * Uses fast-path comparison to eliminate database overhead on ordinary requests.
 	 *
 	 * @return bool True if schema is up to date and verified.
 	 */
 	public static function maybe_upgrade(): bool {
 		$installed_version = get_option( self::OPTION_DB_VERSION, '0.0.0' );
 
-		if ( version_compare( (string) $installed_version, self::DB_VERSION, '<' ) || ! self::verify_tables_exist() ) {
-			return self::upgrade( (string) $installed_version );
+		// Fast path for runtime requests: if version matches, return immediately with zero DB query overhead!
+		if ( version_compare( (string) $installed_version, self::DB_VERSION, '>=' ) ) {
+			return true;
 		}
 
-		return true;
+		return self::upgrade( (string) $installed_version );
 	}
 
 	/**
@@ -231,6 +232,107 @@ class Full_Elementor_MCP_Database_Installer {
 	 */
 	public static function install(): bool {
 		return self::upgrade( '0.0.0' );
+	}
+
+	/**
+	 * Retrieves list of column names for a given table.
+	 *
+	 * @param string $table Table name.
+	 * @return string[] Array of lowercase column names.
+	 */
+	public static function get_table_columns( string $table ): array {
+		global $wpdb;
+
+		// 1. MySQL / MariaDB standard query.
+		$cols = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $cols ) && is_array( $cols ) ) {
+			return array_values( array_map( 'strtolower', $cols ) );
+		}
+
+		// 2. SQLite PRAGMA fallback for test environments.
+		$info = $wpdb->get_results( "PRAGMA table_info({$table})", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $info ) && is_array( $info ) ) {
+			return array_values( array_map( 'strtolower', array_column( $info, 'name' ) ) );
+		}
+
+		return array();
+	}
+
+	/**
+	 * Retrieves list of index names for a given table.
+	 *
+	 * @param string $table Table name.
+	 * @return string[] Array of lowercase index names.
+	 */
+	public static function get_table_indexes( string $table ): array {
+		global $wpdb;
+
+		// 1. MySQL / MariaDB standard query.
+		$indices = $wpdb->get_results( "SHOW INDEX FROM {$table}", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $indices ) && is_array( $indices ) ) {
+			return array_values( array_unique( array_map( 'strtolower', array_column( $indices, 'Key_name' ) ) ) );
+		}
+
+		// 2. SQLite PRAGMA fallback for test environments.
+		$sqlite_indices = $wpdb->get_results( "PRAGMA index_list({$table})", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $sqlite_indices ) && is_array( $sqlite_indices ) ) {
+			return array_values( array_unique( array_map( 'strtolower', array_column( $sqlite_indices, 'name' ) ) ) );
+		}
+
+		return array();
+	}
+
+	/**
+	 * Verifies that all required tables, critical columns, and critical indexes exist.
+	 *
+	 * Ensures migration was completely successful before updating DB_VERSION option.
+	 *
+	 * @return bool True if all tables, critical columns, and critical indexes exist.
+	 */
+	public static function verify_schema(): bool {
+		// 1. Check table existence.
+		if ( ! self::verify_tables_exist() ) {
+			return false;
+		}
+
+		// 2. Critical columns per table.
+		$critical_columns = array(
+			self::get_journal_table()     => array( 'fencing_token', 'before_state', 'before_hash', 'after_hash', 'status' ),
+			self::get_checkpoints_table() => array( 'key_version', 'key_id' ),
+			self::get_tokens_table()      => array( 'token_key', 'token_type', 'owner_id', 'fencing_token', 'expires_at' ),
+		);
+
+		foreach ( $critical_columns as $table => $required_cols ) {
+			$actual_cols = self::get_table_columns( $table );
+			if ( empty( $actual_cols ) ) {
+				return false;
+			}
+			foreach ( $required_cols as $req_col ) {
+				if ( ! in_array( strtolower( $req_col ), $actual_cols, true ) ) {
+					return false;
+				}
+			}
+		}
+
+		// 3. Critical indexes per table.
+		$critical_indexes = array(
+			self::get_journal_table() => array( 'idx_status', 'idx_object' ),
+			self::get_tokens_table()  => array( 'idx_type_expires' ),
+		);
+
+		foreach ( $critical_indexes as $table => $required_indexes ) {
+			$actual_indexes = self::get_table_indexes( $table );
+			if ( empty( $actual_indexes ) ) {
+				return false;
+			}
+			foreach ( $required_indexes as $req_index ) {
+				if ( ! in_array( strtolower( $req_index ), $actual_indexes, true ) ) {
+					return false;
+				}
+			}
+		}
+
+		return true;
 	}
 
 	/**
