@@ -459,7 +459,7 @@ run_test( 'Lock Manager: assert fencing token ownership rejects stale writer tok
 } );
 
 run_test( 'Lock Manager: release lock allows subsequent client to acquire with fencing token = 2', function () {
-	$released = Full_Elementor_MCP_Lock_Manager::release_lock( 'post_100', 'req_uuid_aaa' );
+	$released = Full_Elementor_MCP_Lock_Manager::release_lock( 'post_100', 'req_uuid_aaa', 1 );
 	assert_true( $released );
 
 	// Next client now acquires lock: fencing token must increment to 2!
@@ -468,19 +468,23 @@ run_test( 'Lock Manager: release lock allows subsequent client to acquire with f
 	assert_equals( 2, $res2['fencing_token'] );
 	assert_equals( 'req_uuid_bbb', $res2['owner_id'] );
 
-	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_100', 'req_uuid_bbb' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_100', 'req_uuid_bbb', 2 );
 } );
 
 run_test( 'Lock Manager: idempotency result set and get', function () {
 	$idemp_key = 'test_key_' . uniqid();
+	$ability   = 'full-elementor-mcp/create-page';
+	$user_id   = 1;
+	$cred_uuid = 'test-cred-uuid';
+	$args      = array( 'title' => 'Sample Page' );
 	$payload   = array( 'success' => true, 'post_id' => 42, 'message' => 'Created' );
 
-	assert_true( Full_Elementor_MCP_Lock_Manager::set_idempotent_result( $idemp_key, $payload, 60 ) );
-	$cached = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key );
+	assert_true( Full_Elementor_MCP_Lock_Manager::set_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args, $payload, 60 ) );
+	$cached = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args );
 	assert_equals( $payload, $cached );
 
 	// Unknown key returns null.
-	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( 'non_existent_key' ) );
+	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( 'non_existent_key', $ability, $user_id, $cred_uuid, $args ) );
 } );
 
 // ---------------------------------------------------------------------
@@ -694,7 +698,7 @@ run_test( 'Lock Manager: duplicate lock acquisition detects collision and reject
 	assert_true( is_wp_error( $res2 ) );
 	assert_equals( 'resource_locked', $res2->get_error_code() );
 
-	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_collision_atomic', 'owner_alpha' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_collision_atomic', 'owner_alpha', 1 );
 } );
 
 // 4. Expired-Lock Takeover Race Semantics (Compare-And-Swap)
@@ -724,7 +728,7 @@ run_test( 'Lock Manager: expired-lock takeover via CAS strictly increments fenci
 	assert_true( is_wp_error( $res_c ) );
 	assert_equals( 'resource_locked', $res_c->get_error_code() );
 
-	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_cas_test', 'owner_b' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_cas_test', 'owner_b', 2 );
 } );
 
 // 5. Custom Scope Fail-Closed on Empty Allowlist
@@ -981,8 +985,7 @@ run_test( 'Lock Manager: lease renewal never shortens active lease duration', fu
 	// Acquire lock with initial TTL of 120 seconds.
 	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 120 );
 	assert_true( $lock['acquired'] );
-	$initial_expires = $lock['expires_at'];
-	$initial_ts      = strtotime( $initial_expires . ' UTC' );
+	$initial_ts = (int) $lock['expires_at'];
 
 	// Attempt to renew lease with smaller extra_seconds = 10.
 	// Heartbeat semantics MUST extend from max(current_expiry, now) + extra_seconds, never shortening!
@@ -999,7 +1002,7 @@ run_test( 'Lock Manager: lease renewal never shortens active lease duration', fu
 	$renewed_ts = strtotime( $row['expires_at'] . ' UTC' );
 	assert_true(
 		$renewed_ts >= $initial_ts,
-		"Renewed lease expiry ({$row['expires_at']}) must be >= initial expiry ({$initial_expires})."
+		"Renewed lease expiry ({$row['expires_at']}) must be >= initial expiry (" . gmdate( 'Y-m-d H:i:s', $initial_ts ) . ")."
 	);
 
 	// Cleanup.
@@ -1048,6 +1051,54 @@ run_test( 'Lock Manager: stale fencing token cannot release newer generation loc
 		ARRAY_A
 	);
 	assert_equals( 1, (int) $released_row['used'], 'Lock must now be marked used/released.' );
+} );
+
+run_test( 'Lock Manager: same owner acquire_lock re-entry is monotonic and never shortens expiry', function () {
+	global $wpdb;
+
+	$res_key = 'reentry_monotonic_' . uniqid();
+	$owner   = 'owner_reentry_tester';
+
+	// 1. Acquire lock with long TTL = 120 seconds.
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 120 );
+	assert_true( $lock1['acquired'] );
+	$fencing1 = $lock1['fencing_token'];
+
+	// 2. Renew lease by extending +30 seconds.
+	$renewed = Full_Elementor_MCP_Lock_Manager::renew_lease( $res_key, $owner, $fencing1, 30 );
+	assert_true( $renewed );
+
+	$table       = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key    = 'lock_' . sanitize_key( $res_key );
+	$row_renewed = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	$renewed_ts = strtotime( $row_renewed['expires_at'] . ' UTC' );
+
+	// 3. Same owner calls acquire_lock() again with a much shorter TTL (e.g. 10 seconds).
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 10 );
+	assert_true( $lock2['acquired'] );
+	assert_equals( $fencing1, $lock2['fencing_token'], 'Re-entry must preserve fencing token.' );
+
+	$row_reentry = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	$final_ts = strtotime( $row_reentry['expires_at'] . ' UTC' );
+
+	// 4. Final expiry must remain >= renewal expiry.
+	assert_true(
+		$final_ts >= $renewed_ts,
+		"Same-owner re-entry expiry ({$final_ts}) must be >= previous renewal expiry ({$renewed_ts})."
+	);
+	assert_true(
+		(int) $lock2['expires_at'] >= $renewed_ts,
+		"Returned re-entry expires_at timestamp must be >= previous renewal expiry."
+	);
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock2['fencing_token'] );
 } );
 
 // ---------------------------------------------------------------------

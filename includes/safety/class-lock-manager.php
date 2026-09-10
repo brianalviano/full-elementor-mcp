@@ -86,38 +86,52 @@ class Full_Elementor_MCP_Lock_Manager {
 		}
 
 		// STEP 2: The row already exists.
-		// If the CURRENT owner holds an ACTIVE lease, renew lease without incrementing fencing_token.
-		$renewed = $wpdb->query(
+		// If the CURRENT owner holds an ACTIVE lease, renew lease monotonically without incrementing fencing_token.
+		$active_owner = $wpdb->get_row(
 			$wpdb->prepare(
-				"UPDATE {$table}
-				SET expires_at = %s
-				WHERE token_key = %s
-				  AND token_type = 'lock'
-				  AND owner_id = %s
-				  AND expires_at >= %s
-				  AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				$expires_dt,
+				"SELECT fencing_token, expires_at FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key,
-				$owner_id,
-				$now_dt
-			)
+				$owner_id
+			),
+			ARRAY_A
 		);
 
-		if ( false !== $renewed && $renewed > 0 ) {
-			$fencing_token = (int) $wpdb->get_var(
-				$wpdb->prepare(
-					"SELECT fencing_token FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-					$lock_key
-				)
-			);
+		if ( ! empty( $active_owner ) && ! empty( $active_owner['expires_at'] ) ) {
+			$current_expires_ts = strtotime( $active_owner['expires_at'] . ' UTC' );
+			if ( false !== $current_expires_ts && $current_expires_ts >= $now_ts ) {
+				// Monotonic renewal: target expiry is extended from max(current_expiry, now) + TTL,
+				// ensuring re-entry never shortens an active or previously renewed lease.
+				$base_ts       = max( $current_expires_ts, $now_ts );
+				$target_ts     = $base_ts + max( 5, $ttl_seconds );
+				$target_dt     = gmdate( 'Y-m-d H:i:s', $target_ts );
+				$fencing_token = (int) $active_owner['fencing_token'];
 
-			return array(
-				'acquired'      => true,
-				'resource_key'  => $resource_key,
-				'owner_id'      => $owner_id,
-				'fencing_token' => $fencing_token > 0 ? $fencing_token : 1,
-				'expires_at'    => $expires_ts,
-			);
+				$wpdb->query(
+					$wpdb->prepare(
+						"UPDATE {$table}
+						SET expires_at = %s
+						WHERE token_key = %s
+						  AND token_type = 'lock'
+						  AND owner_id = %s
+						  AND fencing_token = %d
+						  AND used = 0
+						  AND expires_at < %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						$target_dt,
+						$lock_key,
+						$owner_id,
+						$fencing_token,
+						$target_dt
+					)
+				);
+
+				return array(
+					'acquired'      => true,
+					'resource_key'  => $resource_key,
+					'owner_id'      => $owner_id,
+					'fencing_token' => $fencing_token > 0 ? $fencing_token : 1,
+					'expires_at'    => $target_ts,
+				);
+			}
 		}
 
 		// STEP 3: Atomic Compare-And-Swap (CAS) takeover for expired or released locks.
@@ -341,13 +355,13 @@ class Full_Elementor_MCP_Lock_Manager {
 	 *
 	 * @param string $resource_key  Identifier for resource.
 	 * @param string $owner_id      Caller request UUID.
-	 * @param int    $fencing_token Optional caller fencing token for generation verification.
+	 * @param int    $fencing_token Caller fencing token for generation verification.
 	 * @return bool True if released.
 	 */
-	public static function release_lock( string $resource_key, string $owner_id, int $fencing_token = 0 ): bool {
+	public static function release_lock( string $resource_key, string $owner_id, int $fencing_token ): bool {
 		global $wpdb;
 
-		if ( '' === trim( $resource_key ) || '' === trim( $owner_id ) ) {
+		if ( '' === trim( $resource_key ) || '' === trim( $owner_id ) || $fencing_token < 1 ) {
 			return false;
 		}
 
@@ -357,26 +371,15 @@ class Full_Elementor_MCP_Lock_Manager {
 
 		// Rather than hard-deleting the row, we expire the lock and mark it used
 		// while retaining the fencing_token counter to ensure strict monotonic increase.
-		if ( $fencing_token > 0 ) {
-			$updated = $wpdb->query(
-				$wpdb->prepare(
-					"UPDATE {$table} SET expires_at = %s, used = 1 WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-					$past_dt,
-					$lock_key,
-					$owner_id,
-					$fencing_token
-				)
-			);
-		} else {
-			$updated = $wpdb->query(
-				$wpdb->prepare(
-					"UPDATE {$table} SET expires_at = %s, used = 1 WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-					$past_dt,
-					$lock_key,
-					$owner_id
-				)
-			);
-		}
+		$updated = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET expires_at = %s, used = 1 WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$past_dt,
+				$lock_key,
+				$owner_id,
+				$fencing_token
+			)
+		);
 
 		return false !== $updated && $updated > 0;
 	}
@@ -454,6 +457,8 @@ class Full_Elementor_MCP_Lock_Manager {
 	/**
 	 * Retrieves cached idempotent mutation result if exists, valid, and matches arguments.
 	 *
+	 * Strictly identity-bound: requires idempotency_key, ability, user_id, credential_uuid, and args.
+	 *
 	 * @param string      $idempotency_key Caller idempotency UUID or key.
 	 * @param string      $ability         Target ability name.
 	 * @param int         $user_id         Authenticated user ID.
@@ -463,14 +468,14 @@ class Full_Elementor_MCP_Lock_Manager {
 	 */
 	public static function get_idempotent_result(
 		string $idempotency_key,
-		string $ability = '',
-		int $user_id = 0,
-		?string $credential_uuid = null,
-		array $args = array()
+		string $ability,
+		int $user_id,
+		?string $credential_uuid,
+		array $args
 	): array|\WP_Error|null {
 		global $wpdb;
 
-		if ( '' === trim( $idempotency_key ) ) {
+		if ( '' === trim( $idempotency_key ) || '' === trim( $ability ) || $user_id < 1 ) {
 			return null;
 		}
 
@@ -517,63 +522,44 @@ class Full_Elementor_MCP_Lock_Manager {
 	}
 
 	/**
-	 * Stores mutation result for idempotency caching with identity and argument binding.
+	 * Stores mutation result for idempotency caching with strict identity and argument binding.
 	 *
-	 * Supports both strict identity signature and convenience ($idempotency_key, $result, $ttl_seconds) overload.
-	 *
-	 * @param string            $idempotency_key   Caller idempotency UUID or key.
-	 * @param string|array      $ability_or_result Target ability name, or result array for convenience call.
-	 * @param int|array         $user_id_or_args   Authenticated user ID, or TTL seconds for convenience call.
-	 * @param string|null       $credential_uuid   Authenticated credential UUID.
-	 * @param array             $args              Arguments passed to the mutation.
-	 * @param array             $result            Response data to cache.
-	 * @param int               $ttl_seconds       Cache TTL in seconds.
+	 * @param string      $idempotency_key Caller idempotency UUID or key.
+	 * @param string      $ability         Target ability name.
+	 * @param int         $user_id         Authenticated user ID.
+	 * @param string|null $credential_uuid Authenticated credential UUID.
+	 * @param array       $args            Arguments passed to the mutation.
+	 * @param array       $result          Response data to cache.
+	 * @param int         $ttl_seconds     Cache TTL in seconds.
 	 * @return bool True if stored, false on DB failure.
 	 */
 	public static function set_idempotent_result(
 		string $idempotency_key,
-		string|array $ability_or_result,
-		int|array $user_id_or_args = 0,
-		?string $credential_uuid = null,
-		array $args = array(),
-		array $result = array(),
+		string $ability,
+		int $user_id,
+		?string $credential_uuid,
+		array $args,
+		array $result,
 		int $ttl_seconds = self::DEFAULT_IDEMPOTENCY_TTL
 	): bool {
 		global $wpdb;
 
-		if ( '' === trim( $idempotency_key ) ) {
+		if ( '' === trim( $idempotency_key ) || '' === trim( $ability ) || $user_id < 1 ) {
 			return false;
 		}
 
-		if ( is_array( $ability_or_result ) ) {
-			// Convenience signature: set_idempotent_result($idemp_key, $result, $ttl_seconds).
-			$actual_result  = $ability_or_result;
-			$actual_ability = '';
-			$actual_user_id = 0;
-			$actual_cred    = null;
-			$actual_args    = array();
-			$actual_ttl     = is_int( $user_id_or_args ) ? $user_id_or_args : self::DEFAULT_IDEMPOTENCY_TTL;
-		} else {
-			$actual_ability = (string) $ability_or_result;
-			$actual_user_id = is_int( $user_id_or_args ) ? $user_id_or_args : 0;
-			$actual_cred    = $credential_uuid;
-			$actual_args    = $args;
-			$actual_result  = $result;
-			$actual_ttl     = $ttl_seconds;
-		}
-
 		$table      = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$token_key  = self::get_idempotency_token_key( $idempotency_key, $actual_ability, $actual_user_id, $actual_cred );
+		$token_key  = self::get_idempotency_token_key( $idempotency_key, $ability, $user_id, $credential_uuid );
 		$now_dt     = gmdate( 'Y-m-d H:i:s' );
-		$expires_dt = gmdate( 'Y-m-d H:i:s', time() + max( 10, $actual_ttl ) );
-		$args_hash  = self::hash_args( $actual_args );
+		$expires_dt = gmdate( 'Y-m-d H:i:s', time() + max( 10, $ttl_seconds ) );
+		$args_hash  = self::hash_args( $args );
 
 		$payload_data = array(
 			'args_hash'       => $args_hash,
-			'ability'         => $actual_ability,
-			'user_id'         => $actual_user_id,
-			'credential_uuid' => $actual_cred,
-			'result'          => $actual_result,
+			'ability'         => $ability,
+			'user_id'         => $user_id,
+			'credential_uuid' => $credential_uuid,
+			'result'          => $result,
 		);
 
 		$encoded = wp_json_encode( $payload_data );
@@ -586,7 +572,7 @@ class Full_Elementor_MCP_Lock_Manager {
 			array(
 				'token_key'     => $token_key,
 				'token_type'    => 'idempotency',
-				'owner_id'      => $actual_cred ?? (string) $actual_user_id,
+				'owner_id'      => $credential_uuid ?? (string) $user_id,
 				'fencing_token' => 0,
 				'payload'       => $encoded,
 				'created_at'    => $now_dt,
