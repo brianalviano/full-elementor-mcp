@@ -66,11 +66,13 @@ class Full_Elementor_MCP_Database_Installer {
 	}
 
 	/**
-	 * Installs or upgrades all 4 required database tables.
+	 * Returns dbDelta-compliant table definitions for all 4 safety tables.
 	 *
-	 * @return bool True if all tables exist or were created.
+	 * Note: dbDelta requires two spaces after PRIMARY KEY and fields on separate lines.
+	 *
+	 * @return string[] Array of SQL CREATE TABLE statements.
 	 */
-	public static function install(): bool {
+	public static function get_schema_definitions(): array {
 		global $wpdb;
 
 		$charset_collate = $wpdb->get_charset_collate();
@@ -83,97 +85,152 @@ class Full_Elementor_MCP_Database_Installer {
 		$audit_log_table   = self::get_audit_log_table();
 		$tokens_table      = self::get_tokens_table();
 
-		// 1. Write-Ahead Journal table.
-		$sql_journal = "CREATE TABLE IF NOT EXISTS {$journal_table} (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-			ability VARCHAR(100) NOT NULL,
-			action VARCHAR(20) NOT NULL,
-			object_type VARCHAR(30) NOT NULL,
-			object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-			created_object_id BIGINT UNSIGNED DEFAULT NULL,
-			fencing_token BIGINT UNSIGNED NOT NULL DEFAULT 0,
-			before_state LONGTEXT DEFAULT NULL,
-			before_hash VARCHAR(64) DEFAULT NULL,
-			after_hash VARCHAR(64) DEFAULT NULL,
-			status VARCHAR(20) NOT NULL DEFAULT 'pending',
-			error_message TEXT DEFAULT NULL,
-			user_id BIGINT UNSIGNED DEFAULT NULL,
-			credential_uuid VARCHAR(64) DEFAULT NULL,
-			PRIMARY KEY (id),
-			KEY idx_status (status),
-			KEY idx_object (object_type, object_id),
-			KEY idx_created (created_at)
-		) {$charset_collate};";
+		return array(
+			// 1. Write-Ahead Journal table.
+			"CREATE TABLE {$journal_table} (
+				id bigint(20) unsigned NOT NULL auto_increment,
+				created_at datetime NOT NULL default CURRENT_TIMESTAMP,
+				updated_at datetime NOT NULL default CURRENT_TIMESTAMP on update CURRENT_TIMESTAMP,
+				ability varchar(100) NOT NULL,
+				action varchar(20) NOT NULL,
+				object_type varchar(30) NOT NULL,
+				object_id bigint(20) unsigned NOT NULL default 0,
+				created_object_id bigint(20) unsigned default NULL,
+				fencing_token bigint(20) unsigned NOT NULL default 0,
+				before_state longtext default NULL,
+				before_hash varchar(64) default NULL,
+				after_hash varchar(64) default NULL,
+				status varchar(20) NOT NULL default 'pending',
+				error_message text default NULL,
+				user_id bigint(20) unsigned default NULL,
+				credential_uuid varchar(64) default NULL,
+				PRIMARY KEY  (id),
+				KEY idx_status (status),
+				KEY idx_object (object_type, object_id),
+				KEY idx_created (created_at)
+			) {$charset_collate};",
 
-		// 2. Checkpoints table.
-		$sql_checkpoints = "CREATE TABLE IF NOT EXISTS {$checkpoints_table} (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			label VARCHAR(255) NOT NULL,
-			description TEXT DEFAULT NULL,
-			trigger_type VARCHAR(20) NOT NULL DEFAULT 'manual',
-			file_path VARCHAR(500) NOT NULL,
-			file_hash_hmac VARCHAR(64) NOT NULL,
-			encryption_algorithm VARCHAR(30) NOT NULL DEFAULT 'none',
-			key_version INT UNSIGNED NOT NULL DEFAULT 1,
-			key_id VARCHAR(64) DEFAULT NULL,
-			size_bytes BIGINT UNSIGNED DEFAULT 0,
-			items_count INT UNSIGNED DEFAULT 0,
-			elementor_version VARCHAR(20) DEFAULT NULL,
-			wp_version VARCHAR(20) DEFAULT NULL,
-			created_by BIGINT UNSIGNED DEFAULT NULL,
-			PRIMARY KEY (id),
-			KEY idx_created (created_at)
-		) {$charset_collate};";
+			// 2. Checkpoints table.
+			"CREATE TABLE {$checkpoints_table} (
+				id bigint(20) unsigned NOT NULL auto_increment,
+				created_at datetime NOT NULL default CURRENT_TIMESTAMP,
+				label varchar(255) NOT NULL,
+				description text default NULL,
+				trigger_type varchar(20) NOT NULL default 'manual',
+				file_path varchar(500) NOT NULL,
+				file_hash_hmac varchar(64) NOT NULL,
+				encryption_algorithm varchar(30) NOT NULL default 'none',
+				key_version int(10) unsigned NOT NULL default 1,
+				key_id varchar(64) default NULL,
+				size_bytes bigint(20) unsigned default 0,
+				items_count int(10) unsigned default 0,
+				elementor_version varchar(20) default NULL,
+				wp_version varchar(20) default NULL,
+				created_by bigint(20) unsigned default NULL,
+				PRIMARY KEY  (id),
+				KEY idx_created (created_at)
+			) {$charset_collate};",
 
-		// 3. Forensic Audit Log table.
-		$sql_audit_log = "CREATE TABLE IF NOT EXISTS {$audit_log_table} (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			event VARCHAR(50) NOT NULL,
-			ability VARCHAR(100) DEFAULT NULL,
-			object_type VARCHAR(30) DEFAULT NULL,
-			object_id BIGINT UNSIGNED DEFAULT NULL,
-			user_id BIGINT UNSIGNED DEFAULT NULL,
-			credential_uuid VARCHAR(64) DEFAULT NULL,
-			ip_address VARCHAR(45) DEFAULT NULL,
-			args_sanitized LONGTEXT DEFAULT NULL,
-			result_status VARCHAR(20) DEFAULT NULL,
-			change_id BIGINT UNSIGNED DEFAULT NULL,
-			execution_time_ms INT UNSIGNED DEFAULT 0,
-			PRIMARY KEY (id),
-			KEY idx_timestamp (timestamp),
-			KEY idx_event (event),
-			KEY idx_ability (ability),
-			KEY idx_change (change_id)
-		) {$charset_collate};";
+			// 3. Forensic Audit Log table.
+			"CREATE TABLE {$audit_log_table} (
+				id bigint(20) unsigned NOT NULL auto_increment,
+				timestamp datetime NOT NULL default CURRENT_TIMESTAMP,
+				event varchar(50) NOT NULL,
+				ability varchar(100) default NULL,
+				object_type varchar(30) default NULL,
+				object_id bigint(20) unsigned default NULL,
+				user_id bigint(20) unsigned default NULL,
+				credential_uuid varchar(64) default NULL,
+				ip_address varchar(45) default NULL,
+				args_sanitized longtext default NULL,
+				result_status varchar(20) default NULL,
+				change_id bigint(20) unsigned default NULL,
+				execution_time_ms int(10) unsigned default 0,
+				PRIMARY KEY  (id),
+				KEY idx_timestamp (timestamp),
+				KEY idx_event (event),
+				KEY idx_ability (ability),
+				KEY idx_change (change_id)
+			) {$charset_collate};",
 
-		// 4. Tokens, Locks & Idempotency table.
-		$sql_tokens = "CREATE TABLE IF NOT EXISTS {$tokens_table} (
-			token_key VARCHAR(128) NOT NULL,
-			token_type VARCHAR(20) NOT NULL,
-			owner_id VARCHAR(64) DEFAULT NULL,
-			fencing_token BIGINT UNSIGNED NOT NULL DEFAULT 0,
-			payload LONGTEXT DEFAULT NULL,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			expires_at DATETIME NOT NULL,
-			used TINYINT(1) NOT NULL DEFAULT 0,
-			PRIMARY KEY (token_key),
-			KEY idx_type_expires (token_type, expires_at),
-			KEY idx_used (used)
-		) {$charset_collate};";
+			// 4. Tokens, Locks & Idempotency table.
+			"CREATE TABLE {$tokens_table} (
+				token_key varchar(128) NOT NULL,
+				token_type varchar(20) NOT NULL,
+				owner_id varchar(64) default NULL,
+				fencing_token bigint(20) unsigned NOT NULL default 0,
+				payload longtext default NULL,
+				created_at datetime NOT NULL default CURRENT_TIMESTAMP,
+				expires_at datetime NOT NULL,
+				used tinyint(1) NOT NULL default 0,
+				PRIMARY KEY  (token_key),
+				KEY idx_type_expires (token_type, expires_at),
+				KEY idx_used (used)
+			) {$charset_collate};",
+		);
+	}
 
-		// Execute direct DDL for maximum reliability in REST/CLI environments.
-		$wpdb->query( $sql_journal ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$wpdb->query( $sql_checkpoints ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$wpdb->query( $sql_audit_log ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$wpdb->query( $sql_tokens ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	/**
+	 * Executes schema installation/upgrade via dbDelta or direct query fallback.
+	 *
+	 * Updates the DB version option ONLY after verification succeeds.
+	 *
+	 * @param string $from_version Currently installed version.
+	 * @return bool True if upgrade was successful and verified.
+	 */
+	public static function upgrade( string $from_version = '0.0.0' ): bool {
+		global $wpdb;
 
+		$schemas = self::get_schema_definitions();
+
+		if ( defined( 'ABSPATH' ) && file_exists( ABSPATH . 'wp-admin/includes/upgrade.php' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		}
+
+		if ( function_exists( 'dbDelta' ) ) {
+			dbDelta( $schemas );
+		} else {
+			// Direct query fallback for test harness or stripped environments.
+			foreach ( $schemas as $sql ) {
+				$wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			}
+		}
+
+		// Verify that all 4 required tables exist before updating the version option!
+		if ( ! self::verify_tables_exist() ) {
+			return false;
+		}
+
+		// Only record new version after migration + verification succeeds.
 		update_option( self::OPTION_DB_VERSION, self::DB_VERSION );
 
-		return self::verify_tables_exist();
+		return true;
+	}
+
+	/**
+	 * Checks if schema upgrade is needed and executes it.
+	 *
+	 * Safe to call on every plugin boot (`plugins_loaded`) to handle in-place updates.
+	 *
+	 * @return bool True if schema is up to date and verified.
+	 */
+	public static function maybe_upgrade(): bool {
+		$installed_version = get_option( self::OPTION_DB_VERSION, '0.0.0' );
+
+		if ( version_compare( (string) $installed_version, self::DB_VERSION, '<' ) || ! self::verify_tables_exist() ) {
+			return self::upgrade( (string) $installed_version );
+		}
+
+		return true;
+	}
+
+	/**
+	 * Installs or upgrades all 4 required database tables on activation.
+	 *
+	 * @return bool True if all tables exist and verified.
+	 */
+	public static function install(): bool {
+		return self::upgrade( '0.0.0' );
 	}
 
 	/**

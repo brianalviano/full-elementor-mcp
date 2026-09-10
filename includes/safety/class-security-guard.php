@@ -37,6 +37,78 @@ class Full_Elementor_MCP_Security_Guard {
 	);
 
 	/**
+	 * Resolves active authenticated credential UUID.
+	 *
+	 * Uses WordPress core rest_get_authenticated_app_password() which returns a string UUID or null.
+	 *
+	 * @return string|null Authenticated Application Password UUID, or null if not authenticated via App Password.
+	 */
+	public static function get_authenticated_credential_uuid(): ?string {
+		if ( function_exists( 'rest_get_authenticated_app_password' ) ) {
+			$uuid = rest_get_authenticated_app_password();
+			if ( is_string( $uuid ) && '' !== trim( $uuid ) ) {
+				return sanitize_text_field( trim( $uuid ) );
+			}
+			if ( is_array( $uuid ) && ! empty( $uuid['uuid'] ) && is_string( $uuid['uuid'] ) ) {
+				// Defensive fallback in case custom filter returns an array.
+				return sanitize_text_field( trim( $uuid['uuid'] ) );
+			}
+		}
+
+		// Fallback check on WordPress REST global.
+		if ( ! empty( $GLOBALS['wp_rest_application_password_uuid'] ) && is_string( $GLOBALS['wp_rest_application_password_uuid'] ) ) {
+			return sanitize_text_field( trim( $GLOBALS['wp_rest_application_password_uuid'] ) );
+		}
+
+		return null;
+	}
+
+	/**
+	 * Resolves the scope configuration bound strictly to user ID and optional credential UUID.
+	 *
+	 * @param int         $user_id         WordPress user ID.
+	 * @param string|null $credential_uuid Optional Application Password UUID.
+	 * @return array{mode: string, user_id: int, credential_uuid: ?string, allowed_tools: string[], blocked_tools: string[]}
+	 */
+	public static function resolve_scope_for_user_and_credential( int $user_id, ?string $credential_uuid = null ): array {
+		$all_scopes  = get_option( self::OPTION_SCOPES, array() );
+		$user_scopes = ( is_array( $all_scopes ) && isset( $all_scopes[ $user_id ] ) && is_array( $all_scopes[ $user_id ] ) )
+			? $all_scopes[ $user_id ]
+			: array();
+
+		$scope_config = null;
+		// 1. Strict match on credential UUID if provided.
+		if ( ! empty( $credential_uuid ) && isset( $user_scopes[ $credential_uuid ] ) && is_array( $user_scopes[ $credential_uuid ] ) ) {
+			$scope_config = $user_scopes[ $credential_uuid ];
+		} elseif ( isset( $user_scopes['default'] ) && is_array( $user_scopes['default'] ) ) {
+			// 2. Default user scope fallback.
+			$scope_config = $user_scopes['default'];
+		}
+
+		// 3. Fallback mode based on user capabilities if not explicitly configured.
+		$default_mode = 'read_only';
+		if ( $user_id > 0 && current_user_can( 'edit_posts' ) ) {
+			$default_mode = 'full';
+		}
+
+		$mode          = sanitize_key( $scope_config['mode'] ?? $default_mode );
+		$allowed_tools = isset( $scope_config['allowed_tools'] ) && is_array( $scope_config['allowed_tools'] )
+			? array_values( array_map( 'sanitize_text_field', $scope_config['allowed_tools'] ) )
+			: array();
+		$blocked_tools = isset( $scope_config['blocked_tools'] ) && is_array( $scope_config['blocked_tools'] )
+			? array_values( array_map( 'sanitize_text_field', $scope_config['blocked_tools'] ) )
+			: array();
+
+		return array(
+			'mode'            => in_array( $mode, array( 'full', 'read_only', 'custom' ), true ) ? $mode : 'read_only',
+			'user_id'         => $user_id,
+			'credential_uuid' => $credential_uuid,
+			'allowed_tools'   => $allowed_tools,
+			'blocked_tools'   => $blocked_tools,
+		);
+	}
+
+	/**
 	 * Resolves active authenticated credential identity and its bound scope.
 	 *
 	 * Utilizes WordPress core rest_get_authenticated_app_password() when available.
@@ -45,51 +117,9 @@ class Full_Elementor_MCP_Security_Guard {
 	 */
 	public static function resolve_current_scope(): array {
 		$user_id         = get_current_user_id();
-		$credential_uuid = null;
+		$credential_uuid = self::get_authenticated_credential_uuid();
 
-		// 1. Resolve Application Password UUID via native WP REST API if available.
-		if ( function_exists( 'rest_get_authenticated_app_password' ) ) {
-			$app_pass = rest_get_authenticated_app_password();
-			if ( is_array( $app_pass ) && ! empty( $app_pass['uuid'] ) ) {
-				$credential_uuid = sanitize_text_field( (string) $app_pass['uuid'] );
-			}
-		}
-
-		// 2. Fetch configured scope mappings.
-		$all_scopes = get_option( self::OPTION_SCOPES, array() );
-		$user_scopes = ( is_array( $all_scopes ) && isset( $all_scopes[ $user_id ] ) && is_array( $all_scopes[ $user_id ] ) )
-			? $all_scopes[ $user_id ]
-			: array();
-
-		// 3. Match credential UUID if present, otherwise check default user scope.
-		$scope_config = null;
-		if ( $credential_uuid && isset( $user_scopes[ $credential_uuid ] ) && is_array( $user_scopes[ $credential_uuid ] ) ) {
-			$scope_config = $user_scopes[ $credential_uuid ];
-		} elseif ( isset( $user_scopes['default'] ) && is_array( $user_scopes['default'] ) ) {
-			$scope_config = $user_scopes['default'];
-		}
-
-		// 4. Default scope fallback based on user capabilities.
-		$default_mode = 'read_only';
-		if ( $user_id > 0 && current_user_can( 'edit_posts' ) ) {
-			$default_mode = current_user_can( 'manage_options' ) ? 'full' : 'full';
-		}
-
-		$mode          = sanitize_key( $scope_config['mode'] ?? $default_mode );
-		$allowed_tools = isset( $scope_config['allowed_tools'] ) && is_array( $scope_config['allowed_tools'] )
-			? array_map( 'sanitize_text_field', $scope_config['allowed_tools'] )
-			: array();
-		$blocked_tools = isset( $scope_config['blocked_tools'] ) && is_array( $scope_config['blocked_tools'] )
-			? array_map( 'sanitize_text_field', $scope_config['blocked_tools'] )
-			: array();
-
-		$scope = array(
-			'mode'            => in_array( $mode, array( 'full', 'read_only', 'custom' ), true ) ? $mode : 'read_only',
-			'user_id'         => $user_id,
-			'credential_uuid' => $credential_uuid,
-			'allowed_tools'   => $allowed_tools,
-			'blocked_tools'   => $blocked_tools,
-		);
+		$scope = self::resolve_scope_for_user_and_credential( $user_id, $credential_uuid );
 
 		/**
 		 * Filters the resolved credential scope.
@@ -108,34 +138,39 @@ class Full_Elementor_MCP_Security_Guard {
 	 * @return bool True if allowed.
 	 */
 	public static function is_ability_in_scope( string $ability, array $annotations, ?array $scope = null ): bool {
+		// 1. Global disabled tools gate: applies to ALL scopes and modes.
+		$disabled_tools = get_option( 'full_elementor_mcp_disabled_tools', array() );
+		if ( is_array( $disabled_tools ) && in_array( $ability, $disabled_tools, true ) ) {
+			return false;
+		}
+
 		if ( null === $scope ) {
 			$scope = self::resolve_current_scope();
 		}
 
 		$is_readonly = ! empty( $annotations['readonly'] );
 
-		// Read-Only scope: ONLY readonly abilities are allowed.
+		// 2. Read-Only scope: ONLY readonly abilities are allowed.
 		if ( 'read_only' === $scope['mode'] ) {
 			return $is_readonly;
 		}
 
-		// Custom scope: must pass allowlist and denylist.
+		// 3. Custom scope: FAIL-CLOSED. Must have non-empty allowlist containing the ability, and not blocked.
 		if ( 'custom' === $scope['mode'] ) {
-			if ( ! empty( $scope['allowed_tools'] ) && ! in_array( $ability, $scope['allowed_tools'], true ) ) {
+			if ( empty( $scope['allowed_tools'] ) || ! is_array( $scope['allowed_tools'] ) ) {
+				// Empty allowlist in custom scope denies all abilities (fail-closed).
 				return false;
 			}
-			if ( ! empty( $scope['blocked_tools'] ) && in_array( $ability, $scope['blocked_tools'], true ) ) {
+			if ( ! in_array( $ability, $scope['allowed_tools'], true ) ) {
+				return false;
+			}
+			if ( ! empty( $scope['blocked_tools'] ) && is_array( $scope['blocked_tools'] ) && in_array( $ability, $scope['blocked_tools'], true ) ) {
 				return false;
 			}
 			return true;
 		}
 
-		// Full scope: all allowed, unless blocked by global admin disabled tools.
-		$disabled_tools = get_option( 'full_elementor_mcp_disabled_tools', array() );
-		if ( is_array( $disabled_tools ) && in_array( $ability, $disabled_tools, true ) ) {
-			return false;
-		}
-
+		// 4. Full scope: all non-globally-disabled abilities allowed.
 		return true;
 	}
 

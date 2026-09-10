@@ -123,9 +123,16 @@ if ( ! function_exists( 'current_user_can' ) ) {
 	}
 }
 
+if ( ! function_exists( 'rest_get_authenticated_app_password' ) ) {
+	function rest_get_authenticated_app_password(): ?string {
+		return $GLOBALS['wp_test_app_password_uuid'] ?? null;
+	}
+}
+
 // Mock wpdb with in-memory SQLite backend for true SQL query execution.
 class Mock_WPDB {
 	public string $prefix = 'wp_';
+	public bool $simulate_write_failure = false;
 	private \PDO $pdo;
 
 	public function __construct() {
@@ -149,25 +156,30 @@ class Mock_WPDB {
 	}
 
 	public function query( string $query ): int|bool {
+		if ( $this->simulate_write_failure && preg_match( '/^(?:INSERT|UPDATE|REPLACE|DELETE)/i', trim( $query ) ) ) {
+			return false;
+		}
+
 		try {
-			if ( str_contains( $query, 'AUTO_INCREMENT' ) ) {
-				$q = str_replace(
-					array( 'id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT', 'BIGINT UNSIGNED', 'INT UNSIGNED', 'DATETIME', 'ON UPDATE CURRENT_TIMESTAMP' ),
-					array( 'id INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'INTEGER', 'TEXT', '' ),
-					$query
-				);
-				$q = preg_replace( '/PRIMARY KEY\s*\([^)]+\),?/', '', $q );
-			} else {
-				$q = str_replace(
-					array( 'BIGINT UNSIGNED', 'INT UNSIGNED', 'DATETIME', 'ON UPDATE CURRENT_TIMESTAMP' ),
-					array( 'INTEGER', 'INTEGER', 'TEXT', '' ),
-					$query
-				);
+			if ( str_contains( $query, 'CREATE TABLE' ) ) {
+				$q = preg_replace( '/id\s+bigint\([^)]+\)\s+unsigned\s+NOT\s+NULL\s+auto_increment/i', 'id INTEGER PRIMARY KEY AUTOINCREMENT', $query );
+				$q = preg_replace( '/id\s+BIGINT\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT/i', 'id INTEGER PRIMARY KEY AUTOINCREMENT', $q );
+				$q = preg_replace( '/bigint\([^)]+\)\s*(?:unsigned)?/i', 'INTEGER', $q );
+				$q = preg_replace( '/int\([^)]+\)\s*(?:unsigned)?/i', 'INTEGER', $q );
+				$q = preg_replace( '/tinyint\([^)]+\)\s*(?:unsigned)?/i', 'INTEGER', $q );
+				$q = preg_replace( '/datetime/i', 'TEXT', $q );
+				$q = preg_replace( '/longtext|text/i', 'TEXT', $q );
+				$q = preg_replace( '/varchar\([^)]+\)/i', 'TEXT', $q );
+				$q = preg_replace( '/on\s+update\s+CURRENT_TIMESTAMP/i', '', $q );
+				if ( str_contains( $q, 'AUTOINCREMENT' ) ) {
+					$q = preg_replace( '/PRIMARY\s+KEY\s*\([^)]+\),?/i', '', $q );
+				}
+				$q = preg_replace( '/(?<!PRIMARY\s)\bKEY\s+[a-zA-Z0-9_]+\s*\([^)]+\),?/i', '', $q );
+				$q = preg_replace( '/,\s*\)/', ')', $q );
+				$q = preg_replace( '/(?:\)\s*(?:DEFAULT\s+CHARACTER\s+SET|COLLATE|ENGINE)[^;]*;|\)\s*;)/i', ');', $q );
+				return $this->pdo->exec( $q );
 			}
-			$q = preg_replace( '/(?<!PRIMARY\s)\bKEY\s+[a-zA-Z0-9_]+\s*\([^)]+\),?/', '', $q );
-			$q = preg_replace( '/,\s*\)/', ')', $q );
-			$q = preg_replace( '/(?:\)\s*(?:DEFAULT\s+CHARACTER\s+SET|COLLATE|ENGINE)[^;]*;|\)\s*;)/i', ');', $q );
-			return $this->pdo->exec( $q );
+			return $this->pdo->exec( $query );
 		} catch ( \Throwable $e ) {
 			return false;
 		}
@@ -234,6 +246,10 @@ class Mock_WPDB {
 	}
 
 	public function replace( string $table, array $data, array $format = array() ): int|bool {
+		if ( $this->simulate_write_failure ) {
+			return false;
+		}
+
 		try {
 			$keys   = array_keys( $data );
 			$cols   = implode( ', ', $keys );
@@ -547,6 +563,204 @@ run_test( 'Credential Scopes: custom mode enforces allowlist and denylist', func
 		array( 'readonly' => false ),
 		$custom_scope
 	) );
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 7: Corrective Patch Verification Tests
+// ---------------------------------------------------------------------
+
+// 1. Application Password UUID resolver & Scope Binding
+run_test( 'Security Guard: Application Password UUID resolver returns string UUID and binds scope', function () {
+	$test_uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+	$GLOBALS['wp_test_app_password_uuid'] = $test_uuid;
+
+	$resolved_uuid = Full_Elementor_MCP_Security_Guard::get_authenticated_credential_uuid();
+	assert_equals( $test_uuid, $resolved_uuid );
+
+	// Configure per-credential scope in wp_options.
+	$user_id = 42;
+	update_option( Full_Elementor_MCP_Security_Guard::OPTION_SCOPES, array(
+		$user_id => array(
+			$test_uuid => array(
+				'mode'          => 'custom',
+				'allowed_tools' => array( 'full-elementor-mcp/add-heading' ),
+			),
+			'default' => array(
+				'mode'          => 'read_only',
+				'allowed_tools' => array(),
+			),
+		),
+	) );
+
+	// Resolving with the credential UUID yields custom mode.
+	$bound_scope = Full_Elementor_MCP_Security_Guard::resolve_scope_for_user_and_credential( $user_id, $test_uuid );
+	assert_equals( 'custom', $bound_scope['mode'] );
+	assert_equals( $test_uuid, $bound_scope['credential_uuid'] );
+	assert_true( in_array( 'full-elementor-mcp/add-heading', $bound_scope['allowed_tools'], true ) );
+
+	// Resolving without credential UUID falls back to user default (read_only).
+	$fallback_scope = Full_Elementor_MCP_Security_Guard::resolve_scope_for_user_and_credential( $user_id, null );
+	assert_equals( 'read_only', $fallback_scope['mode'] );
+	assert_equals( null, $fallback_scope['credential_uuid'] );
+
+	$GLOBALS['wp_test_app_password_uuid'] = null;
+} );
+
+// 2. DB Write Failure Paths
+run_test( 'Lock Manager: DB write failure paths return WP_Error and never acquired=true', function () {
+	global $wpdb;
+	$wpdb->simulate_write_failure = true;
+
+	$res = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_fail_probe', 'req_fail_probe_1', 30 );
+	assert_true( is_wp_error( $res ), 'acquire_lock must return WP_Error on DB write failure.' );
+	assert_equals( 'lock_acquisition_failed', $res->get_error_code() );
+
+	$idemp_saved = Full_Elementor_MCP_Lock_Manager::set_idempotent_result(
+		'probe_key',
+		'full-elementor-mcp/probe',
+		1,
+		null,
+		array( 'k' => 'v' ),
+		array( 'result' => 'none' )
+	);
+	assert_false( $idemp_saved, 'set_idempotent_result must return false on DB write failure.' );
+
+	$wpdb->simulate_write_failure = false;
+} );
+
+// 3. Duplicate Lock Acquisition
+run_test( 'Lock Manager: duplicate lock acquisition detects collision and rejects second client', function () {
+	// First client atomically inserts lock.
+	$res1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_collision_atomic', 'owner_alpha', 30 );
+	assert_false( is_wp_error( $res1 ) );
+	assert_true( $res1['acquired'] );
+	assert_equals( 1, $res1['fencing_token'] );
+
+	// Second client attempting concurrent acquisition must be rejected with resource_locked.
+	$res2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_collision_atomic', 'owner_beta', 30 );
+	assert_true( is_wp_error( $res2 ) );
+	assert_equals( 'resource_locked', $res2->get_error_code() );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_collision_atomic', 'owner_alpha' );
+} );
+
+// 4. Expired-Lock Takeover Race Semantics (Compare-And-Swap)
+run_test( 'Lock Manager: expired-lock takeover via CAS strictly increments fencing token', function () {
+	global $wpdb;
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = 'lock_post_cas_test';
+
+	// Client A acquires lock (fencing_token = 1).
+	$res_a = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_cas_test', 'owner_a', 10 );
+	assert_false( is_wp_error( $res_a ) );
+	assert_equals( 1, $res_a['fencing_token'] );
+
+	// Artificially expire the lease in DB to simulate expired lock state.
+	$past_dt = gmdate( 'Y-m-d H:i:s', time() - 60 );
+	$wpdb->query( "UPDATE {$table} SET expires_at = '{$past_dt}' WHERE token_key = '{$lock_key}'" );
+
+	// Client B executes CAS takeover: should succeed and strictly increment fencing token to 2.
+	$res_b = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_cas_test', 'owner_b', 30 );
+	assert_false( is_wp_error( $res_b ) );
+	assert_true( $res_b['acquired'] );
+	assert_equals( 2, $res_b['fencing_token'], 'Fencing token must increment to 2 on takeover.' );
+	assert_equals( 'owner_b', $res_b['owner_id'] );
+
+	// Client C attempts takeover immediately while Client B is active: must be REJECTED!
+	$res_c = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_cas_test', 'owner_c', 30 );
+	assert_true( is_wp_error( $res_c ) );
+	assert_equals( 'resource_locked', $res_c->get_error_code() );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_cas_test', 'owner_b' );
+} );
+
+// 5. Custom Scope Fail-Closed on Empty Allowlist
+run_test( 'Security Guard: custom scope with empty allowlist fails closed (denies all)', function () {
+	$empty_scope = array(
+		'mode'          => 'custom',
+		'user_id'       => 1,
+		'allowed_tools' => array(), // Empty allowlist!
+		'blocked_tools' => array(),
+	);
+
+	$allowed = Full_Elementor_MCP_Security_Guard::is_ability_in_scope(
+		'full-elementor-mcp/add-heading',
+		array( 'readonly' => false ),
+		$empty_scope
+	);
+	assert_false( $allowed, 'Custom scope with empty allowlist must deny all abilities.' );
+
+	// Verify global disabled tools gate applies to full mode as well.
+	update_option( 'full_elementor_mcp_disabled_tools', array( 'full-elementor-mcp/blocked-globally' ) );
+	$full_scope = array(
+		'mode'          => 'full',
+		'user_id'       => 1,
+		'allowed_tools' => array(),
+		'blocked_tools' => array(),
+	);
+	assert_false(
+		Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/blocked-globally', array( 'readonly' => false ), $full_scope ),
+		'Global disabled tools must block abilities even in full mode.'
+	);
+	delete_option( 'full_elementor_mcp_disabled_tools' );
+} );
+
+// 6. Idempotency Args Mismatch
+run_test( 'Lock Manager: idempotency returns conflict when same key used with different args', function () {
+	$idemp_key = 'idem_audit_' . uniqid();
+	$ability   = 'full-elementor-mcp/create-page';
+	$user_id   = 7;
+	$cred_uuid = 'cred-uuid-xyz';
+
+	$args_original = array( 'title' => 'Page Original', 'status' => 'publish' );
+	$args_modified = array( 'title' => 'Page Tampered',   'status' => 'draft' );
+	$res_original  = array( 'success' => true, 'page_id' => 999 );
+
+	// Store original result.
+	$saved = Full_Elementor_MCP_Lock_Manager::set_idempotent_result(
+		$idemp_key,
+		$ability,
+		$user_id,
+		$cred_uuid,
+		$args_original,
+		$res_original,
+		60
+	);
+	assert_true( $saved );
+
+	// Same key, same args: returns cached payload.
+	$cached = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key,
+		$ability,
+		$user_id,
+		$cred_uuid,
+		$args_original
+	);
+	assert_equals( $res_original, $cached );
+
+	// Same key, DIFFERENT args: must return idempotency_conflict error!
+	$conflict = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key,
+		$ability,
+		$user_id,
+		$cred_uuid,
+		$args_modified
+	);
+	assert_true( is_wp_error( $conflict ), 'Mismatched args must return WP_Error.' );
+	assert_equals( 'idempotency_conflict', $conflict->get_error_code() );
+} );
+
+// 7. Migration and Version Upgrade Behavior
+run_test( 'Database Installer: maybe_upgrade detects older version and upgrades successfully', function () {
+	// Simulate an older installed DB version.
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '0.8.0' );
+
+	$upgraded = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+	assert_true( $upgraded );
+	assert_equals(
+		Full_Elementor_MCP_Database_Installer::DB_VERSION,
+		get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION )
+	);
 } );
 
 // ---------------------------------------------------------------------

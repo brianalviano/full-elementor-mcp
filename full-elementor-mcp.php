@@ -202,6 +202,9 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-lock-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-security-guard.php';
 
+	// Execute runtime schema upgrade check to support in-place updates.
+	Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+
 	// Boot the plugin.
 	Full_Elementor_MCP_Plugin::instance();
 }
