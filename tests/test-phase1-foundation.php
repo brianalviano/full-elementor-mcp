@@ -173,6 +173,12 @@ class Mock_WPDB {
 	public function __construct() {
 		$this->pdo = new \PDO( 'sqlite::memory:' );
 		$this->pdo->setAttribute( \PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION );
+		$this->pdo->sqliteCreateFunction( 'UTC_TIMESTAMP', static function () {
+			if ( isset( $GLOBALS['wp_test_mock_now'] ) ) {
+				return gmdate( 'Y-m-d H:i:s', $GLOBALS['wp_test_mock_now'] );
+			}
+			return gmdate( 'Y-m-d H:i:s' );
+		} );
 	}
 
 	public function get_charset_collate(): string {
@@ -212,7 +218,7 @@ class Mock_WPDB {
 				$indexes_to_create = array();
 				if ( ! empty( $table_name ) && preg_match_all( '/\bKEY\s+([a-zA-Z0-9_]+)\s*\(([^)]+)\)/i', $query, $km, PREG_SET_ORDER ) ) {
 					foreach ( $km as $key_match ) {
-						$indexes_to_create[] = "CREATE INDEX IF NOT EXISTS {$key_match[1]} ON {$table_name} ({$key_match[2]});";
+						$indexes_to_create[] = "CREATE INDEX IF NOT EXISTS {$table_name}_{$key_match[1]} ON {$table_name} ({$key_match[2]});";
 					}
 				}
 
@@ -263,6 +269,14 @@ class Mock_WPDB {
 
 	public function get_results( string $query, string $output = 'OBJECT' ): mixed {
 		try {
+			if ( preg_match( '/^PRAGMA\s+/i', $query ) ) {
+				$stmt = $this->pdo->query( $query );
+				$rows = $stmt ? $stmt->fetchAll( \PDO::FETCH_ASSOC ) : array();
+				if ( 'ARRAY_A' === $output ) {
+					return $rows;
+				}
+				return array_map( static fn( $r ) => (object) $r, $rows );
+			}
 			if ( preg_match( '/SHOW INDEX(?:ES)? FROM\s+([^\s;]+)/i', $query, $m ) ) {
 				$table = trim( $m[1], '`' );
 				$rows  = array();
@@ -283,11 +297,22 @@ class Mock_WPDB {
 				if ( $idx_stmt ) {
 					$indices = $idx_stmt->fetchAll( \PDO::FETCH_ASSOC );
 					foreach ( $indices as $idx ) {
-						$rows[] = array(
-							'Key_name'    => $idx['name'],
-							'Column_name' => '',
-							'Non_unique'  => 1,
-						);
+						$idx_name  = (string) $idx['name'];
+						if ( str_starts_with( $idx_name, $table . '_' ) ) {
+							$idx_name = substr( $idx_name, strlen( $table ) + 1 );
+						}
+						$is_unique = ! empty( $idx['unique'] ) ? 0 : 1;
+						$col_stmt  = $this->pdo->query( "PRAGMA index_info('{$idx['name']}')" );
+						if ( $col_stmt ) {
+							$idx_cols = $col_stmt->fetchAll( \PDO::FETCH_ASSOC );
+							foreach ( $idx_cols as $c ) {
+								$rows[] = array(
+									'Key_name'    => $idx_name,
+									'Column_name' => (string) $c['name'],
+									'Non_unique'  => $is_unique,
+								);
+							}
+						}
 					}
 				}
 				if ( 'ARRAY_A' === $output ) {
@@ -450,7 +475,7 @@ run_test( 'Database Installer: table name getters match prefix', function () {
 run_test( 'Database Installer: table DDL execution and version option', function () {
 	$installed = Full_Elementor_MCP_Database_Installer::install();
 	assert_true( $installed, 'Installer should report success.' );
-	assert_equals( '1.0.0', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
+	assert_equals( Full_Elementor_MCP_Database_Installer::DB_VERSION, get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
 } );
 
 // ---------------------------------------------------------------------
@@ -1633,28 +1658,40 @@ run_test( 'Lock Manager: get_idempotent_result fails closed on malformed payload
 	$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key( $idemp_key, $ability, $user_id, $cred_uuid );
 	$future_dt = gmdate( 'Y-m-d H:i:s', time() + 300 );
 
-	// 1. Corrupted non-array payload
-	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '\"just_a_string\"', '{$future_dt}', '{$future_dt}', 0)" );
-	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Corrupted JSON string must fail closed (return null).' );
+	// Case A: Non-existent or expired row returns null (proper cache miss)
+	$cache_miss = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( 'non_existent_key', $ability, $user_id, $cred_uuid, $args );
+	assert_equals( null, $cache_miss, 'Non-existent row must return null (cache miss).' );
 
-	// 2. Missing args_hash
+	// Case B1: Corrupted non-array payload / invalid JSON string -> WP_Error('idempotency_cache_corrupt')
+	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '\"just_a_string\"', '{$future_dt}', '{$future_dt}', 0)" );
+	$err_b1 = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args );
+	assert_true( is_wp_error( $err_b1 ), 'Corrupted non-array JSON must return WP_Error.' );
+	assert_equals( 'idempotency_cache_corrupt', $err_b1->get_error_code() );
+
+	// Case B2: Missing args_hash -> WP_Error('idempotency_cache_corrupt')
 	$bad_payload = wp_json_encode( array( 'ability' => $ability, 'user_id' => $user_id, 'credential_uuid' => $cred_uuid, 'result' => array( 'ok' => 1 ) ) );
 	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '{$bad_payload}', '{$future_dt}', '{$future_dt}', 0)" );
-	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Missing args_hash must fail closed.' );
+	$err_b2 = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args );
+	assert_true( is_wp_error( $err_b2 ), 'Missing args_hash must return WP_Error.' );
+	assert_equals( 'idempotency_cache_corrupt', $err_b2->get_error_code() );
 
-	// 3. Ability mismatch in payload
+	// Case B3: Ability mismatch in payload -> WP_Error('idempotency_cache_corrupt')
 	$mismatch_payload = wp_json_encode( array( 'args_hash' => Full_Elementor_MCP_Lock_Manager::hash_args( $args ), 'ability' => 'other/ability', 'user_id' => $user_id, 'credential_uuid' => $cred_uuid, 'result' => array( 'ok' => 1 ) ) );
 	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '{$mismatch_payload}', '{$future_dt}', '{$future_dt}', 0)" );
-	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Ability mismatch must fail closed.' );
+	$err_b3 = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args );
+	assert_true( is_wp_error( $err_b3 ), 'Ability mismatch must return WP_Error.' );
+	assert_equals( 'idempotency_cache_corrupt', $err_b3->get_error_code() );
 
-	// 4. Non-array result in payload
+	// Case B4: Non-array result in payload -> WP_Error('idempotency_cache_corrupt')
 	$bad_result_payload = wp_json_encode( array( 'args_hash' => Full_Elementor_MCP_Lock_Manager::hash_args( $args ), 'ability' => $ability, 'user_id' => $user_id, 'credential_uuid' => $cred_uuid, 'result' => 'scalar_result' ) );
 	$wpdb->query( "REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used) VALUES ('{$token_key}', 'idempotency', '{$cred_uuid}', 0, '{$bad_result_payload}', '{$future_dt}', '{$future_dt}', 0)" );
-	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args ), 'Non-array result must fail closed.' );
+	$err_b4 = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key, $ability, $user_id, $cred_uuid, $args );
+	assert_true( is_wp_error( $err_b4 ), 'Non-array result must return WP_Error.' );
+	assert_equals( 'idempotency_cache_corrupt', $err_b4->get_error_code() );
 } );
 
 run_test( 'Database Installer: maybe_upgrade rejects unsupported downgrade state', function () {
-	// Simulate future schema version installed (e.g. 2.0.0 when code is 1.0.0).
+	// Simulate future schema version installed (e.g. 2.0.0 when code is 1.0.1).
 	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '2.0.0' );
 
 	$res = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
@@ -1693,6 +1730,129 @@ run_test( 'Uninstall Handler: drops tables and deletes Phase 1 options', functio
 
 	// Re-install tables for clean state.
 	Full_Elementor_MCP_Database_Installer::install();
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 9: Release-Gate Corrective Audit Tests
+// ---------------------------------------------------------------------
+
+run_test( 'Safety Settings: fail-safe handling of malformed boolean types and raw stored options', function () {
+	// 1. sanitize_bool must NOT cast arbitrary arrays/objects to true; returns default.
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( array( 'foo' ), false ) );
+	assert_true( Full_Elementor_MCP_Safety_Settings::sanitize_bool( array( 'foo' ), true ) );
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( new \stdClass(), false ) );
+	assert_false( Full_Elementor_MCP_Safety_Settings::sanitize_bool( null, false ) );
+
+	// 2. Read-path sanitization: raw stored option in database with 'false' must NOT evaluate to true.
+	update_option( Full_Elementor_MCP_Safety_Settings::OPTION_NAME, array( 'allow_permanent_delete' => 'false' ) );
+	Full_Elementor_MCP_Safety_Settings::clear_cache();
+	assert_false( Full_Elementor_MCP_Safety_Settings::is_permanent_delete_allowed(), 'Raw stored string "false" must not enable permanent delete.' );
+
+	$all_settings = Full_Elementor_MCP_Safety_Settings::get_all();
+	assert_false( $all_settings['allow_permanent_delete'] );
+
+	// 3. Raw stored option with 'true' evaluates to true.
+	update_option( Full_Elementor_MCP_Safety_Settings::OPTION_NAME, array( 'allow_permanent_delete' => 'true' ) );
+	Full_Elementor_MCP_Safety_Settings::clear_cache();
+	assert_true( Full_Elementor_MCP_Safety_Settings::is_permanent_delete_allowed() );
+
+	// Reset clean state
+	Full_Elementor_MCP_Safety_Settings::clear_cache();
+	update_option( Full_Elementor_MCP_Safety_Settings::OPTION_NAME, Full_Elementor_MCP_Safety_Settings::get_defaults() );
+} );
+
+run_test( 'Schema Verification: rejects composite PRIMARY KEY and non-unique token_key index', function () {
+	global $wpdb;
+
+	$test_table = 'wp_test_unique_constraint';
+
+	// 1. Single-column PRIMARY KEY -> PASS
+	$wpdb->query( "DROP TABLE IF EXISTS {$test_table}" );
+	$wpdb->query( "CREATE TABLE {$test_table} ( token_key TEXT PRIMARY KEY, other_col TEXT )" );
+	assert_true( Full_Elementor_MCP_Database_Installer::verify_single_column_unique_constraint( $test_table, 'token_key' ) );
+
+	// 2. Composite PRIMARY KEY (token_key, other_col) -> MUST FAIL
+	$wpdb->query( "DROP TABLE IF EXISTS {$test_table}" );
+	$wpdb->query( "CREATE TABLE {$test_table} ( token_key TEXT, other_col TEXT, PRIMARY KEY (token_key, other_col) )" );
+	assert_false( Full_Elementor_MCP_Database_Installer::verify_single_column_unique_constraint( $test_table, 'token_key' ), 'Composite PRIMARY KEY must be rejected.' );
+
+	// 3. Non-unique INDEX on token_key -> MUST FAIL
+	$wpdb->query( "DROP TABLE IF EXISTS {$test_table}" );
+	$wpdb->query( "CREATE TABLE {$test_table} ( token_key TEXT, other_col TEXT )" );
+	$wpdb->query( "CREATE INDEX idx_tokens_non_unique ON {$test_table} (token_key)" );
+	assert_false( Full_Elementor_MCP_Database_Installer::verify_single_column_unique_constraint( $test_table, 'token_key' ), 'Non-unique index must be rejected.' );
+
+	// 4. Single-column UNIQUE INDEX on token_key -> PASS
+	$wpdb->query( "DROP TABLE IF EXISTS {$test_table}" );
+	$wpdb->query( "CREATE TABLE {$test_table} ( token_key TEXT, other_col TEXT )" );
+	$wpdb->query( "CREATE UNIQUE INDEX uq_tokens_single ON {$test_table} (token_key)" );
+	assert_true( Full_Elementor_MCP_Database_Installer::verify_single_column_unique_constraint( $test_table, 'token_key' ), 'Single-column UNIQUE index must be accepted.' );
+
+	// Clean up
+	$wpdb->query( "DROP TABLE IF EXISTS {$test_table}" );
+} );
+
+run_test( 'Database Installer: 1.0.0 to 1.0.1 upgrade triggers re-verification and fast-path caching', function () {
+	// 1. Simulate existing installation with version 1.0.0.
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '1.0.0' );
+
+	// maybe_upgrade() should detect 1.0.0 < 1.0.1, run upgrade, verify schema, and advance version to 1.0.1.
+	$res = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
+	assert_true( $res, 'Upgrade from 1.0.0 to 1.0.1 must succeed.' );
+	assert_equals( '1.0.1', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
+
+	// 2. Future calls take fast-path without schema queries.
+	assert_true( Full_Elementor_MCP_Database_Installer::maybe_upgrade() );
+} );
+
+run_test( 'Security Guard: readonly annotation must be literal boolean true', function () {
+	$scope = array(
+		'mode'          => 'read_only',
+		'user_id'       => 1,
+		'allowed_tools' => array(),
+		'blocked_tools' => array(),
+	);
+
+	// Literal boolean true -> ALLOWED
+	assert_true( Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/get-page', array( 'readonly' => true ), $scope ) );
+
+	// String "true" -> DENIED (fail closed)
+	assert_false( Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/get-page', array( 'readonly' => 'true' ), $scope ) );
+
+	// String "false" -> DENIED
+	assert_false( Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/get-page', array( 'readonly' => 'false' ), $scope ) );
+
+	// Integer 1 -> DENIED
+	assert_false( Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/get-page', array( 'readonly' => 1 ), $scope ) );
+
+	// Missing annotation -> DENIED
+	assert_false( Full_Elementor_MCP_Security_Guard::is_ability_in_scope( 'full-elementor-mcp/get-page', array(), $scope ) );
+} );
+
+run_test( 'Lock Manager: actual write-time expiry boundary increments fencing token', function () {
+	$res_key  = 'boundary_race_' . uniqid();
+	$owner_id = 'owner_boundary_tester';
+
+	// 1. Initial lock acquisition: fence = 1.
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner_id, 10 );
+	assert_true( $lock1['acquired'] );
+	assert_equals( 1, $lock1['fencing_token'] );
+
+	// 2. Simulate database time advancing past the lock expiry at write time.
+	// Mock DB UTC_TIMESTAMP() returns current time + 100 seconds.
+	$GLOBALS['wp_test_mock_now'] = time() + 100;
+
+	// 3. Same owner attempts to re-enter acquire_lock():
+	// The database write-time check expires_at > UTC_TIMESTAMP() will fail.
+	// The lock has expired in the DB, so it must NOT revive under fence 1.
+	// It falls through to Step 3 (CAS takeover) and increments to fence 2!
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner_id, 30 );
+	assert_true( $lock2['acquired'], 'Takeover after write-time expiry must succeed.' );
+	assert_equals( 2, $lock2['fencing_token'], 'Fencing token must advance to 2 when lease expired at write time.' );
+
+	// Restore mock clock
+	unset( $GLOBALS['wp_test_mock_now'] );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner_id, 2 );
 } );
 
 // ---------------------------------------------------------------------

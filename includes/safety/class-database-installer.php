@@ -25,8 +25,11 @@ class Full_Elementor_MCP_Database_Installer {
 
 	/**
 	 * Current database schema version.
+	 *
+	 * 1.0.1: Safety-schema verification hardening release ensuring single-column token_key uniqueness,
+	 * complete WAL/audit schema presence, and write-time expiration guarantees.
 	 */
-	public const DB_VERSION = '1.0.0';
+	public const DB_VERSION = '1.0.1';
 
 	/**
 	 * Option key storing installed schema version.
@@ -198,13 +201,16 @@ class Full_Elementor_MCP_Database_Installer {
 			}
 		}
 
-		// Verify that all 4 required tables and critical columns exist before updating version!
+		// Verify that all 4 required tables, columns, indexes, and unique constraints exist!
 		if ( ! self::verify_schema() ) {
 			return false;
 		}
 
 		// Only record new version after full schema verification succeeds.
-		update_option( self::OPTION_DB_VERSION, self::DB_VERSION );
+		$saved = update_option( self::OPTION_DB_VERSION, self::DB_VERSION );
+		if ( ! $saved && get_option( self::OPTION_DB_VERSION ) !== self::DB_VERSION ) {
+			return false;
+		}
 
 		return true;
 	}
@@ -224,7 +230,7 @@ class Full_Elementor_MCP_Database_Installer {
 		return array(
 			// Tokens table: enforces atomicity, locking, fencing, and idempotency.
 			self::get_tokens_table()      => array(
-				'columns' => array(
+				'columns'       => array(
 					'token_key',
 					'token_type',
 					'owner_id',
@@ -234,14 +240,16 @@ class Full_Elementor_MCP_Database_Installer {
 					'expires_at',
 					'used',
 				),
-				'indexes' => array(
+				'indexes'       => array(
 					'idx_type_expires',
+					'idx_used',
 				),
-				'primary' => 'token_key',
+				'primary'       => 'token_key',
+				'single_unique' => 'token_key',
 			),
 			// Journal table: Write-Ahead Journaling for atomicity and crash recovery.
 			self::get_journal_table()     => array(
-				'columns' => array(
+				'columns'       => array(
 					'id',
 					'created_at',
 					'updated_at',
@@ -249,49 +257,74 @@ class Full_Elementor_MCP_Database_Installer {
 					'action',
 					'object_type',
 					'object_id',
+					'created_object_id',
 					'fencing_token',
 					'before_state',
 					'before_hash',
 					'after_hash',
 					'status',
+					'error_message',
 					'user_id',
 					'credential_uuid',
 				),
-				'indexes' => array(
+				'indexes'       => array(
 					'idx_status',
 					'idx_object',
+					'idx_created',
 				),
-				'primary' => 'id',
+				'primary'       => 'id',
+				'single_unique' => 'id',
 			),
 			// Checkpoints table: full-site rollback points.
 			self::get_checkpoints_table() => array(
-				'columns' => array(
+				'columns'       => array(
 					'id',
 					'created_at',
 					'label',
+					'description',
 					'trigger_type',
 					'file_path',
 					'file_hash_hmac',
+					'encryption_algorithm',
 					'key_version',
 					'key_id',
+					'size_bytes',
+					'items_count',
+					'elementor_version',
+					'wp_version',
+					'created_by',
 				),
-				'indexes' => array(),
-				'primary' => 'id',
+				'indexes'       => array(
+					'idx_created',
+				),
+				'primary'       => 'id',
+				'single_unique' => 'id',
 			),
 			// Audit log table: forensic mutation history.
 			self::get_audit_log_table()   => array(
-				'columns' => array(
+				'columns'       => array(
 					'id',
 					'timestamp',
 					'event',
 					'ability',
+					'object_type',
+					'object_id',
 					'user_id',
 					'credential_uuid',
 					'ip_address',
 					'args_sanitized',
+					'result_status',
+					'change_id',
+					'execution_time_ms',
 				),
-				'indexes' => array(),
-				'primary' => 'id',
+				'indexes'       => array(
+					'idx_timestamp',
+					'idx_event',
+					'idx_ability',
+					'idx_change',
+				),
+				'primary'       => 'id',
+				'single_unique' => 'id',
 			),
 		);
 	}
@@ -371,10 +404,95 @@ class Full_Elementor_MCP_Database_Installer {
 		// 2. SQLite PRAGMA fallback for test environments.
 		$sqlite_indices = $wpdb->get_results( "PRAGMA index_list({$table})", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( ! empty( $sqlite_indices ) && is_array( $sqlite_indices ) ) {
-			return array_values( array_unique( array_map( 'strtolower', array_column( $sqlite_indices, 'name' ) ) ) );
+			$names = array();
+			foreach ( $sqlite_indices as $row ) {
+				$name = (string) ( $row['name'] ?? '' );
+				if ( str_starts_with( $name, $table . '_' ) ) {
+					$name = substr( $name, strlen( $table ) + 1 );
+				}
+				$names[] = strtolower( $name );
+			}
+			return array_values( array_unique( $names ) );
 		}
 
 		return array();
+	}
+
+	/**
+	 * Verifies that a table possesses a single-column uniqueness guarantee on the specified column.
+	 *
+	 * Specifically ensures the column either serves as a single-column PRIMARY KEY or has a single-column
+	 * UNIQUE index. Composite keys (e.g. PRIMARY KEY (token_key, owner_id)) and non-unique indexes
+	 * are strictly rejected.
+	 *
+	 * @param string $table  Table name.
+	 * @param string $column Expected unique column name.
+	 * @return bool True if a single-column unique/primary constraint exists on the column.
+	 */
+	public static function verify_single_column_unique_constraint( string $table, string $column ): bool {
+		global $wpdb;
+
+		$col_lower = strtolower( $column );
+
+		// 1. MySQL / MariaDB standard SHOW INDEX inspection.
+		$indices = $wpdb->get_results( "SHOW INDEX FROM {$table}", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $indices ) && is_array( $indices ) ) {
+			$grouped_indexes = array();
+			foreach ( $indices as $row ) {
+				$key_name = (string) ( $row['Key_name'] ?? '' );
+				if ( ! isset( $grouped_indexes[ $key_name ] ) ) {
+					$grouped_indexes[ $key_name ] = array(
+						'non_unique' => (int) ( $row['Non_unique'] ?? 1 ),
+						'columns'    => array(),
+					);
+				}
+				$col_name = strtolower( (string) ( $row['Column_name'] ?? '' ) );
+				if ( '' !== $col_name ) {
+					$grouped_indexes[ $key_name ]['columns'][] = $col_name;
+				}
+			}
+
+			foreach ( $grouped_indexes as $key_name => $info ) {
+				// Must be unique: Non_unique == 0 (includes PRIMARY and UNIQUE indexes).
+				if ( 0 === $info['non_unique'] ) {
+					// Must be strictly single-column matching our target column.
+					if ( 1 === count( $info['columns'] ) && $info['columns'][0] === $col_lower ) {
+						return true;
+					}
+				}
+			}
+		}
+
+		// 2. SQLite PRAGMA inspection fallback for test harnesses.
+		$info = $wpdb->get_results( "PRAGMA table_info({$table})", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $info ) && is_array( $info ) ) {
+			$pk_cols = array();
+			foreach ( $info as $col ) {
+				if ( ! empty( $col['pk'] ) ) {
+					$pk_cols[] = strtolower( (string) ( $col['name'] ?? '' ) );
+				}
+			}
+			if ( 1 === count( $pk_cols ) && $pk_cols[0] === $col_lower ) {
+				return true;
+			}
+		}
+
+		$idx_list = $wpdb->get_results( "PRAGMA index_list('{$table}')", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $idx_list ) && is_array( $idx_list ) ) {
+			foreach ( $idx_list as $idx ) {
+				if ( ! empty( $idx['unique'] ) ) {
+					$idx_name = (string) ( $idx['name'] ?? '' );
+					$idx_cols = $wpdb->get_results( "PRAGMA index_info('{$idx_name}')", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					if ( ! empty( $idx_cols ) && 1 === count( $idx_cols ) ) {
+						if ( strtolower( (string) ( $idx_cols[0]['name'] ?? '' ) ) === $col_lower ) {
+							return true;
+						}
+					}
+				}
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -458,6 +576,13 @@ class Full_Elementor_MCP_Database_Installer {
 			// 4. Verify primary key constraint.
 			if ( ! empty( $spec['primary'] ) ) {
 				if ( ! self::verify_table_has_primary_key( $table, $spec['primary'] ) ) {
+					return false;
+				}
+			}
+
+			// 5. Verify single-column unique constraint.
+			if ( ! empty( $spec['single_unique'] ) ) {
+				if ( ! self::verify_single_column_unique_constraint( $table, $spec['single_unique'] ) ) {
 					return false;
 				}
 			}

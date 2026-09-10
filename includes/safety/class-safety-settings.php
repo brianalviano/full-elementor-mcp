@@ -73,7 +73,8 @@ class Full_Elementor_MCP_Safety_Settings {
 			$stored = array();
 		}
 
-		self::$cache = array_merge( self::get_defaults(), $stored );
+		// Normalize raw persisted settings through sanitize() before caching and returning.
+		self::$cache = self::sanitize( $stored );
 		return self::$cache;
 	}
 
@@ -113,9 +114,10 @@ class Full_Elementor_MCP_Safety_Settings {
 	 * Explicitly maps:
 	 * - false, 0, '0', 'false', 'off', 'no', '' => false
 	 * - true, 1, '1', 'true', 'on', 'yes'       => true
+	 * Unsupported/malformed types (arrays, objects, resources) fail-safe to $default.
 	 *
 	 * @param mixed $value   Input value.
-	 * @param bool  $default Fallback if null or unparseable.
+	 * @param bool  $default Fallback if null, unsupported, or unparseable.
 	 * @return bool Sanitized boolean.
 	 */
 	public static function sanitize_bool( mixed $value, bool $default = false ): bool {
@@ -132,7 +134,8 @@ class Full_Elementor_MCP_Safety_Settings {
 			$filtered = filter_var( trim( $value ), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE );
 			return null !== $filtered ? $filtered : $default;
 		}
-		return (bool) $value;
+		// Strictly fail safe on unsupported or malformed types (arrays, objects, resources).
+		return $default;
 	}
 
 	/**
@@ -180,14 +183,14 @@ class Full_Elementor_MCP_Safety_Settings {
 	 * Whether Safe Mode is enabled.
 	 */
 	public static function is_safe_mode_enabled(): bool {
-		return (bool) self::get( 'safe_mode', true );
+		return self::sanitize_bool( self::get( 'safe_mode', true ), true );
 	}
 
 	/**
 	 * Whether undo journaling is enabled.
 	 */
 	public static function is_undo_enabled(): bool {
-		return (bool) self::get( 'undo_enabled', true );
+		return self::sanitize_bool( self::get( 'undo_enabled', true ), true );
 	}
 
 	/**
@@ -201,7 +204,7 @@ class Full_Elementor_MCP_Safety_Settings {
 	 * Whether permanent delete (`force=true`) is allowed.
 	 */
 	public static function is_permanent_delete_allowed(): bool {
-		return (bool) self::get( 'allow_permanent_delete', false );
+		return self::sanitize_bool( self::get( 'allow_permanent_delete', false ), false );
 	}
 
 	/**

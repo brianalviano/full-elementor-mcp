@@ -191,7 +191,8 @@ class Full_Elementor_MCP_Security_Guard {
 			return false;
 		}
 
-		$is_readonly = ! empty( $annotations['readonly'] );
+		// Strict fail-closed: readonly annotation must be literal boolean true.
+		$is_readonly = isset( $annotations['readonly'] ) && true === $annotations['readonly'];
 
 		// 2. Read-Only scope: ONLY readonly abilities are allowed.
 		if ( 'read_only' === $scope['mode'] ) {
