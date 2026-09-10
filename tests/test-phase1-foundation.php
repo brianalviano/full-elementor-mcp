@@ -133,7 +133,9 @@ if ( ! function_exists( 'rest_get_authenticated_app_password' ) ) {
 class Mock_WPDB {
 	public string $prefix = 'wp_';
 	public bool $simulate_write_failure = false;
-	private \PDO $pdo;
+	public bool $simulate_zero_affected_rows = false;
+	public ?\Closure $on_before_query = null;
+	public \PDO $pdo;
 
 	public function __construct() {
 		$this->pdo = new \PDO( 'sqlite::memory:' );
@@ -156,8 +158,16 @@ class Mock_WPDB {
 	}
 
 	public function query( string $query ): int|bool {
+		if ( $this->on_before_query ) {
+			( $this->on_before_query )( $query, $this );
+		}
+
 		if ( $this->simulate_write_failure && preg_match( '/^(?:INSERT|UPDATE|REPLACE|DELETE)/i', trim( $query ) ) ) {
 			return false;
+		}
+
+		if ( $this->simulate_zero_affected_rows && preg_match( '/^UPDATE/i', trim( $query ) ) ) {
+			return 0;
 		}
 
 		try {
@@ -1099,6 +1109,96 @@ run_test( 'Lock Manager: same owner acquire_lock re-entry is monotonic and never
 
 	// Cleanup.
 	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock2['fencing_token'] );
+} );
+
+run_test( 'Lock Manager: simulated DB failure on same-owner re-entry returns error and never acquired=true', function () {
+	global $wpdb;
+
+	$res_key = 'db_fail_reentry_' . uniqid();
+	$owner   = 'owner_db_fail_reentry';
+
+	// 1. Initial acquisition succeeds.
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock['acquired'] );
+
+	// 2. Enable simulated write failure on DB.
+	$wpdb->simulate_write_failure = true;
+
+	// 3. Same-owner re-entry attempts UPDATE: must FAIL with lock_acquisition_failed!
+	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+	assert_true( is_wp_error( $reentry ), 'DB failure on re-entry must return WP_Error.' );
+	assert_equals( 'lock_acquisition_failed', $reentry->get_error_code() );
+
+	// Reset DB simulation.
+	$wpdb->simulate_write_failure = false;
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
+} );
+
+run_test( 'Lock Manager: interim race between read and update on re-entry returns conflict error', function () {
+	global $wpdb;
+
+	$res_key = 'race_reentry_' . uniqid();
+	$owner   = 'owner_race_reentry';
+
+	// 1. Initial acquisition (fencing token = 1).
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock['acquired'] );
+	assert_equals( 1, $lock['fencing_token'] );
+
+	// 2. Set hook: right before the UPDATE query executes, concurrently bump fencing token in DB!
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = 'lock_' . sanitize_key( $res_key );
+
+	$wpdb->on_before_query = function ( $q, $db ) use ( $table, $lock_key ) {
+		if ( str_contains( $q, 'UPDATE' ) && str_contains( $q, $lock_key ) ) {
+			// Concurrently change fencing token in DB to simulate another transaction takeover!
+			$db->pdo->exec( "UPDATE {$table} SET fencing_token = 999 WHERE token_key = '{$lock_key}'" );
+			$db->on_before_query = null; // fire once
+		}
+	};
+
+	// 3. Same owner tries re-entry:
+	// Initial SELECT reads fencing token 1.
+	// Hook bumps fencing token to 999 right before UPDATE.
+	// UPDATE matches 0 rows!
+	// Recheck detects fencing token changed from 1 to 999!
+	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+	$wpdb->on_before_query = null;
+
+	assert_true( is_wp_error( $reentry ), 'Interim fencing token race must return WP_Error.' );
+	assert_equals( 'stale_writer_conflict', $reentry->get_error_code() );
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, 999 );
+} );
+
+run_test( 'Lock Manager: legitimate 0 affected rows on re-entry succeeds after state recheck', function () {
+	global $wpdb;
+
+	$res_key = 'zero_rows_reentry_' . uniqid();
+	$owner   = 'owner_zero_rows';
+
+	// 1. Initial acquisition (fencing token = 1).
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock['acquired'] );
+
+	// 2. Simulate 0 affected rows on UPDATE (e.g. MySQL identical values).
+	$wpdb->simulate_zero_affected_rows = true;
+
+	// 3. Re-entry attempts UPDATE -> 0 affected rows -> triggers recheck.
+	// In DB, owner_id is still owner_zero_rows, fencing_token is still 1, used is 0, expiry is active.
+	// Recheck verifies all state valid -> returns acquired=true!
+	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+	$wpdb->simulate_zero_affected_rows = false;
+
+	assert_false( is_wp_error( $reentry ), 'Valid state with 0 affected rows must succeed.' );
+	assert_true( $reentry['acquired'] );
+	assert_equals( 1, $reentry['fencing_token'] );
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
 } );
 
 // ---------------------------------------------------------------------

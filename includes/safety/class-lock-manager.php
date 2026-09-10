@@ -106,7 +106,7 @@ class Full_Elementor_MCP_Lock_Manager {
 				$target_dt     = gmdate( 'Y-m-d H:i:s', $target_ts );
 				$fencing_token = (int) $active_owner['fencing_token'];
 
-				$wpdb->query(
+				$updated = $wpdb->query(
 					$wpdb->prepare(
 						"UPDATE {$table}
 						SET expires_at = %s
@@ -124,12 +124,86 @@ class Full_Elementor_MCP_Lock_Manager {
 					)
 				);
 
-				return array(
-					'acquired'      => true,
-					'resource_key'  => $resource_key,
-					'owner_id'      => $owner_id,
-					'fencing_token' => $fencing_token > 0 ? $fencing_token : 1,
-					'expires_at'    => $target_ts,
+				// 1. Explicit DB write failure must return WP_Error, never acquired=true.
+				if ( false === $updated ) {
+					return new \WP_Error(
+						'lock_acquisition_failed',
+						sprintf(
+							/* translators: %s: resource key */
+							__( 'Failed to renew concurrency lock on resource "%s" due to a database write error.', 'full-elementor-mcp' ),
+							esc_html( $resource_key )
+						)
+					);
+				}
+
+				// 2. Direct write success (> 0 affected rows).
+				if ( $updated > 0 ) {
+					return array(
+						'acquired'      => true,
+						'resource_key'  => $resource_key,
+						'owner_id'      => $owner_id,
+						'fencing_token' => $fencing_token > 0 ? $fencing_token : 1,
+						'expires_at'    => $target_ts,
+					);
+				}
+
+				// 3. 0 affected rows: re-read current lock state to verify if legitimate or race conflict.
+				$recheck = $wpdb->get_row(
+					$wpdb->prepare(
+						"SELECT token_type, owner_id, fencing_token, used, expires_at FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						$lock_key
+					),
+					ARRAY_A
+				);
+
+				if ( ! empty( $recheck ) ) {
+					$recheck_fencing = (int) $recheck['fencing_token'];
+					$recheck_used    = (int) $recheck['used'];
+					$recheck_exp_ts  = ! empty( $recheck['expires_at'] ) ? strtotime( $recheck['expires_at'] . ' UTC' ) : 0;
+
+					// If ownership or fencing token changed in the interim, reject with conflict error.
+					if ( $recheck['owner_id'] !== $owner_id || $recheck_fencing !== $fencing_token ) {
+						return new \WP_Error(
+							'stale_writer_conflict',
+							sprintf(
+								/* translators: %s: resource key */
+								__( 'Lock re-entry conflict: ownership or fencing token for "%s" changed concurrently.', 'full-elementor-mcp' ),
+								esc_html( $resource_key )
+							)
+						);
+					}
+
+					// If lock was marked used or type changed, reject.
+					if ( 0 !== $recheck_used || 'lock' !== $recheck['token_type'] ) {
+						return new \WP_Error(
+							'resource_locked',
+							sprintf(
+								/* translators: %s: resource key */
+								__( 'Lock re-entry failed: resource "%s" is no longer active.', 'full-elementor-mcp' ),
+								esc_html( $resource_key )
+							)
+						);
+					}
+
+					// If lease is still active and valid, legitimate 0 affected rows (already at or beyond target).
+					if ( false !== $recheck_exp_ts && $recheck_exp_ts >= $now_ts ) {
+						return array(
+							'acquired'      => true,
+							'resource_key'  => $resource_key,
+							'owner_id'      => $owner_id,
+							'fencing_token' => $recheck_fencing > 0 ? $recheck_fencing : 1,
+							'expires_at'    => max( $target_ts, $recheck_exp_ts ),
+						);
+					}
+				}
+
+				return new \WP_Error(
+					'resource_locked',
+					sprintf(
+						/* translators: %s: resource key */
+						__( 'Lock re-entry rejected: lock lease for "%s" has expired.', 'full-elementor-mcp' ),
+						esc_html( $resource_key )
+					)
 				);
 			}
 		}
