@@ -265,7 +265,7 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 	 * @param string $title Optional title for filename fallback.
 	 * @return array|\WP_Error Array with attachment_id and url on success.
 	 */
-	private function upload_from_url( string $url, string $title ): array {
+	private function upload_from_url( string $url, string $title ): array|\WP_Error {
 		$tmp_file = download_url( $url, 30 );
 
 		if ( is_wp_error( $tmp_file ) ) {
@@ -321,7 +321,7 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 	 * @param string $title   Optional title for filename.
 	 * @return array|\WP_Error Array with attachment_id and url on success.
 	 */
-	private function upload_from_content( string $content, string $title ): array {
+	private function upload_from_content( string $content, string $title ): array|\WP_Error {
 		// Basic validation: must contain <svg tag.
 		if ( stripos( $content, '<svg' ) === false ) {
 			return new \WP_Error(
@@ -362,7 +362,7 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 	 * @param string $filename The desired filename.
 	 * @return array|\WP_Error Array with attachment_id and url on success.
 	 */
-	private function do_sideload( string $tmp_file, string $filename ): array {
+	private function do_sideload( string $tmp_file, string $filename ): array|\WP_Error {
 		$file_array = array(
 			'name'     => sanitize_file_name( $filename ),
 			'tmp_name' => $tmp_file,
