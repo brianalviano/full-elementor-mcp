@@ -196,7 +196,7 @@ class Mock_WPDB {
 			$args = $args[0];
 		}
 		foreach ( $args as $arg ) {
-			$val = is_numeric( $arg ) ? (string) $arg : "'" . addslashes( (string) $arg ) . "'";
+			$val   = is_numeric( $arg ) ? (string) $arg : $this->pdo->quote( (string) $arg );
 			$query = preg_replace( '/%[sdf]/', $val, $query, 1 );
 		}
 		return $query;
@@ -254,10 +254,18 @@ class Mock_WPDB {
 				}
 				return $res;
 			}
+			$query = $this->translate_query_for_sqlite( $query );
 			return $this->pdo->exec( $query );
 		} catch ( \Throwable $e ) {
 			return false;
 		}
+	}
+
+	private function translate_query_for_sqlite( string $query ): string {
+		$query = preg_replace( '/DATE_ADD\s*\(\s*([^,]+?)\s*,\s*INTERVAL\s+([0-9+-]+)\s+SECOND\s*\)/i', "datetime($1, '+$2 seconds')", $query );
+		$query = preg_replace( '/DATE_SUB\s*\(\s*([^,]+?)\s*,\s*INTERVAL\s+([0-9+-]+)\s+SECOND\s*\)/i', "datetime($1, '-$2 seconds')", $query );
+		$query = preg_replace( '/GREATEST\s*\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)/i', 'max($1, $2)', $query );
+		return $query;
 	}
 
 	public function get_col( string $query, int $x = 0 ): array {
@@ -326,7 +334,8 @@ class Mock_WPDB {
 				}
 				return array_map( static fn( $r ) => (object) $r, $rows );
 			}
-			$stmt = $this->pdo->query( $query );
+			$query = $this->translate_query_for_sqlite( $query );
+			$stmt  = $this->pdo->query( $query );
 			if ( ! $stmt ) {
 				return array();
 			}
@@ -345,7 +354,8 @@ class Mock_WPDB {
 			if ( preg_match( "/SHOW TABLES LIKE '([^']+)'/i", $query, $m ) ) {
 				$query = "SELECT name FROM sqlite_master WHERE type='table' AND name = '{$m[1]}'";
 			}
-			$stmt = $this->pdo->query( $query );
+			$query = $this->translate_query_for_sqlite( $query );
+			$stmt  = $this->pdo->query( $query );
 			return $stmt ? $stmt->fetchColumn() : null;
 		} catch ( \Throwable $e ) {
 			return null;
@@ -354,8 +364,9 @@ class Mock_WPDB {
 
 	public function get_row( string $query, string $output = 'OBJECT' ): mixed {
 		try {
-			$stmt = $this->pdo->query( $query );
-			$res  = $stmt ? $stmt->fetch( \PDO::FETCH_ASSOC ) : null;
+			$query = $this->translate_query_for_sqlite( $query );
+			$stmt  = $this->pdo->query( $query );
+			$res   = $stmt ? $stmt->fetch( \PDO::FETCH_ASSOC ) : null;
 			if ( ! $res ) {
 				return null;
 			}
@@ -1836,6 +1847,8 @@ run_test( 'Security Guard: readonly annotation must be literal boolean true', fu
 } );
 
 run_test( 'Lock Manager: actual write-time expiry boundary increments fencing token', function () {
+	global $wpdb;
+
 	$res_key  = 'boundary_race_' . uniqid();
 	$owner_id = 'owner_boundary_tester';
 
@@ -1856,9 +1869,191 @@ run_test( 'Lock Manager: actual write-time expiry boundary increments fencing to
 	assert_true( $lock2['acquired'], 'Takeover after write-time expiry must succeed.' );
 	assert_equals( 2, $lock2['fencing_token'], 'Fencing token must advance to 2 when lease expired at write time.' );
 
+	// 4. Validate generation 2 against the SAME mocked DB clock:
+	// Returned expires_at must be relative to the database authority clock, not stale PHP time().
+	assert_true( (int) $lock2['expires_at'] >= $GLOBALS['wp_test_mock_now'] + 30, 'Returned expires_at must be relative to DB clock.' );
+
+	// Query DB state directly under the same mocked DB clock:
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$row2     = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db FROM {$table} WHERE token_key = %s",
+			$lock_key
+		),
+		ARRAY_A
+	);
+	assert_true( ! empty( $row2['is_active_in_db'] ), 'Generation 2 lease MUST be active in the database under the same mocked DB clock!' );
+
+	// Fencing assertion must succeed because generation 2 is genuinely active in the database:
+	$assert_res = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner_id, 2 );
+	assert_true( true === $assert_res, 'assert_fencing_token_ownership must validate generation 2 as active under DB clock.' );
+
 	// Restore mock clock
 	unset( $GLOBALS['wp_test_mock_now'] );
 	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner_id, 2 );
+} );
+
+run_test( 'Lock Manager: clock-skew DB clock ahead of PHP (+500s)', function () {
+	global $wpdb;
+
+	$res_key  = 'skew_ahead_' . uniqid();
+	$owner1   = 'owner_ahead_1';
+	$owner2   = 'owner_ahead_2';
+	$base_now = time();
+
+	// Set DB clock 500s ahead of PHP clock.
+	$GLOBALS['wp_test_mock_now'] = $base_now + 500;
+
+	// 1. Initial lock acquisition (TTL = 45s).
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner1, 45 );
+	assert_true( $lock1['acquired'] );
+	assert_equals( 1, $lock1['fencing_token'] );
+	assert_equals( $base_now + 545, (int) $lock1['expires_at'], 'Returned expires_at must match DB clock + TTL.' );
+
+	// Verify DB row matches returned expiry and is active in DB.
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$row1     = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	assert_equals( $base_now + 545, strtotime( $row1['expires_at'] . ' UTC' ), 'Persisted expiry must match returned expiry.' );
+	assert_true( ! empty( $row1['is_active'] ), 'Initial lock must be active in DB despite DB being 500s ahead of PHP.' );
+
+	// Fencing assertion must succeed.
+	assert_true( true === Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner1, 1 ) );
+
+	// 2. Renew lease: advance DB clock slightly (+10s to base_now + 510).
+	$GLOBALS['wp_test_mock_now'] = $base_now + 510;
+	$renewed = Full_Elementor_MCP_Lock_Manager::renew_lease( $res_key, $owner1, 1, 40 );
+	assert_true( $renewed, 'Lease renewal must succeed under skewed DB clock.' );
+	$row_ren = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	assert_equals( $base_now + 550, strtotime( $row_ren['expires_at'] . ' UTC' ) );
+	assert_true( ! empty( $row_ren['is_active'] ) );
+
+	// 3. Expired takeover: advance DB clock past renewed expiry (+560s).
+	$GLOBALS['wp_test_mock_now'] = $base_now + 560;
+	// Generation 1 is now expired in DB:
+	$assert_expired = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner1, 1 );
+	assert_true( is_wp_error( $assert_expired ), 'Fencing assertion must fail when lease has expired in DB.' );
+	assert_equals( 'stale_writer_conflict', $assert_expired->get_error_code() );
+
+	// Client 2 takes over (TTL = 30s).
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner2, 30 );
+	assert_true( $lock2['acquired'], 'Takeover must succeed.' );
+	assert_equals( 2, $lock2['fencing_token'], 'Takeover must increment fencing token to 2.' );
+	assert_equals( $base_now + 560 + 30, (int) $lock2['expires_at'], 'Takeover expiry must be relative to current DB clock.' );
+	assert_true( true === Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner2, 2 ) );
+
+	// 4. Idempotency consistency: freshly stored result must not prematurely expire.
+	$idemp_key = 'skew_idemp_ahead_' . uniqid();
+	$stored = Full_Elementor_MCP_Lock_Manager::set_idempotent_result(
+		$idemp_key,
+		'full-elementor-mcp/create-page',
+		1,
+		null,
+		array( 'title' => 'Skew Test Ahead' ),
+		array( 'success' => true ),
+		300
+	);
+	assert_true( $stored, 'set_idempotent_result must succeed.' );
+	$cached = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key,
+		'full-elementor-mcp/create-page',
+		1,
+		null,
+		array( 'title' => 'Skew Test Ahead' )
+	);
+	assert_equals( array( 'success' => true ), $cached, 'Idempotency must not appear expired when DB is ahead of PHP.' );
+
+	// Restore
+	unset( $GLOBALS['wp_test_mock_now'] );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner2, 2 );
+} );
+
+run_test( 'Lock Manager: clock-skew PHP clock ahead of DB (-500s)', function () {
+	global $wpdb;
+
+	$res_key  = 'skew_behind_' . uniqid();
+	$owner1   = 'owner_behind_1';
+	$owner2   = 'owner_behind_2';
+	$base_now = time();
+
+	// Set DB clock 500s behind PHP clock.
+	$GLOBALS['wp_test_mock_now'] = $base_now - 500;
+
+	// 1. Initial lock acquisition (TTL = 45s).
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner1, 45 );
+	assert_true( $lock1['acquired'] );
+	assert_equals( 1, $lock1['fencing_token'] );
+	assert_equals( $base_now - 455, (int) $lock1['expires_at'], 'Returned expires_at must match DB clock + TTL.' );
+
+	// Verify DB row matches returned expiry and is active in DB.
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$row1     = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	assert_equals( $base_now - 455, strtotime( $row1['expires_at'] . ' UTC' ), 'Persisted expiry must match returned expiry.' );
+	assert_true( ! empty( $row1['is_active'] ), 'Initial lock must be active in DB despite DB being behind PHP.' );
+
+	// Fencing assertion must succeed based on DB clock truth.
+	assert_true( true === Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner1, 1 ) );
+
+	// 2. Renew lease: advance DB clock slightly (+10s to base_now - 490).
+	$GLOBALS['wp_test_mock_now'] = $base_now - 490;
+	$renewed = Full_Elementor_MCP_Lock_Manager::renew_lease( $res_key, $owner1, 1, 40 );
+	assert_true( $renewed, 'Lease renewal must succeed when DB is behind PHP.' );
+	$row_ren = $wpdb->get_row(
+		$wpdb->prepare( "SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active FROM {$table} WHERE token_key = %s", $lock_key ),
+		ARRAY_A
+	);
+	assert_equals( $base_now - 450, strtotime( $row_ren['expires_at'] . ' UTC' ) );
+	assert_true( ! empty( $row_ren['is_active'] ) );
+
+	// 3. Expired takeover: advance DB clock past renewed expiry (-440s).
+	$GLOBALS['wp_test_mock_now'] = $base_now - 440;
+	// Generation 1 is now expired in DB:
+	$assert_expired = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner1, 1 );
+	assert_true( is_wp_error( $assert_expired ), 'Fencing assertion must fail when lease has expired in DB.' );
+	assert_equals( 'stale_writer_conflict', $assert_expired->get_error_code() );
+
+	// Client 2 takes over (TTL = 30s).
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner2, 30 );
+	assert_true( $lock2['acquired'], 'Takeover must succeed.' );
+	assert_equals( 2, $lock2['fencing_token'], 'Takeover must increment fencing token to 2.' );
+	assert_equals( $base_now - 440 + 30, (int) $lock2['expires_at'], 'Takeover expiry must be relative to current DB clock.' );
+	assert_true( true === Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner2, 2 ) );
+
+	// 4. Idempotency consistency:
+	$idemp_key = 'skew_idemp_behind_' . uniqid();
+	$stored = Full_Elementor_MCP_Lock_Manager::set_idempotent_result(
+		$idemp_key,
+		'full-elementor-mcp/create-page',
+		1,
+		null,
+		array( 'title' => 'Skew Test Behind' ),
+		array( 'success' => true ),
+		300
+	);
+	assert_true( $stored, 'set_idempotent_result must succeed.' );
+	$cached = Full_Elementor_MCP_Lock_Manager::get_idempotent_result(
+		$idemp_key,
+		'full-elementor-mcp/create-page',
+		1,
+		null,
+		array( 'title' => 'Skew Test Behind' )
+	);
+	assert_equals( array( 'success' => true ), $cached, 'Idempotency must be retrievable when DB is behind PHP.' );
+
+	// Restore
+	unset( $GLOBALS['wp_test_mock_now'] );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner2, 2 );
 } );
 
 // ---------------------------------------------------------------------

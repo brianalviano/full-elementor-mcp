@@ -72,33 +72,41 @@ class Full_Elementor_MCP_Lock_Manager {
 			);
 		}
 
-		$table      = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$lock_key   = self::get_lock_token_key( $resource_key );
-		$now_ts     = time();
-		$now_dt     = gmdate( 'Y-m-d H:i:s', $now_ts );
-		$expires_ts = $now_ts + max( 5, $ttl_seconds );
-		$expires_dt = gmdate( 'Y-m-d H:i:s', $expires_ts );
+		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+		$lock_key = self::get_lock_token_key( $resource_key );
+		$ttl      = max( 5, $ttl_seconds );
 
 		// STEP 1: Attempt atomic INSERT for a brand new lock (fencing_token = 1).
+		// Expiry and creation timestamps are generated directly by the database UTC authority.
 		// If another operation concurrently attempts insertion, PRIMARY KEY constraint rejects it.
 		$inserted = $wpdb->query(
 			$wpdb->prepare(
 				"INSERT INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
-				VALUES (%s, 'lock', %s, 1, NULL, %s, %s, 0)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				VALUES (%s, 'lock', %s, 1, NULL, UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d SECOND), 0)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key,
 				$owner_id,
-				$now_dt,
-				$expires_dt
+				$ttl
 			)
 		);
 
 		if ( false !== $inserted && $inserted > 0 ) {
+			$persisted = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT fencing_token, expires_at FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$lock_key
+				),
+				ARRAY_A
+			);
+			$persisted_exp_ts = ( ! empty( $persisted ) && ! empty( $persisted['expires_at'] ) )
+				? (int) strtotime( $persisted['expires_at'] . ' UTC' )
+				: 0;
+
 			return array(
 				'acquired'      => true,
 				'resource_key'  => $resource_key,
 				'owner_id'      => $owner_id,
 				'fencing_token' => 1,
-				'expires_at'    => $expires_ts,
+				'expires_at'    => $persisted_exp_ts,
 			);
 		}
 
@@ -106,7 +114,7 @@ class Full_Elementor_MCP_Lock_Manager {
 		// If the CURRENT owner holds an ACTIVE lease in the database, renew lease monotonically without incrementing fencing_token.
 		$active_owner = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT fencing_token, expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"SELECT fencing_token, expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db, UTC_TIMESTAMP() AS db_now FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key,
 				$owner_id
 			),
@@ -120,13 +128,15 @@ class Full_Elementor_MCP_Lock_Manager {
 			// Step 2 applies ONLY if the observed lease is still strictly active in the database.
 			// If already expired at write time, same-owner must NOT re-enter with old fence; falls through to Step 3 takeover!
 			if ( $is_active_in_db && false !== $current_expires_ts ) {
-				// Bounded refresh: lease horizon is capped at max(current_expires_ts, now + requested_ttl),
-				// ensuring rapid calls do not accumulate unbounded future lease time.
-				$requested_ttl       = max( 5, $ttl_seconds );
-				$target_ts           = max( $current_expires_ts, $now_ts + $requested_ttl );
-				$target_dt           = gmdate( 'Y-m-d H:i:s', $target_ts );
+				$db_now_ts           = ! empty( $active_owner['db_now'] ) ? (int) strtotime( $active_owner['db_now'] . ' UTC' ) : time();
 				$fencing_token       = (int) $active_owner['fencing_token'];
 				$observed_expires_dt = (string) $active_owner['expires_at'];
+
+				// Bounded refresh relative to database time authority:
+				// lease horizon is capped at max(current_expires_ts, db_now + requested_ttl),
+				// ensuring rapid calls do not accumulate unbounded future lease time and never shorten active lease duration.
+				$target_ts = max( $current_expires_ts, $db_now_ts + $ttl );
+				$target_dt = gmdate( 'Y-m-d H:i:s', $target_ts );
 
 				// Strict write-time CAS: binds observed expires_at AND guarantees lease is still active at write time in database.
 				$updated = $wpdb->query(
@@ -174,7 +184,7 @@ class Full_Elementor_MCP_Lock_Manager {
 				// 3. 0 affected rows: CAS missed due to concurrent update or state change. Re-read current lock state.
 				$recheck = $wpdb->get_row(
 					$wpdb->prepare(
-						"SELECT token_type, owner_id, fencing_token, used, expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						"SELECT token_type, owner_id, fencing_token, used, expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db, UTC_TIMESTAMP() AS db_now FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 						$lock_key
 					),
 					ARRAY_A
@@ -183,7 +193,7 @@ class Full_Elementor_MCP_Lock_Manager {
 				if ( ! empty( $recheck ) ) {
 					$recheck_fencing = (int) $recheck['fencing_token'];
 					$recheck_used    = (int) $recheck['used'];
-					$recheck_exp_ts  = ! empty( $recheck['expires_at'] ) ? strtotime( $recheck['expires_at'] . ' UTC' ) : 0;
+					$recheck_exp_ts  = ! empty( $recheck['expires_at'] ) ? (int) strtotime( $recheck['expires_at'] . ' UTC' ) : 0;
 					$recheck_active  = ! empty( $recheck['is_active_in_db'] );
 
 					// If ownership or fencing token changed in the interim, reject with conflict error.
@@ -227,8 +237,9 @@ class Full_Elementor_MCP_Lock_Manager {
 						}
 
 						// If lease is still active and valid, but DB expiry is less than target (e.g. intermediate heartbeat raced):
-						// Attempt one bounded retry using the newly observed state.
-						$retry_target_ts = max( $recheck_exp_ts, time() + $requested_ttl );
+						// Attempt one bounded retry using the newly observed state and DB time.
+						$retry_db_now_ts = ! empty( $recheck['db_now'] ) ? (int) strtotime( $recheck['db_now'] . ' UTC' ) : $db_now_ts;
+						$retry_target_ts = max( $recheck_exp_ts, $retry_db_now_ts + $ttl );
 						$retry_target_dt = gmdate( 'Y-m-d H:i:s', $retry_target_ts );
 
 						$retried = $wpdb->query(
@@ -276,53 +287,59 @@ class Full_Elementor_MCP_Lock_Manager {
 		// STEP 3: Atomic Compare-And-Swap (CAS) takeover for expired or released locks.
 		// Strictly increments fencing_token = fencing_token + 1 in SQL.
 		// Only succeeds if current lock is expired (expires_at <= UTC_TIMESTAMP()) OR marked used/released (used = 1).
+		// Persisted expiry is generated strictly from the database UTC authority.
 		$taken_over = $wpdb->query(
 			$wpdb->prepare(
 				"UPDATE {$table}
 				SET owner_id = %s,
 				    fencing_token = fencing_token + 1,
-				    created_at = %s,
-				    expires_at = %s,
+				    created_at = UTC_TIMESTAMP(),
+				    expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d SECOND),
 				    used = 0
 				WHERE token_key = %s
 				  AND token_type = 'lock'
 				  AND (expires_at <= UTC_TIMESTAMP() OR used = 1)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$owner_id,
-				$now_dt,
-				$expires_dt,
+				$ttl,
 				$lock_key
 			)
 		);
 
 		if ( false !== $taken_over && $taken_over > 0 ) {
-			$fencing_token = (int) $wpdb->get_var(
+			$persisted = $wpdb->get_row(
 				$wpdb->prepare(
-					"SELECT fencing_token FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					"SELECT fencing_token, expires_at FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 					$lock_key
-				)
+				),
+				ARRAY_A
 			);
+			$persisted_fencing = ! empty( $persisted['fencing_token'] ) ? (int) $persisted['fencing_token'] : 2;
+			$persisted_exp_ts  = ( ! empty( $persisted ) && ! empty( $persisted['expires_at'] ) )
+				? (int) strtotime( $persisted['expires_at'] . ' UTC' )
+				: 0;
 
 			return array(
 				'acquired'      => true,
 				'resource_key'  => $resource_key,
 				'owner_id'      => $owner_id,
-				'fencing_token' => $fencing_token > 0 ? $fencing_token : 2,
-				'expires_at'    => $expires_ts,
+				'fencing_token' => $persisted_fencing > 0 ? $persisted_fencing : 2,
+				'expires_at'    => $persisted_exp_ts,
 			);
 		}
 
 		// STEP 4: Lock is actively held by another client. Fetch current owner for rejection info.
 		$existing = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT owner_id, expires_at FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"SELECT owner_id, expires_at, UTC_TIMESTAMP() AS db_now FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key
 			),
 			ARRAY_A
 		);
 
 		if ( ! empty( $existing ) && isset( $existing['expires_at'] ) ) {
+			$db_now_ts       = ! empty( $existing['db_now'] ) ? (int) strtotime( $existing['db_now'] . ' UTC' ) : time();
 			$lock_expires_ts = strtotime( $existing['expires_at'] . ' UTC' );
-			$remaining       = max( 1, ( false !== $lock_expires_ts ) ? ( $lock_expires_ts - $now_ts ) : $ttl_seconds );
+			$remaining       = max( 1, ( false !== $lock_expires_ts ) ? ( $lock_expires_ts - $db_now_ts ) : $ttl );
 			$locked_by       = ! empty( $existing['owner_id'] ) ? substr( (string) $existing['owner_id'], 0, 8 ) . '...' : 'unknown';
 
 			return new \WP_Error(
@@ -356,7 +373,8 @@ class Full_Elementor_MCP_Lock_Manager {
 	 * Asserts that the caller still owns the active lock and valid fencing token.
 	 *
 	 * MUST be checked immediately before any persistent write (e.g. save_page_data)
-	 * and before committing WAL entries.
+	 * and before committing WAL entries. Strictly validates lease validity using
+	 * the database UTC time authority (expires_at > UTC_TIMESTAMP()).
 	 *
 	 * @param string $resource_key Identifier for resource.
 	 * @param string $owner_id     Caller request UUID.
@@ -368,11 +386,10 @@ class Full_Elementor_MCP_Lock_Manager {
 
 		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 		$lock_key = self::get_lock_token_key( $resource_key );
-		$now_dt   = gmdate( 'Y-m-d H:i:s' );
 
 		$current = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT owner_id, fencing_token, expires_at, used FROM {$table} WHERE token_key = %s AND token_type = 'lock'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"SELECT owner_id, fencing_token, expires_at, used, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db FROM {$table} WHERE token_key = %s AND token_type = 'lock'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key
 			),
 			ARRAY_A
@@ -422,7 +439,7 @@ class Full_Elementor_MCP_Lock_Manager {
 			);
 		}
 
-		if ( strtotime( $current['expires_at'] . ' UTC' ) <= time() ) {
+		if ( empty( $current['is_active_in_db'] ) ) {
 			return new \WP_Error(
 				'stale_writer_conflict',
 				sprintf(
@@ -439,7 +456,8 @@ class Full_Elementor_MCP_Lock_Manager {
 	/**
 	 * Extends lease expiration for a currently held lock (heartbeat).
 	 *
-	 * Guaranteed to never shorten an active lease duration: extends from max(current_expiry, now) + extra_seconds.
+	 * Guaranteed to never shorten an active lease duration: extends from max(current_expiry, db_now) + extra_seconds.
+	 * Evaluates active lease validity and refresh targets strictly against the database UTC authority.
 	 * Uses compare-and-swap on observed expiry to eliminate heartbeat race conditions.
 	 *
 	 * @param string $resource_key  Identifier for resource.
@@ -457,12 +475,11 @@ class Full_Elementor_MCP_Lock_Manager {
 
 		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 		$lock_key = self::get_lock_token_key( $resource_key );
-		$now_ts   = time();
 
-		// Fetch current active lease for owner and fencing token.
+		// Fetch current active lease for owner and fencing token with database time evaluation.
 		$current = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT expires_at FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db, UTC_TIMESTAMP() AS db_now FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key,
 				$owner_id,
 				$fencing_token
@@ -470,21 +487,18 @@ class Full_Elementor_MCP_Lock_Manager {
 			ARRAY_A
 		);
 
-		if ( empty( $current ) || empty( $current['expires_at'] ) ) {
-			return false;
+		if ( empty( $current ) || empty( $current['expires_at'] ) || empty( $current['is_active_in_db'] ) ) {
+			return false; // Missing, released, or already expired in database => cannot renew.
 		}
 
 		$current_expires_ts = strtotime( $current['expires_at'] . ' UTC' );
-		if ( false === $current_expires_ts || $current_expires_ts <= $now_ts ) {
-			return false; // Already expired, cannot renew.
+		if ( false === $current_expires_ts ) {
+			return false;
 		}
 
-		$now_dt = gmdate( 'Y-m-d H:i:s', $now_ts );
-
-		// Bounded refresh: lease horizon is capped at max(current_expires_ts, now + requested_extra),
-		// ensuring rapid heartbeat calls do not accumulate unbounded future lease time.
+		$db_now_ts       = ! empty( $current['db_now'] ) ? (int) strtotime( $current['db_now'] . ' UTC' ) : time();
 		$requested_extra = max( 5, $extra_seconds );
-		$target_ts       = max( $current_expires_ts, $now_ts + $requested_extra );
+		$target_ts       = max( $current_expires_ts, $db_now_ts + $requested_extra );
 		$target_dt       = gmdate( 'Y-m-d H:i:s', $target_ts );
 
 		// Strict write-time CAS: binds observed expires_at AND guarantees lease is still active at write time in database.
@@ -503,10 +517,10 @@ class Full_Elementor_MCP_Lock_Manager {
 			return true;
 		}
 
-		// Re-check: if 0 rows, check whether another heartbeat already extended to >= target_dt while lease remains active.
+		// Re-check: if 0 rows, check whether another heartbeat already extended to >= target_dt while lease remains active in DB.
 		$recheck = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT expires_at FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"SELECT expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_in_db FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key,
 				$owner_id,
 				$fencing_token
@@ -515,8 +529,9 @@ class Full_Elementor_MCP_Lock_Manager {
 		);
 
 		if ( ! empty( $recheck ) && ! empty( $recheck['expires_at'] ) ) {
-			$recheck_ts = strtotime( $recheck['expires_at'] . ' UTC' );
-			return ( false !== $recheck_ts && $recheck_ts > time() && $recheck_ts >= $target_ts );
+			$recheck_ts     = strtotime( $recheck['expires_at'] . ' UTC' );
+			$recheck_active = ! empty( $recheck['is_active_in_db'] );
+			return ( false !== $recheck_ts && $recheck_active && $recheck_ts >= $target_ts );
 		}
 
 		return false;
@@ -749,11 +764,11 @@ class Full_Elementor_MCP_Lock_Manager {
 			return false;
 		}
 
-		$table      = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$token_key  = self::get_idempotency_token_key( $idempotency_key, $ability, $user_id, $credential_uuid );
-		$now_dt     = gmdate( 'Y-m-d H:i:s' );
-		$expires_dt = gmdate( 'Y-m-d H:i:s', time() + max( 10, $ttl_seconds ) );
-		$args_hash  = self::hash_args( $args );
+		$table     = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+		$token_key = self::get_idempotency_token_key( $idempotency_key, $ability, $user_id, $credential_uuid );
+		$args_hash = self::hash_args( $args );
+		$ttl       = max( 10, $ttl_seconds );
+		$owner_id  = $credential_uuid ?? (string) $user_id;
 
 		$payload_data = array(
 			'args_hash'       => $args_hash,
@@ -768,19 +783,16 @@ class Full_Elementor_MCP_Lock_Manager {
 			return false;
 		}
 
-		$replaced = $wpdb->replace(
-			$table,
-			array(
-				'token_key'     => $token_key,
-				'token_type'    => 'idempotency',
-				'owner_id'      => $credential_uuid ?? (string) $user_id,
-				'fencing_token' => 0,
-				'payload'       => $encoded,
-				'created_at'    => $now_dt,
-				'expires_at'    => $expires_dt,
-				'used'          => 0,
-			),
-			array( '%s', '%s', '%s', '%d', '%s', '%s', '%s', '%d' )
+		// Use consistent database UTC authority for created_at and expires_at.
+		$replaced = $wpdb->query(
+			$wpdb->prepare(
+				"REPLACE INTO {$table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
+				VALUES (%s, 'idempotency', %s, 0, %s, UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d SECOND), 0)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$token_key,
+				$owner_id,
+				$encoded,
+				$ttl
+			)
 		);
 
 		// Check DB write result: false on failure, 0 if no rows affected.
@@ -795,22 +807,38 @@ class Full_Elementor_MCP_Lock_Manager {
 	 * pruned or deleted from the database, ensuring monotonically increasing fencing tokens across
 	 * subsequent re-acquisitions and takeovers.
 	 *
+	 * Uses the database UTC time authority (DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d SECOND)) for
+	 * internally consistent lifecycle cleanup.
+	 *
 	 * @param int $older_than_seconds Cutoff age in seconds (default 24h = 86400).
 	 * @return int Number of pruned rows.
 	 */
 	public static function prune_expired( int $older_than_seconds = 86400 ): int {
 		global $wpdb;
 
-		$table  = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$cutoff = gmdate( 'Y-m-d H:i:s', time() - max( 60, $older_than_seconds ) );
+		$table   = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+		$seconds = max( 60, $older_than_seconds );
 
 		$pruned = $wpdb->query(
 			$wpdb->prepare(
-				"DELETE FROM {$table} WHERE expires_at < %s AND token_type != 'lock'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				$cutoff
+				"DELETE FROM {$table} WHERE expires_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d SECOND) AND token_type != 'lock'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$seconds
 			)
 		);
 
 		return false !== $pruned ? (int) $pruned : 0;
+	}
+
+	/**
+	 * Returns current UTC Unix timestamp as evaluated by the database authority.
+	 *
+	 * Falls back to PHP time() if database query is unavailable.
+	 *
+	 * @return int UTC timestamp in seconds.
+	 */
+	public static function get_database_utc_timestamp(): int {
+		global $wpdb;
+		$db_now = $wpdb->get_var( 'SELECT UTC_TIMESTAMP()' );
+		return ( false !== $db_now && null !== $db_now ) ? (int) strtotime( $db_now . ' UTC' ) : time();
 	}
 }
