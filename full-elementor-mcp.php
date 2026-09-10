@@ -196,7 +196,21 @@ function full_elementor_mcp_init(): void {
 		require_once FULL_ELEMENTOR_MCP_DIR . 'includes/admin/class-admin.php';
 	}
 
+	// Safety subsystem foundation.
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-database-installer.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-safety-settings.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-lock-manager.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-security-guard.php';
+
 	// Boot the plugin.
 	Full_Elementor_MCP_Plugin::instance();
 }
 add_action( 'plugins_loaded', 'full_elementor_mcp_init', 20 );
+
+/**
+ * Plugin activation hook to install safety database tables.
+ */
+register_activation_hook( __FILE__, function () {
+	require_once plugin_dir_path( __FILE__ ) . 'includes/safety/class-database-installer.php';
+	Full_Elementor_MCP_Database_Installer::install();
+} );

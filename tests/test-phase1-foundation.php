@@ -1,0 +1,562 @@
+<?php
+/**
+ * Standalone Test Suite for Phase 1: Safety Foundation Layer.
+ *
+ * Can be executed via CLI: `php tests/test-phase1-foundation.php`
+ *
+ * Verifies:
+ * 1. Database Installer SQL syntax and schema definitions.
+ * 2. Safety Settings defaults, sanitization, and policy getters.
+ * 3. Lock Manager lease locking, fencing token increments, lease renewal, stale writer detection, and idempotency.
+ * 4. Security Guard SSRF URL & IP resolution blocking (loopback, RFC1918, metadata).
+ * 5. Critical Asset Guard protection and break-glass policies.
+ * 6. Credential Scope resolution and ability filtering.
+ *
+ * @package Full_Elementor_MCP
+ */
+
+declare(strict_types=1);
+
+// Bootstrap minimal WordPress test harness if not running inside WordPress.
+if ( ! defined( 'ABSPATH' ) ) {
+	define( 'ABSPATH', __DIR__ . '/../' );
+}
+
+// Stubs for WordPress core constants.
+if ( ! defined( 'ARRAY_A' ) ) {
+	define( 'ARRAY_A', 'ARRAY_A' );
+}
+if ( ! defined( 'OBJECT' ) ) {
+	define( 'OBJECT', 'OBJECT' );
+}
+
+if ( ! class_exists( 'WP_Error' ) ) {
+	class WP_Error {
+		public string $code;
+		public string $message;
+		public mixed $data;
+		public function __construct( string $code = '', string $message = '', mixed $data = null ) {
+			$this->code    = $code;
+			$this->message = $message;
+			$this->data    = $data;
+		}
+		public function get_error_code(): string { return $this->code; }
+		public function get_error_message(): string { return $this->message; }
+	}
+}
+
+if ( ! function_exists( 'is_wp_error' ) ) {
+	function is_wp_error( mixed $thing ): bool {
+		return $thing instanceof WP_Error;
+	}
+}
+
+$GLOBALS['wp_test_options'] = array();
+$GLOBALS['wp_test_current_user_id'] = 1;
+$GLOBALS['wp_test_user_caps'] = array( 'edit_posts' => true, 'manage_options' => true );
+
+if ( ! function_exists( 'get_option' ) ) {
+	function get_option( string $name, mixed $default = false ): mixed {
+		return $GLOBALS['wp_test_options'][ $name ] ?? $default;
+	}
+}
+if ( ! function_exists( 'update_option' ) ) {
+	function update_option( string $name, mixed $value ): bool {
+		$GLOBALS['wp_test_options'][ $name ] = $value;
+		return true;
+	}
+}
+if ( ! function_exists( 'delete_option' ) ) {
+	function delete_option( string $name ): bool {
+		unset( $GLOBALS['wp_test_options'][ $name ] );
+		return true;
+	}
+}
+if ( ! function_exists( 'sanitize_key' ) ) {
+	function sanitize_key( string $key ): string {
+		return preg_replace( '/[^a-z0-9_\-]/', '', strtolower( $key ) ) ?? '';
+	}
+}
+if ( ! function_exists( 'sanitize_text_field' ) ) {
+	function sanitize_text_field( string $str ): string {
+		return trim( strip_tags( $str ) );
+	}
+}
+if ( ! function_exists( 'absint' ) ) {
+	function absint( mixed $maybeint ): int {
+		return abs( (int) $maybeint );
+	}
+}
+if ( ! function_exists( 'esc_html' ) ) {
+	function esc_html( string $text ): string {
+		return htmlspecialchars( $text, ENT_QUOTES, 'UTF-8' );
+	}
+}
+if ( ! function_exists( '__' ) ) {
+	function __( string $text, string $domain = 'default' ): string {
+		return $text;
+	}
+}
+if ( ! function_exists( 'wp_parse_url' ) ) {
+	function wp_parse_url( string $url, int $component = -1 ): mixed {
+		return parse_url( $url, $component );
+	}
+}
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	function wp_json_encode( mixed $data, int $options = 0, int $depth = 512 ): string|false {
+		return json_encode( $data, $options, $depth );
+	}
+}
+if ( ! function_exists( 'apply_filters' ) ) {
+	function apply_filters( string $hook_name, mixed $value, ...$args ): mixed {
+		return $value;
+	}
+}
+if ( ! function_exists( 'get_current_user_id' ) ) {
+	function get_current_user_id(): int {
+		return $GLOBALS['wp_test_current_user_id'] ?? 1;
+	}
+}
+if ( ! function_exists( 'current_user_can' ) ) {
+	function current_user_can( string $cap, ...$args ): bool {
+		return ! empty( $GLOBALS['wp_test_user_caps'][ $cap ] );
+	}
+}
+
+// Mock wpdb with in-memory SQLite backend for true SQL query execution.
+class Mock_WPDB {
+	public string $prefix = 'wp_';
+	private \PDO $pdo;
+
+	public function __construct() {
+		$this->pdo = new \PDO( 'sqlite::memory:' );
+		$this->pdo->setAttribute( \PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION );
+	}
+
+	public function get_charset_collate(): string {
+		return '';
+	}
+
+	public function prepare( string $query, ...$args ): string {
+		if ( isset( $args[0] ) && is_array( $args[0] ) && 1 === count( $args ) ) {
+			$args = $args[0];
+		}
+		foreach ( $args as $arg ) {
+			$val = is_numeric( $arg ) ? (string) $arg : "'" . addslashes( (string) $arg ) . "'";
+			$query = preg_replace( '/%[sdf]/', $val, $query, 1 );
+		}
+		return $query;
+	}
+
+	public function query( string $query ): int|bool {
+		try {
+			if ( str_contains( $query, 'AUTO_INCREMENT' ) ) {
+				$q = str_replace(
+					array( 'id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT', 'BIGINT UNSIGNED', 'INT UNSIGNED', 'DATETIME', 'ON UPDATE CURRENT_TIMESTAMP' ),
+					array( 'id INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'INTEGER', 'TEXT', '' ),
+					$query
+				);
+				$q = preg_replace( '/PRIMARY KEY\s*\([^)]+\),?/', '', $q );
+			} else {
+				$q = str_replace(
+					array( 'BIGINT UNSIGNED', 'INT UNSIGNED', 'DATETIME', 'ON UPDATE CURRENT_TIMESTAMP' ),
+					array( 'INTEGER', 'INTEGER', 'TEXT', '' ),
+					$query
+				);
+			}
+			$q = preg_replace( '/(?<!PRIMARY\s)\bKEY\s+[a-zA-Z0-9_]+\s*\([^)]+\),?/', '', $q );
+			$q = preg_replace( '/,\s*\)/', ')', $q );
+			$q = preg_replace( '/(?:\)\s*(?:DEFAULT\s+CHARACTER\s+SET|COLLATE|ENGINE)[^;]*;|\)\s*;)/i', ');', $q );
+			return $this->pdo->exec( $q );
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+	}
+
+	public function get_var( string $query ): mixed {
+		try {
+			if ( preg_match( "/SHOW TABLES LIKE '([^']+)'/i", $query, $m ) ) {
+				$query = "SELECT name FROM sqlite_master WHERE type='table' AND name = '{$m[1]}'";
+			}
+			$stmt = $this->pdo->query( $query );
+			return $stmt ? $stmt->fetchColumn() : null;
+		} catch ( \Throwable $e ) {
+			return null;
+		}
+	}
+
+	public function get_row( string $query, string $output = 'OBJECT' ): mixed {
+		try {
+			$stmt = $this->pdo->query( $query );
+			$res  = $stmt ? $stmt->fetch( \PDO::FETCH_ASSOC ) : null;
+			if ( ! $res ) {
+				return null;
+			}
+			return 'ARRAY_A' === $output ? $res : (object) $res;
+		} catch ( \Throwable $e ) {
+			return null;
+		}
+	}
+
+	public function insert( string $table, array $data, array $format = array() ): int|bool {
+		try {
+			$keys   = array_keys( $data );
+			$cols   = implode( ', ', $keys );
+			$places = implode( ', ', array_fill( 0, count( $keys ), '?' ) );
+			$stmt   = $this->pdo->prepare( "INSERT INTO {$table} ({$cols}) VALUES ({$places})" );
+			$stmt->execute( array_values( $data ) );
+			return 1;
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+	}
+
+	public function update( string $table, array $data, array $where, array $format = array(), array $where_format = array() ): int|bool {
+		try {
+			$sets = array();
+			$vals = array();
+			foreach ( $data as $k => $v ) {
+				$sets[] = "{$k} = ?";
+				$vals[] = $v;
+			}
+			$wheres = array();
+			foreach ( $where as $k => $v ) {
+				$wheres[] = "{$k} = ?";
+				$vals[]   = $v;
+			}
+			$sql  = "UPDATE {$table} SET " . implode( ', ', $sets ) . ' WHERE ' . implode( ' AND ', $wheres );
+			$stmt = $this->pdo->prepare( $sql );
+			$stmt->execute( $vals );
+			return $stmt->rowCount();
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+	}
+
+	public function replace( string $table, array $data, array $format = array() ): int|bool {
+		try {
+			$keys   = array_keys( $data );
+			$cols   = implode( ', ', $keys );
+			$places = implode( ', ', array_fill( 0, count( $keys ), '?' ) );
+			$stmt   = $this->pdo->prepare( "INSERT OR REPLACE INTO {$table} ({$cols}) VALUES ({$places})" );
+			$stmt->execute( array_values( $data ) );
+			return 1;
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+	}
+}
+
+$GLOBALS['wpdb'] = new Mock_WPDB();
+
+// Load Phase 1 Safety files.
+require_once __DIR__ . '/../includes/safety/class-database-installer.php';
+require_once __DIR__ . '/../includes/safety/class-safety-settings.php';
+require_once __DIR__ . '/../includes/safety/class-lock-manager.php';
+require_once __DIR__ . '/../includes/safety/class-security-guard.php';
+
+// Test runner helper.
+$total_tests  = 0;
+$passed_tests = 0;
+
+function run_test( string $description, callable $fn ): void {
+	global $total_tests, $passed_tests;
+	$total_tests++;
+	try {
+		$fn();
+		$passed_tests++;
+		echo " [PASS] {$description}\n";
+	} catch ( \Throwable $e ) {
+		echo " [FAIL] {$description}\n";
+		echo "        Error: {$e->getMessage()}\n";
+		echo "        File:  {$e->getFile()}:{$e->getLine()}\n";
+	}
+}
+
+function assert_true( bool $condition, string $msg = 'Expected condition to be true.' ): void {
+	if ( ! $condition ) {
+		throw new \RuntimeException( $msg );
+	}
+}
+
+function assert_false( bool $condition, string $msg = 'Expected condition to be false.' ): void {
+	if ( $condition ) {
+		throw new \RuntimeException( $msg );
+	}
+}
+
+function assert_equals( mixed $expected, mixed $actual, string $msg = '' ): void {
+	if ( $expected !== $actual ) {
+		$exp_str = is_scalar( $expected ) ? (string) $expected : json_encode( $expected );
+		$act_str = is_scalar( $actual ) ? (string) $actual : json_encode( $actual );
+		throw new \RuntimeException( $msg ?: "Expected [{$exp_str}], got [{$act_str}]." );
+	}
+}
+
+echo "\n=======================================================\n";
+echo " Full Elementor MCP — Phase 1 Test Suite\n";
+echo "=======================================================\n\n";
+
+// ---------------------------------------------------------------------
+// TEST GROUP 1: Database Installer
+// ---------------------------------------------------------------------
+run_test( 'Database Installer: table name getters match prefix', function () {
+	assert_equals( 'wp_elementor_mcp_journal', Full_Elementor_MCP_Database_Installer::get_journal_table() );
+	assert_equals( 'wp_elementor_mcp_checkpoints', Full_Elementor_MCP_Database_Installer::get_checkpoints_table() );
+	assert_equals( 'wp_elementor_mcp_audit_log', Full_Elementor_MCP_Database_Installer::get_audit_log_table() );
+	assert_equals( 'wp_elementor_mcp_tokens', Full_Elementor_MCP_Database_Installer::get_tokens_table() );
+} );
+
+run_test( 'Database Installer: table DDL execution and version option', function () {
+	$installed = Full_Elementor_MCP_Database_Installer::install();
+	assert_true( $installed, 'Installer should report success.' );
+	assert_equals( '1.0.0', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 2: Safety Settings Manager
+// ---------------------------------------------------------------------
+run_test( 'Safety Settings: defaults are safe and correct', function () {
+	Full_Elementor_MCP_Safety_Settings::clear_cache();
+	assert_true( Full_Elementor_MCP_Safety_Settings::is_safe_mode_enabled() );
+	assert_true( Full_Elementor_MCP_Safety_Settings::is_undo_enabled() );
+	assert_false( Full_Elementor_MCP_Safety_Settings::is_permanent_delete_allowed() ); // Enforces Trash!
+	assert_equals( 'agent_confirmation', Full_Elementor_MCP_Safety_Settings::get_break_glass_policy() );
+	assert_equals( 30, Full_Elementor_MCP_Safety_Settings::get( 'audit_retention_days' ) );
+	assert_equals( 15, Full_Elementor_MCP_Safety_Settings::get( 'max_checkpoints_count' ) );
+} );
+
+run_test( 'Safety Settings: update and policy sanitization', function () {
+	Full_Elementor_MCP_Safety_Settings::update( array(
+		'safe_mode'              => false,
+		'break_glass_policy'     => 'admin_approval',
+		'audit_retention_days'   => 45,
+		'allow_permanent_delete' => true,
+	) );
+	assert_false( Full_Elementor_MCP_Safety_Settings::is_safe_mode_enabled() );
+	assert_equals( 'admin_approval', Full_Elementor_MCP_Safety_Settings::get_break_glass_policy() );
+	assert_equals( 45, Full_Elementor_MCP_Safety_Settings::get( 'audit_retention_days' ) );
+	assert_true( Full_Elementor_MCP_Safety_Settings::is_permanent_delete_allowed() );
+
+	// Test invalid policy falls back safely.
+	Full_Elementor_MCP_Safety_Settings::update( array(
+		'break_glass_policy' => 'invalid_hacky_policy',
+	) );
+	assert_equals( 'agent_confirmation', Full_Elementor_MCP_Safety_Settings::get_break_glass_policy() );
+
+	// Reset back to defaults for clean state.
+	Full_Elementor_MCP_Safety_Settings::update( Full_Elementor_MCP_Safety_Settings::get_defaults() );
+	assert_true( Full_Elementor_MCP_Safety_Settings::is_safe_mode_enabled() );
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 3: Concurrency Lock Manager & Fencing Tokens
+// ---------------------------------------------------------------------
+run_test( 'Lock Manager: acquire lock generates owner ID & fencing token = 1', function () {
+	$res = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_100', 'req_uuid_aaa', 30 );
+	assert_false( is_wp_error( $res ) );
+	assert_true( $res['acquired'] );
+	assert_equals( 1, $res['fencing_token'] );
+	assert_equals( 'req_uuid_aaa', $res['owner_id'] );
+} );
+
+run_test( 'Lock Manager: second client acquiring active lock is rejected', function () {
+	$res = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_100', 'req_uuid_bbb', 30 );
+	assert_true( is_wp_error( $res ), 'Second client must be rejected with WP_Error.' );
+	assert_equals( 'resource_locked', $res->get_error_code() );
+} );
+
+run_test( 'Lock Manager: same owner acquiring same lock renews lease without increment', function () {
+	$res = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_100', 'req_uuid_aaa', 30 );
+	assert_false( is_wp_error( $res ) );
+	assert_equals( 1, $res['fencing_token'] );
+} );
+
+run_test( 'Lock Manager: assert fencing token ownership succeeds for owner', function () {
+	$check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( 'post_100', 'req_uuid_aaa', 1 );
+	assert_true( true === $check );
+} );
+
+run_test( 'Lock Manager: assert fencing token ownership rejects stale writer token', function () {
+	// Wrong fencing token (e.g. token 0 or 999).
+	$check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( 'post_100', 'req_uuid_aaa', 999 );
+	assert_true( is_wp_error( $check ) );
+	assert_equals( 'stale_writer_conflict', $check->get_error_code() );
+
+	// Wrong owner.
+	$check2 = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( 'post_100', 'req_uuid_impostor', 1 );
+	assert_true( is_wp_error( $check2 ) );
+	assert_equals( 'stale_writer_conflict', $check2->get_error_code() );
+} );
+
+run_test( 'Lock Manager: release lock allows subsequent client to acquire with fencing token = 2', function () {
+	$released = Full_Elementor_MCP_Lock_Manager::release_lock( 'post_100', 'req_uuid_aaa' );
+	assert_true( $released );
+
+	// Next client now acquires lock: fencing token must increment to 2!
+	$res2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_100', 'req_uuid_bbb', 30 );
+	assert_false( is_wp_error( $res2 ) );
+	assert_equals( 2, $res2['fencing_token'] );
+	assert_equals( 'req_uuid_bbb', $res2['owner_id'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post_100', 'req_uuid_bbb' );
+} );
+
+run_test( 'Lock Manager: idempotency result set and get', function () {
+	$idemp_key = 'test_key_' . uniqid();
+	$payload   = array( 'success' => true, 'post_id' => 42, 'message' => 'Created' );
+
+	assert_true( Full_Elementor_MCP_Lock_Manager::set_idempotent_result( $idemp_key, $payload, 60 ) );
+	$cached = Full_Elementor_MCP_Lock_Manager::get_idempotent_result( $idemp_key );
+	assert_equals( $payload, $cached );
+
+	// Unknown key returns null.
+	assert_equals( null, Full_Elementor_MCP_Lock_Manager::get_idempotent_result( 'non_existent_key' ) );
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 4: Security Guard (SSRF Defense-in-Depth)
+// ---------------------------------------------------------------------
+run_test( 'Security Guard SSRF: blocks cloud metadata IP (169.254.169.254)', function () {
+	$res = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://169.254.169.254/latest/meta-data/' );
+	assert_true( is_wp_error( $res ) );
+	assert_equals( 'ssrf_blocked_ip', $res->get_error_code() );
+} );
+
+run_test( 'Security Guard SSRF: blocks loopback IP (127.0.0.1 and ::1)', function () {
+	$res1 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://127.0.0.1:8080/admin' );
+	assert_true( is_wp_error( $res1 ) );
+	assert_equals( 'ssrf_blocked_ip', $res1->get_error_code() );
+
+	$res2 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://localhost/admin' );
+	assert_true( is_wp_error( $res2 ) );
+	assert_equals( 'ssrf_blocked_host', $res2->get_error_code() );
+} );
+
+run_test( 'Security Guard SSRF: blocks private RFC 1918 IPs', function () {
+	$res1 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://192.168.1.1/secret' );
+	assert_true( is_wp_error( $res1 ) );
+
+	$res2 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://10.0.0.5/api' );
+	assert_true( is_wp_error( $res2 ) );
+
+	$res3 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://172.16.0.22/metrics' );
+	assert_true( is_wp_error( $res3 ) );
+} );
+
+run_test( 'Security Guard SSRF: blocks non-HTTP/HTTPS schemes', function () {
+	$res1 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'file:///etc/passwd' );
+	assert_true( is_wp_error( $res1 ) );
+
+	$res2 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'ftp://example.com/file' );
+	assert_true( is_wp_error( $res2 ) );
+} );
+
+run_test( 'Security Guard SSRF: allows legitimate public domain URLs', function () {
+	$res = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'https://wordpress.org/favicon.ico' );
+	assert_true( true === $res );
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 5: Critical Asset Guard & Protected Operations
+// ---------------------------------------------------------------------
+run_test( 'Critical Asset Guard: detects page_on_front and active kit as critical', function () {
+	update_option( 'page_on_front', 10 );
+	update_option( 'page_for_posts', 20 );
+	update_option( 'elementor_active_kit', 99 );
+
+	assert_true( Full_Elementor_MCP_Security_Guard::is_critical_asset( 10 ) );
+	assert_true( Full_Elementor_MCP_Security_Guard::is_critical_asset( 20 ) );
+	assert_true( Full_Elementor_MCP_Security_Guard::is_critical_asset( 99 ) );
+	assert_false( Full_Elementor_MCP_Security_Guard::is_critical_asset( 555 ) );
+} );
+
+run_test( 'Critical Asset Guard: asserts critical asset requires explicit override', function () {
+	// Calling destructive action on page 10 without override flag is blocked.
+	$check1 = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 10, array() );
+	assert_true( is_wp_error( $check1 ) );
+	assert_equals( 'critical_override_required', $check1->get_error_code() );
+
+	// Calling with allow_critical_override: true passes if user is admin.
+	$check2 = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 10, array( 'allow_critical_override' => true ) );
+	assert_true( true === $check2 );
+
+	// If user is not admin, blocked regardless of flag.
+	$GLOBALS['wp_test_user_caps']['manage_options'] = false;
+	$check3 = Full_Elementor_MCP_Security_Guard::assert_critical_asset_mutation_allowed( 10, array( 'allow_critical_override' => true ) );
+	assert_true( is_wp_error( $check3 ) );
+	assert_equals( 'insufficient_critical_privilege', $check3->get_error_code() );
+	$GLOBALS['wp_test_user_caps']['manage_options'] = true; // reset
+} );
+
+// ---------------------------------------------------------------------
+// TEST GROUP 6: Credential Scopes & Ability Gating
+// ---------------------------------------------------------------------
+run_test( 'Credential Scopes: read_only mode permits only readonly abilities', function () {
+	$ro_scope = array(
+		'mode'            => 'read_only',
+		'user_id'         => 1,
+		'credential_uuid' => null,
+		'allowed_tools'   => array(),
+		'blocked_tools'   => array(),
+	);
+
+	// Readonly ability (e.g. list-widgets).
+	$allowed = Full_Elementor_MCP_Security_Guard::is_ability_in_scope(
+		'full-elementor-mcp/list-widgets',
+		array( 'readonly' => true ),
+		$ro_scope
+	);
+	assert_true( $allowed, 'Read-only ability should be permitted in read_only scope.' );
+
+	// Mutating ability (e.g. create-page).
+	$denied = Full_Elementor_MCP_Security_Guard::is_ability_in_scope(
+		'full-elementor-mcp/create-page',
+		array( 'readonly' => false ),
+		$ro_scope
+	);
+	assert_false( $denied, 'Mutating ability must be blocked in read_only scope.' );
+} );
+
+run_test( 'Credential Scopes: custom mode enforces allowlist and denylist', function () {
+	$custom_scope = array(
+		'mode'            => 'custom',
+		'user_id'         => 1,
+		'credential_uuid' => null,
+		'allowed_tools'   => array( 'full-elementor-mcp/add-heading', 'full-elementor-mcp/add-button' ),
+		'blocked_tools'   => array( 'full-elementor-mcp/add-button' ), // specifically blocked
+	);
+
+	// In allowlist and not blocked.
+	assert_true( Full_Elementor_MCP_Security_Guard::is_ability_in_scope(
+		'full-elementor-mcp/add-heading',
+		array( 'readonly' => false ),
+		$custom_scope
+	) );
+
+	// In denylist.
+	assert_false( Full_Elementor_MCP_Security_Guard::is_ability_in_scope(
+		'full-elementor-mcp/add-button',
+		array( 'readonly' => false ),
+		$custom_scope
+	) );
+
+	// Not in allowlist.
+	assert_false( Full_Elementor_MCP_Security_Guard::is_ability_in_scope(
+		'full-elementor-mcp/delete-page',
+		array( 'readonly' => false ),
+		$custom_scope
+	) );
+} );
+
+// ---------------------------------------------------------------------
+// Test Summary
+// ---------------------------------------------------------------------
+echo "\n=======================================================\n";
+echo " Test Results: {$passed_tests}/{$total_tests} passed.\n";
+echo "=======================================================\n\n";
+
+if ( $passed_tests !== $total_tests ) {
+	exit( 1 );
+}
+exit( 0 );
