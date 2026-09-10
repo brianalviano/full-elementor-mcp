@@ -173,12 +173,18 @@ class Mock_WPDB {
 	public function __construct() {
 		$this->pdo = new \PDO( 'sqlite::memory:' );
 		$this->pdo->setAttribute( \PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION );
-		$this->pdo->sqliteCreateFunction( 'UTC_TIMESTAMP', static function () {
-			if ( isset( $GLOBALS['wp_test_mock_now'] ) ) {
-				return gmdate( 'Y-m-d H:i:s', $GLOBALS['wp_test_mock_now'] );
-			}
-			return gmdate( 'Y-m-d H:i:s' );
-		} );
+		if ( method_exists( $this->pdo, 'sqliteCreateFunction' ) ) {
+			call_user_func(
+				array( $this->pdo, 'sqliteCreateFunction' ),
+				'UTC_TIMESTAMP',
+				static function () {
+					if ( isset( $GLOBALS['wp_test_mock_now'] ) ) {
+						return gmdate( 'Y-m-d H:i:s', $GLOBALS['wp_test_mock_now'] );
+					}
+					return gmdate( 'Y-m-d H:i:s' );
+				}
+			);
+		}
 	}
 
 	public function get_charset_collate(): string {
