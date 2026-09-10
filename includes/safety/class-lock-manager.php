@@ -32,6 +32,23 @@ class Full_Elementor_MCP_Lock_Manager {
 	public const DEFAULT_IDEMPOTENCY_TTL = 600;
 
 	/**
+	 * Generates a deterministic, collision-resistant token key for a resource lock.
+	 *
+	 * Combines an ASCII slug prefix (up to 32 characters) for human inspection/debugging
+	 * with a 32-character SHA-256 hash of the exact raw canonical resource key.
+	 * Total length <= 70 characters, well within varchar(128) column size.
+	 *
+	 * @param string $resource_key Raw resource identifier (e.g. 'post:42', 'template/header').
+	 * @return string Unique, collision-proof token key.
+	 */
+	public static function get_lock_token_key( string $resource_key ): string {
+		$slug   = sanitize_key( $resource_key );
+		$prefix = ( '' !== $slug ) ? substr( $slug, 0, 32 ) : 'res';
+		$hash   = hash( 'sha256', $resource_key );
+		return 'lock_' . $prefix . '_' . substr( $hash, 0, 32 );
+	}
+
+	/**
 	 * Acquires a lease lock on a target resource with a monotonically increasing fencing token.
 	 *
 	 * Uses atomic conditional writes and compare-and-swap (CAS) to eliminate race conditions:
@@ -56,7 +73,7 @@ class Full_Elementor_MCP_Lock_Manager {
 		}
 
 		$table      = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$lock_key   = 'lock_' . sanitize_key( $resource_key );
+		$lock_key   = self::get_lock_token_key( $resource_key );
 		$now_ts     = time();
 		$now_dt     = gmdate( 'Y-m-d H:i:s', $now_ts );
 		$expires_ts = $now_ts + max( 5, $ttl_seconds );
@@ -101,11 +118,13 @@ class Full_Elementor_MCP_Lock_Manager {
 			if ( false !== $current_expires_ts && $current_expires_ts >= $now_ts ) {
 				// Monotonic renewal: target expiry is extended from max(current_expiry, now) + TTL,
 				// ensuring re-entry never shortens an active or previously renewed lease.
-				$base_ts       = max( $current_expires_ts, $now_ts );
-				$target_ts     = $base_ts + max( 5, $ttl_seconds );
-				$target_dt     = gmdate( 'Y-m-d H:i:s', $target_ts );
-				$fencing_token = (int) $active_owner['fencing_token'];
+				$base_ts             = max( $current_expires_ts, $now_ts );
+				$target_ts           = $base_ts + max( 5, $ttl_seconds );
+				$target_dt           = gmdate( 'Y-m-d H:i:s', $target_ts );
+				$fencing_token       = (int) $active_owner['fencing_token'];
+				$observed_expires_dt = (string) $active_owner['expires_at'];
 
+				// Strict CAS write: binds the exact observed expires_at state.
 				$updated = $wpdb->query(
 					$wpdb->prepare(
 						"UPDATE {$table}
@@ -115,12 +134,12 @@ class Full_Elementor_MCP_Lock_Manager {
 						  AND owner_id = %s
 						  AND fencing_token = %d
 						  AND used = 0
-						  AND expires_at < %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						  AND expires_at = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 						$target_dt,
 						$lock_key,
 						$owner_id,
 						$fencing_token,
-						$target_dt
+						$observed_expires_dt
 					)
 				);
 
@@ -136,7 +155,7 @@ class Full_Elementor_MCP_Lock_Manager {
 					);
 				}
 
-				// 2. Direct write success (> 0 affected rows).
+				// 2. Direct CAS write success (> 0 affected rows).
 				if ( $updated > 0 ) {
 					return array(
 						'acquired'      => true,
@@ -147,7 +166,7 @@ class Full_Elementor_MCP_Lock_Manager {
 					);
 				}
 
-				// 3. 0 affected rows: re-read current lock state to verify if legitimate or race conflict.
+				// 3. 0 affected rows: CAS missed due to concurrent update or state change. Re-read current lock state.
 				$recheck = $wpdb->get_row(
 					$wpdb->prepare(
 						"SELECT token_type, owner_id, fencing_token, used, expires_at FROM {$table} WHERE token_key = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
@@ -185,15 +204,52 @@ class Full_Elementor_MCP_Lock_Manager {
 						);
 					}
 
-					// If lease is still active and valid, legitimate 0 affected rows (already at or beyond target).
-					if ( false !== $recheck_exp_ts && $recheck_exp_ts >= $now_ts ) {
+					// STRICT RULE: Only return success if actual persisted DB expiry >= requested target expiry!
+					// NEVER return an expiry greater than the actual persisted DB expiry!
+					if ( false !== $recheck_exp_ts && $recheck_exp_ts >= $now_ts && $recheck_exp_ts >= $target_ts ) {
 						return array(
 							'acquired'      => true,
 							'resource_key'  => $resource_key,
 							'owner_id'      => $owner_id,
 							'fencing_token' => $recheck_fencing > 0 ? $recheck_fencing : 1,
-							'expires_at'    => max( $target_ts, $recheck_exp_ts ),
+							'expires_at'    => $recheck_exp_ts,
 						);
+					}
+
+					// If lease is still active and valid, but DB expiry is less than target (e.g. intermediate heartbeat raced):
+					// Attempt one retry using the newly observed state.
+					if ( false !== $recheck_exp_ts && $recheck_exp_ts >= $now_ts ) {
+						$retry_base_ts   = max( $recheck_exp_ts, $now_ts );
+						$retry_target_ts = $retry_base_ts + max( 5, $ttl_seconds );
+						$retry_target_dt = gmdate( 'Y-m-d H:i:s', $retry_target_ts );
+
+						$retried = $wpdb->query(
+							$wpdb->prepare(
+								"UPDATE {$table}
+								SET expires_at = %s
+								WHERE token_key = %s
+								  AND token_type = 'lock'
+								  AND owner_id = %s
+								  AND fencing_token = %d
+								  AND used = 0
+								  AND expires_at = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+								$retry_target_dt,
+								$lock_key,
+								$owner_id,
+								$fencing_token,
+								$recheck['expires_at']
+							)
+						);
+
+						if ( false !== $retried && $retried > 0 ) {
+							return array(
+								'acquired'      => true,
+								'resource_key'  => $resource_key,
+								'owner_id'      => $owner_id,
+								'fencing_token' => $fencing_token > 0 ? $fencing_token : 1,
+								'expires_at'    => $retry_target_ts,
+							);
+						}
 					}
 				}
 
@@ -201,7 +257,7 @@ class Full_Elementor_MCP_Lock_Manager {
 					'resource_locked',
 					sprintf(
 						/* translators: %s: resource key */
-						__( 'Lock re-entry rejected: lock lease for "%s" has expired.', 'full-elementor-mcp' ),
+						__( 'Lock re-entry rejected: lock lease for "%s" could not be verified or has expired.', 'full-elementor-mcp' ),
 						esc_html( $resource_key )
 					)
 				);
@@ -303,12 +359,12 @@ class Full_Elementor_MCP_Lock_Manager {
 		global $wpdb;
 
 		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$lock_key = 'lock_' . sanitize_key( $resource_key );
+		$lock_key = self::get_lock_token_key( $resource_key );
 		$now_dt   = gmdate( 'Y-m-d H:i:s' );
 
 		$current = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT owner_id, fencing_token, expires_at FROM {$table} WHERE token_key = %s AND token_type = 'lock'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"SELECT owner_id, fencing_token, expires_at, used FROM {$table} WHERE token_key = %s AND token_type = 'lock'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$lock_key
 			),
 			ARRAY_A
@@ -347,6 +403,17 @@ class Full_Elementor_MCP_Lock_Manager {
 			);
 		}
 
+		if ( 0 !== (int) $current['used'] ) {
+			return new \WP_Error(
+				'stale_writer_conflict',
+				sprintf(
+					/* translators: %s: resource key */
+					__( 'Persistence rejected: lock for "%s" was already released.', 'full-elementor-mcp' ),
+					esc_html( $resource_key )
+				)
+			);
+		}
+
 		if ( strtotime( $current['expires_at'] . ' UTC' ) <= time() ) {
 			return new \WP_Error(
 				'stale_writer_conflict',
@@ -365,6 +432,7 @@ class Full_Elementor_MCP_Lock_Manager {
 	 * Extends lease expiration for a currently held lock (heartbeat).
 	 *
 	 * Guaranteed to never shorten an active lease duration: extends from max(current_expiry, now) + extra_seconds.
+	 * Uses compare-and-swap on observed expiry to eliminate heartbeat race conditions.
 	 *
 	 * @param string $resource_key  Identifier for resource.
 	 * @param string $owner_id      Caller request UUID.
@@ -380,7 +448,7 @@ class Full_Elementor_MCP_Lock_Manager {
 		}
 
 		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$lock_key = 'lock_' . sanitize_key( $resource_key );
+		$lock_key = self::get_lock_token_key( $resource_key );
 		$now_ts   = time();
 
 		// Fetch current active lease for owner and fencing token.
@@ -410,16 +478,36 @@ class Full_Elementor_MCP_Lock_Manager {
 
 		$updated = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET expires_at = %s WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0 AND expires_at < %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				"UPDATE {$table} SET expires_at = %s WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0 AND expires_at = %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$target_dt,
 				$lock_key,
 				$owner_id,
 				$fencing_token,
-				$target_dt
+				$current['expires_at']
 			)
 		);
 
-		return false !== $updated && $updated > 0;
+		if ( false !== $updated && $updated > 0 ) {
+			return true;
+		}
+
+		// Re-check: if 0 rows, check whether another heartbeat already extended to >= target_dt.
+		$recheck = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT expires_at FROM {$table} WHERE token_key = %s AND token_type = 'lock' AND owner_id = %s AND fencing_token = %d AND used = 0", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$lock_key,
+				$owner_id,
+				$fencing_token
+			),
+			ARRAY_A
+		);
+
+		if ( ! empty( $recheck ) && ! empty( $recheck['expires_at'] ) ) {
+			$recheck_ts = strtotime( $recheck['expires_at'] . ' UTC' );
+			return ( false !== $recheck_ts && $recheck_ts >= $target_ts );
+		}
+
+		return false;
 	}
 
 	/**
@@ -440,7 +528,7 @@ class Full_Elementor_MCP_Lock_Manager {
 		}
 
 		$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-		$lock_key = 'lock_' . sanitize_key( $resource_key );
+		$lock_key = self::get_lock_token_key( $resource_key );
 		$past_dt  = gmdate( 'Y-m-d H:i:s', 0 );
 
 		// Rather than hard-deleting the row, we expire the lock and mark it used
@@ -532,6 +620,8 @@ class Full_Elementor_MCP_Lock_Manager {
 	 * Retrieves cached idempotent mutation result if exists, valid, and matches arguments.
 	 *
 	 * Strictly identity-bound: requires idempotency_key, ability, user_id, credential_uuid, and args.
+	 * Note: Phase 1 provides foundational identity-bound result caching and argument conflict validation.
+	 * Full atomic execution claim orchestration ('pending' -> 'completed') will be implemented in Phase 4 middleware.
 	 *
 	 * @param string      $idempotency_key Caller idempotency UUID or key.
 	 * @param string      $ability         Target ability name.

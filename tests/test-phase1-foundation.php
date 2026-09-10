@@ -107,8 +107,31 @@ if ( ! function_exists( 'wp_json_encode' ) ) {
 		return json_encode( $data, $options, $depth );
 	}
 }
+if ( ! function_exists( 'add_filter' ) ) {
+	function add_filter( string $hook_name, callable $callback, int $priority = 10, int $accepted_args = 1 ): bool {
+		$GLOBALS['wp_test_filters'][ $hook_name ][] = array(
+			'callback'      => $callback,
+			'accepted_args' => $accepted_args,
+		);
+		return true;
+	}
+}
+
+if ( ! function_exists( 'remove_all_filters' ) ) {
+	function remove_all_filters( string $hook_name, int|false $priority = false ): bool {
+		unset( $GLOBALS['wp_test_filters'][ $hook_name ] );
+		return true;
+	}
+}
+
 if ( ! function_exists( 'apply_filters' ) ) {
 	function apply_filters( string $hook_name, mixed $value, ...$args ): mixed {
+		if ( ! empty( $GLOBALS['wp_test_filters'][ $hook_name ] ) ) {
+			foreach ( $GLOBALS['wp_test_filters'][ $hook_name ] as $entry ) {
+				$cb    = $entry['callback'];
+				$value = $cb( $value, ...$args );
+			}
+		}
 		return $value;
 	}
 }
@@ -119,6 +142,16 @@ if ( ! function_exists( 'get_current_user_id' ) ) {
 }
 if ( ! function_exists( 'current_user_can' ) ) {
 	function current_user_can( string $cap, ...$args ): bool {
+		return ! empty( $GLOBALS['wp_test_user_caps'][ $cap ] );
+	}
+}
+
+if ( ! function_exists( 'user_can' ) ) {
+	function user_can( $user, string $cap, ...$args ): bool {
+		$uid = is_object( $user ) ? ( $user->ID ?? 0 ) : (int) $user;
+		if ( isset( $GLOBALS['wp_test_user_can'][ $uid ][ $cap ] ) ) {
+			return (bool) $GLOBALS['wp_test_user_can'][ $uid ][ $cap ];
+		}
 		return ! empty( $GLOBALS['wp_test_user_caps'][ $cap ] );
 	}
 }
@@ -715,7 +748,7 @@ run_test( 'Lock Manager: duplicate lock acquisition detects collision and reject
 run_test( 'Lock Manager: expired-lock takeover via CAS strictly increments fencing token', function () {
 	global $wpdb;
 	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-	$lock_key = 'lock_post_cas_test';
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( 'post_cas_test' );
 
 	// Client A acquires lock (fencing_token = 1).
 	$res_a = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post_cas_test', 'owner_a', 10 );
@@ -1003,7 +1036,7 @@ run_test( 'Lock Manager: lease renewal never shortens active lease duration', fu
 	assert_true( $renewed );
 
 	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-	$lock_key = 'lock_' . sanitize_key( $res_key );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
 	$row      = $wpdb->get_row(
 		$wpdb->prepare( "SELECT expires_at FROM {$table} WHERE token_key = %s", $lock_key ),
 		ARRAY_A
@@ -1032,7 +1065,7 @@ run_test( 'Lock Manager: stale fencing token cannot release newer generation loc
 
 	// Simulate lock advancement to Generation 2 (e.g. after takeover or lease generation bump).
 	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-	$lock_key = 'lock_' . sanitize_key( $res_key );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
 	$wpdb->query(
 		$wpdb->prepare(
 			"UPDATE {$table} SET fencing_token = 2 WHERE token_key = %s",
@@ -1079,7 +1112,7 @@ run_test( 'Lock Manager: same owner acquire_lock re-entry is monotonic and never
 	assert_true( $renewed );
 
 	$table       = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-	$lock_key    = 'lock_' . sanitize_key( $res_key );
+	$lock_key    = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
 	$row_renewed = $wpdb->get_row(
 		$wpdb->prepare( "SELECT expires_at FROM {$table} WHERE token_key = %s", $lock_key ),
 		ARRAY_A
@@ -1149,7 +1182,7 @@ run_test( 'Lock Manager: interim race between read and update on re-entry return
 
 	// 2. Set hook: right before the UPDATE query executes, concurrently bump fencing token in DB!
 	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
-	$lock_key = 'lock_' . sanitize_key( $res_key );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
 
 	$wpdb->on_before_query = function ( $q, $db ) use ( $table, $lock_key ) {
 		if ( str_contains( $q, 'UPDATE' ) && str_contains( $q, $lock_key ) ) {
@@ -1174,31 +1207,135 @@ run_test( 'Lock Manager: interim race between read and update on re-entry return
 	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, 999 );
 } );
 
-run_test( 'Lock Manager: legitimate 0 affected rows on re-entry succeeds after state recheck', function () {
+run_test( 'Lock Manager: legitimate 0 affected rows on re-entry succeeds when persisted DB expiry >= target expiry', function () {
 	global $wpdb;
 
-	$res_key = 'zero_rows_reentry_' . uniqid();
-	$owner   = 'owner_zero_rows';
+	$res_key  = 'zero_rows_reentry_' . uniqid();
+	$owner    = 'owner_zero_rows';
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
 
 	// 1. Initial acquisition (fencing token = 1).
 	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
 	assert_true( $lock['acquired'] );
 
-	// 2. Simulate 0 affected rows on UPDATE (e.g. MySQL identical values).
-	$wpdb->simulate_zero_affected_rows = true;
+	// 2. Set hook: right before UPDATE query executes, simulate a concurrent heartbeat extending DB expiry to +500s!
+	// The re-entry SELECT already observed expiry = now + 60, target = now + 90.
+	// The concurrent update bumps DB expiry to now + 500.
+	// CAS UPDATE (expires_at = now + 60) matches 0 rows!
+	// Recheck verifies actual DB expiry (now + 500) >= target (now + 90) and returns acquired=true with actual DB expiry!
+	$far_future_ts = time() + 500;
+	$wpdb->on_before_query = function ( $q, $db ) use ( $table, $lock_key, $far_future_ts ) {
+		if ( str_contains( $q, 'UPDATE' ) && str_contains( $q, $lock_key ) ) {
+			$db->pdo->exec( "UPDATE {$table} SET expires_at = '" . gmdate( 'Y-m-d H:i:s', $far_future_ts ) . "' WHERE token_key = '{$lock_key}'" );
+			$db->on_before_query = null; // fire once
+		}
+	};
 
-	// 3. Re-entry attempts UPDATE -> 0 affected rows -> triggers recheck.
-	// In DB, owner_id is still owner_zero_rows, fencing_token is still 1, used is 0, expiry is active.
-	// Recheck verifies all state valid -> returns acquired=true!
 	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
-	$wpdb->simulate_zero_affected_rows = false;
+	$wpdb->on_before_query = null;
 
-	assert_false( is_wp_error( $reentry ), 'Valid state with 0 affected rows must succeed.' );
+	assert_false( is_wp_error( $reentry ), 'Legitimate 0 affected rows with actual DB expiry >= target must succeed.' );
 	assert_true( $reentry['acquired'] );
 	assert_equals( 1, $reentry['fencing_token'] );
+	assert_equals( $far_future_ts, (int) $reentry['expires_at'], 'Must return actual persisted DB expiry, never greater.' );
 
 	// Cleanup.
 	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
+} );
+
+run_test( 'Lock Manager: 0 affected rows on re-entry is rejected if persisted DB expiry < target and retry fails', function () {
+	global $wpdb;
+
+	$res_key = 'zero_rows_reject_' . uniqid();
+	$owner   = 'owner_zero_reject';
+
+	// 1. Initial acquisition (fencing token = 1).
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock['acquired'] );
+
+	// 2. Force 0 affected rows on all UPDATE queries.
+	$wpdb->simulate_zero_affected_rows = true;
+
+	// 3. Re-entry attempts UPDATE -> 0 affected rows -> recheck sees DB expiry < target -> retry also gets 0 rows -> rejected!
+	$reentry = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 30 );
+	$wpdb->simulate_zero_affected_rows = false;
+
+	assert_true( is_wp_error( $reentry ), '0 affected rows without meeting target expiry must fail.' );
+	assert_equals( 'resource_locked', $reentry->get_error_code() );
+
+	// Cleanup.
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
+} );
+
+run_test( 'Lock Manager: resource key normalization is collision-resistant for distinct identifiers', function () {
+	// Distinct resource keys that would collide under naive sanitize_key() or non-ASCII input.
+	$key1 = 'page:10';
+	$key2 = 'page/10';
+	$key3 = 'page#10';
+	$key4 = 'ページ10'; // Non-ASCII Japanese characters sanitize to empty string.
+
+	$token1 = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $key1 );
+	$token2 = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $key2 );
+	$token3 = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $key3 );
+	$token4 = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $key4 );
+
+	// All token keys must be distinct!
+	$keys = array( $token1, $token2, $token3, $token4 );
+	assert_equals( 4, count( array_unique( $keys ) ), 'Token keys for distinct resources must never collide.' );
+
+	// Each can be acquired independently without collision.
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $key1, 'owner_1', 30 );
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( $key2, 'owner_2', 30 );
+	assert_true( $lock1['acquired'] );
+	assert_true( $lock2['acquired'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $key1, 'owner_1', 1 );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $key2, 'owner_2', 1 );
+} );
+
+run_test( 'Lock Manager: assert fencing token ownership rejects released lock (used = 1)', function () {
+	$res_key = 'assert_released_' . uniqid();
+	$owner   = 'owner_assert_tester';
+
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, $owner, 60 );
+	assert_true( $lock['acquired'] );
+
+	// Active lock: ownership assertion succeeds.
+	$valid = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner, $lock['fencing_token'] );
+	assert_true( $valid );
+
+	// Release lock: marks used = 1.
+	$released = Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, $owner, $lock['fencing_token'] );
+	assert_true( $released );
+
+	// Post-release: ownership assertion MUST be rejected with stale_writer_conflict!
+	$invalid = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $res_key, $owner, $lock['fencing_token'] );
+	assert_true( is_wp_error( $invalid ), 'Released lock must reject fencing assertion.' );
+	assert_equals( 'stale_writer_conflict', $invalid->get_error_code() );
+} );
+
+run_test( 'Security Guard: default scope without mapping is read_only for non-admin and full for admin', function () {
+	delete_option( Full_Elementor_MCP_Security_Guard::OPTION_SCOPES );
+
+	// Non-admin user (ID 42, lacks manage_options).
+	$GLOBALS['wp_test_user_can'][42]['manage_options'] = false;
+	$non_admin_scope = Full_Elementor_MCP_Security_Guard::resolve_scope_for_user_and_credential( 42, 'unmapped-app-uuid-1' );
+	assert_equals( 'read_only', $non_admin_scope['mode'], 'Unmapped non-admin user must default to read_only (fail-closed).' );
+
+	// Admin user (ID 1, has manage_options).
+	$GLOBALS['wp_test_user_can'][1]['manage_options'] = true;
+	$admin_scope = Full_Elementor_MCP_Security_Guard::resolve_scope_for_user_and_credential( 1, 'unmapped-app-uuid-2' );
+	assert_equals( 'full', $admin_scope['mode'], 'Unmapped administrator must default to full mode.' );
+
+	// Filter override hook allows programmatic mode customization.
+	add_filter( 'full_elementor_mcp_default_scope_mode', function ( $mode, $uid ) {
+		return 42 === $uid ? 'full' : $mode;
+	}, 10, 2 );
+
+	$filtered_scope = Full_Elementor_MCP_Security_Guard::resolve_scope_for_user_and_credential( 42, 'unmapped-app-uuid-1' );
+	assert_equals( 'full', $filtered_scope['mode'], 'Filter hook must be able to customize default fallback mode.' );
+	remove_all_filters( 'full_elementor_mcp_default_scope_mode' );
 } );
 
 // ---------------------------------------------------------------------

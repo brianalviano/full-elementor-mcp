@@ -175,7 +175,9 @@ class Full_Elementor_MCP_Database_Installer {
 	 *
 	 * Updates the DB version option ONLY after full schema verification succeeds.
 	 *
-	 * @param string $from_version Currently installed version.
+	 * @param string $from_version Currently installed schema version (e.g. '0.0.0' or '1.0.0').
+	 *                             Reserved for future incremental schema migration dispatch (e.g. 1.0.0 -> 1.1.0)
+	 *                             when schema alterations are introduced in future versions.
 	 * @return bool True if upgrade was successful and verified.
 	 */
 	public static function upgrade( string $from_version = '0.0.0' ): bool {

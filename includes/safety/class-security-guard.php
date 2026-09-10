@@ -85,11 +85,22 @@ class Full_Elementor_MCP_Security_Guard {
 			$scope_config = $user_scopes['default'];
 		}
 
-		// 3. Fallback mode based on user capabilities if not explicitly configured.
+		// 3. Fallback mode if not explicitly configured:
+		// Safe fail-closed policy: only administrators with 'manage_options' receive 'full' access by default.
+		// All other users (authors, editors, contributors) or unauthenticated callers default to 'read_only'.
 		$default_mode = 'read_only';
-		if ( $user_id > 0 && current_user_can( 'edit_posts' ) ) {
+		if ( $user_id > 0 && function_exists( 'user_can' ) && user_can( $user_id, 'manage_options' ) ) {
 			$default_mode = 'full';
 		}
+
+		/**
+		 * Filters the default fallback scope mode when no explicit credential or user mapping exists.
+		 *
+		 * @param string      $default_mode    Default mode ('read_only' or 'full').
+		 * @param int         $user_id         Target WordPress user ID.
+		 * @param string|null $credential_uuid Optional Application Password UUID.
+		 */
+		$default_mode = apply_filters( 'full_elementor_mcp_default_scope_mode', $default_mode, $user_id, $credential_uuid );
 
 		$mode          = sanitize_key( $scope_config['mode'] ?? $default_mode );
 		$allowed_tools = isset( $scope_config['allowed_tools'] ) && is_array( $scope_config['allowed_tools'] )
