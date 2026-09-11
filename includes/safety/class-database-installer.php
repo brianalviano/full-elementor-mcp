@@ -26,10 +26,9 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Current database schema version.
 	 *
-	 * 1.0.1: Safety-schema verification hardening release ensuring single-column token_key uniqueness,
-	 * complete WAL/audit schema presence, and write-time expiration guarantees.
+	 * 1.0.2: Safety-schema enhancement adding canonical resource_key column and index to WAL journal.
 	 */
-	public const DB_VERSION = '1.0.1';
+	public const DB_VERSION = '1.0.2';
 
 	/**
 	 * Option key storing installed schema version.
@@ -99,6 +98,7 @@ class Full_Elementor_MCP_Database_Installer {
 				object_type varchar(30) NOT NULL,
 				object_id bigint(20) unsigned NOT NULL default 0,
 				created_object_id bigint(20) unsigned default NULL,
+				resource_key varchar(128) NOT NULL default '',
 				fencing_token bigint(20) unsigned NOT NULL default 0,
 				before_state longtext default NULL,
 				before_hash varchar(64) default NULL,
@@ -110,6 +110,7 @@ class Full_Elementor_MCP_Database_Installer {
 				PRIMARY KEY  (id),
 				KEY idx_status (status),
 				KEY idx_object (object_type, object_id),
+				KEY idx_resource (resource_key),
 				KEY idx_created (created_at)
 			) {$charset_collate};",
 
@@ -258,6 +259,7 @@ class Full_Elementor_MCP_Database_Installer {
 					'object_type',
 					'object_id',
 					'created_object_id',
+					'resource_key',
 					'fencing_token',
 					'before_state',
 					'before_hash',
@@ -270,6 +272,7 @@ class Full_Elementor_MCP_Database_Installer {
 				'indexes'       => array(
 					'idx_status',
 					'idx_object',
+					'idx_resource',
 					'idx_created',
 				),
 				'primary'       => 'id',

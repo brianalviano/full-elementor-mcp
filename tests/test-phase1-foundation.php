@@ -1815,8 +1815,8 @@ run_test( 'Database Installer: 1.0.0 to 1.0.1 upgrade triggers re-verification a
 
 	// maybe_upgrade() should detect 1.0.0 < 1.0.1, run upgrade, verify schema, and advance version to 1.0.1.
 	$res = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
-	assert_true( $res, 'Upgrade from 1.0.0 to 1.0.1 must succeed.' );
-	assert_equals( '1.0.1', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
+	assert_true( $res, 'Upgrade must succeed.' );
+	assert_equals( Full_Elementor_MCP_Database_Installer::DB_VERSION, get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ) );
 
 	// 2. Future calls take fast-path without schema queries.
 	assert_true( Full_Elementor_MCP_Database_Installer::maybe_upgrade() );

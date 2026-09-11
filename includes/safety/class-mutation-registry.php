@@ -56,11 +56,13 @@ class Full_Elementor_MCP_Mutation_Registry {
 	 * - object_type: (string) Primary entity type (e.g. 'post', 'template', 'kit').
 	 * - category: (string) One of CATEGORY_* constants.
 	 * - resource_key_resolver: (callable(array): string) Resolves locking resource key.
+	 * - rollback_resource_key_resolver: (?callable(array, array): string) Resolves rollback resource key.
 	 * - object_id_resolver: (callable(array): int) Resolves primary object ID.
 	 * - capture_before: (callable(int, array): mixed) Captures pre-mutation state.
 	 * - restore_before: (callable(mixed, array): (bool|\WP_Error)) Restores pre-mutation state.
 	 * - capture_after: (?callable(int, array, mixed): mixed) Captures post-mutation state.
 	 * - supports_rollback: (bool) True if rollback is reliably supported.
+	 * - supports_rollback_for_args: (?callable(array): bool) Checks if specific args support rollback.
 	 * - created_object_tracking: (bool) True if operation creates a new entity.
 	 * - is_destructive: (bool) True if operation is destructive.
 	 *
@@ -156,12 +158,18 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		// Normalize defaults for optional properties.
-		$descriptor['capture_after']           = isset( $descriptor['capture_after'] ) && is_callable( $descriptor['capture_after'] )
+		$descriptor['capture_after']                  = isset( $descriptor['capture_after'] ) && is_callable( $descriptor['capture_after'] )
 			? $descriptor['capture_after']
 			: null;
-		$descriptor['created_object_tracking'] = ! empty( $descriptor['created_object_tracking'] );
-		$descriptor['is_destructive']          = ! empty( $descriptor['is_destructive'] );
-		$descriptor['supports_rollback']       = (bool) $descriptor['supports_rollback'];
+		$descriptor['rollback_resource_key_resolver'] = isset( $descriptor['rollback_resource_key_resolver'] ) && is_callable( $descriptor['rollback_resource_key_resolver'] )
+			? $descriptor['rollback_resource_key_resolver']
+			: null;
+		$descriptor['supports_rollback_for_args']     = isset( $descriptor['supports_rollback_for_args'] ) && is_callable( $descriptor['supports_rollback_for_args'] )
+			? $descriptor['supports_rollback_for_args']
+			: null;
+		$descriptor['created_object_tracking']        = ! empty( $descriptor['created_object_tracking'] );
+		$descriptor['is_destructive']                 = ! empty( $descriptor['is_destructive'] );
+		$descriptor['supports_rollback']              = (bool) $descriptor['supports_rollback'];
 
 		self::$strategies[ $ability ] = $descriptor;
 
@@ -247,6 +255,58 @@ class Full_Elementor_MCP_Mutation_Registry {
 	}
 
 	/**
+	 * Resolves the deterministic resource key required for rollback fencing.
+	 *
+	 * For creation operations where an object was created, this resolves to the
+	 * created object (e.g. post:123). For updates, it resolves to the modified resource.
+	 *
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $entry   Journal entry row.
+	 * @param array<string, mixed> $args    Resolved contextual arguments.
+	 * @return string|\WP_Error Canonical rollback resource key or WP_Error.
+	 */
+	public static function resolve_rollback_resource_key( string $ability, array $entry, array $args = array() ) {
+		$strategy = self::get( $ability );
+		if ( ! $strategy ) {
+			return new \WP_Error(
+				'unknown_mutation_strategy',
+				sprintf(
+					/* translators: %s: ability name */
+					__( 'Cannot resolve rollback resource key: ability "%s" is not registered in mutation registry.', 'full-elementor-mcp' ),
+					esc_html( $ability )
+				)
+			);
+		}
+
+		if ( isset( $strategy['rollback_resource_key_resolver'] ) && is_callable( $strategy['rollback_resource_key_resolver'] ) ) {
+			$key = (string) ( $strategy['rollback_resource_key_resolver'] )( $entry, $args );
+		} else {
+			// Default: use the resource key recorded in the journal entry, or resolve via normal resolver.
+			$key = (string) ( $entry['resource_key'] ?? '' );
+			if ( '' === $key ) {
+				$resolved = self::resolve_resource_key( $ability, $args );
+				if ( is_wp_error( $resolved ) ) {
+					return $resolved;
+				}
+				$key = $resolved;
+			}
+		}
+
+		if ( '' === trim( $key ) ) {
+			return new \WP_Error(
+				'invalid_rollback_resource_key',
+				sprintf(
+					/* translators: %s: ability name */
+					__( 'Mutation strategy for "%s" resolved an empty rollback resource key.', 'full-elementor-mcp' ),
+					esc_html( $ability )
+				)
+			);
+		}
+
+		return $key;
+	}
+
+	/**
 	 * Resolves target object ID for an ability call.
 	 *
 	 * Returns 0 for creation mutations where the object does not exist yet.
@@ -266,7 +326,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 	}
 
 	/**
-	 * Checks if an ability supports reliable rollback.
+	 * Checks if an ability statically supports reliable rollback.
 	 *
 	 * Fails closed (returns false) if unknown.
 	 *
@@ -276,6 +336,29 @@ class Full_Elementor_MCP_Mutation_Registry {
 	public static function is_rollback_supported( string $ability ): bool {
 		$strategy = self::get( $ability );
 		return ! empty( $strategy['supports_rollback'] );
+	}
+
+	/**
+	 * Checks if an ability supports rollback for specific execution arguments.
+	 *
+	 * For example, delete-page supports rollback for trashing, but permanent deletion
+	 * (force=true) cannot be undone and returns false.
+	 *
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Input arguments.
+	 * @return bool True if rollback is supported for these specific args.
+	 */
+	public static function supports_rollback_for_args( string $ability, array $args = array() ): bool {
+		$strategy = self::get( $ability );
+		if ( ! $strategy || empty( $strategy['supports_rollback'] ) ) {
+			return false;
+		}
+
+		if ( isset( $strategy['supports_rollback_for_args'] ) && is_callable( $strategy['supports_rollback_for_args'] ) ) {
+			return (bool) ( $strategy['supports_rollback_for_args'] )( $args );
+		}
+
+		return true;
 	}
 
 	/**
@@ -289,6 +372,33 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$clean_type = sanitize_key( $type );
 		$clean_id   = is_numeric( $id ) ? (string) (int) $id : sanitize_key( (string) $id );
 		return $clean_type . ':' . $clean_id;
+	}
+
+	/**
+	 * Builds a deterministic resource key for object creation mutations.
+	 *
+	 * Strips transient runtime parameters, canonicalizes relevant arguments,
+	 * and computes a deterministic SHA-256 hash.
+	 *
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Mutation input arguments.
+	 * @return string Canonical deterministic creation key (e.g. 'create:create_page:<hash>').
+	 */
+	public static function build_create_resource_key( string $ability, array $args ): string {
+		$clean_ability = sanitize_key( str_replace( array( 'full-elementor-mcp/', '/' ), array( '', '_' ), $ability ) );
+
+		// Strip transient runtime tokens / lock fields.
+		$filtered_args = $args;
+		$runtime_keys  = array( 'fencing_token', 'owner_id', 'user_id', 'credential_uuid', '_wpnonce', 'nonce' );
+		foreach ( $runtime_keys as $rk ) {
+			unset( $filtered_args[ $rk ] );
+		}
+
+		$canonical = Full_Elementor_MCP_Journal::canonicalize_data( $filtered_args );
+		$json      = wp_json_encode( $canonical, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+		$hash      = hash( 'sha256', false !== $json ? $json : serialize( $canonical ) );
+
+		return 'create:' . $clean_ability . ':' . $hash;
 	}
 
 	/**
@@ -308,11 +418,20 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 		self::$initialized = true;
 
+		// Common post resolvers.
+		$post_id_resolver = static function ( array $args = array() ): int {
+			return absint( $args['post_id'] ?? ( $args['object_id'] ?? ( $args['page_id'] ?? 0 ) ) );
+		};
+		$post_resource_key_resolver = static function ( array $args = array() ): string {
+			$post_id = absint( $args['post_id'] ?? ( $args['object_id'] ?? ( $args['page_id'] ?? 0 ) ) );
+			return self::build_resource_key( 'post', $post_id );
+		};
+
 		// ---------------------------------------------------------------------
-		// 1. Elementor Document Data Mutations (Page/Container/Widget content)
+		// 1. Elementor Document Data Mutations (94 abilities)
 		// ---------------------------------------------------------------------
 		$elementor_data_abilities = array(
-			// Container / Layout abilities
+			// Container / Layout (19)
 			'full-elementor-mcp/add-container'            => array( 'action' => 'add_container', 'destructive' => false ),
 			'full-elementor-mcp/update-container'         => array( 'action' => 'update_container', 'destructive' => false ),
 			'full-elementor-mcp/update-element'           => array( 'action' => 'update_element', 'destructive' => false ),
@@ -333,12 +452,9 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'full-elementor-mcp/add-div-block'            => array( 'action' => 'add_div_block', 'destructive' => false ),
 			'full-elementor-mcp/add-custom-js'            => array( 'action' => 'add_custom_js', 'destructive' => false ),
 
-			// Universal Widget abilities
+			// Universal & Atomic Widgets (12)
 			'full-elementor-mcp/add-widget'               => array( 'action' => 'add_widget', 'destructive' => false ),
 			'full-elementor-mcp/update-widget'            => array( 'action' => 'update_widget', 'destructive' => false ),
-			'full-elementor-mcp/delete-widget'            => array( 'action' => 'delete_widget', 'destructive' => true ),
-
-			// Atomic Widget abilities (Elementor 4.0+)
 			'full-elementor-mcp/add-atomic-widget'        => array( 'action' => 'add_atomic_widget', 'destructive' => false ),
 			'full-elementor-mcp/update-atomic-widget'     => array( 'action' => 'update_atomic_widget', 'destructive' => false ),
 			'full-elementor-mcp/add-atomic-heading'       => array( 'action' => 'add_atomic_heading', 'destructive' => false ),
@@ -349,18 +465,75 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'full-elementor-mcp/add-atomic-youtube'       => array( 'action' => 'add_atomic_youtube', 'destructive' => false ),
 			'full-elementor-mcp/add-atomic-video'         => array( 'action' => 'add_atomic_video', 'destructive' => false ),
 			'full-elementor-mcp/add-atomic-divider'       => array( 'action' => 'add_atomic_divider', 'destructive' => false ),
+
+			// Template Application (1)
+			'full-elementor-mcp/apply-template'           => array( 'action' => 'apply_template', 'destructive' => false ),
+
+			// Convenience Widgets (62)
+			'full-elementor-mcp/add-accordion'            => array( 'action' => 'add_accordion', 'destructive' => false ),
+			'full-elementor-mcp/add-alert'                => array( 'action' => 'add_alert', 'destructive' => false ),
+			'full-elementor-mcp/add-animated-headline'    => array( 'action' => 'add_animated_headline', 'destructive' => false ),
+			'full-elementor-mcp/add-author-box'           => array( 'action' => 'add_author_box', 'destructive' => false ),
+			'full-elementor-mcp/add-blockquote'           => array( 'action' => 'add_blockquote', 'destructive' => false ),
+			'full-elementor-mcp/add-button'               => array( 'action' => 'add_button', 'destructive' => false ),
+			'full-elementor-mcp/add-call-to-action'       => array( 'action' => 'add_call_to_action', 'destructive' => false ),
+			'full-elementor-mcp/add-code-highlight'       => array( 'action' => 'add_code_highlight', 'destructive' => false ),
+			'full-elementor-mcp/add-countdown'            => array( 'action' => 'add_countdown', 'destructive' => false ),
+			'full-elementor-mcp/add-counter'              => array( 'action' => 'add_counter', 'destructive' => false ),
+			'full-elementor-mcp/add-divider'              => array( 'action' => 'add_divider', 'destructive' => false ),
+			'full-elementor-mcp/add-flip-box'             => array( 'action' => 'add_flip_box', 'destructive' => false ),
+			'full-elementor-mcp/add-form'                 => array( 'action' => 'add_form', 'destructive' => false ),
+			'full-elementor-mcp/add-gallery'              => array( 'action' => 'add_gallery', 'destructive' => false ),
+			'full-elementor-mcp/add-google-maps'          => array( 'action' => 'add_google_maps', 'destructive' => false ),
+			'full-elementor-mcp/add-heading'              => array( 'action' => 'add_heading', 'destructive' => false ),
+			'full-elementor-mcp/add-hotspot'              => array( 'action' => 'add_hotspot', 'destructive' => false ),
+			'full-elementor-mcp/add-html'                 => array( 'action' => 'add_html', 'destructive' => false ),
+			'full-elementor-mcp/add-icon'                 => array( 'action' => 'add_icon', 'destructive' => false ),
+			'full-elementor-mcp/add-icon-box'             => array( 'action' => 'add_icon_box', 'destructive' => false ),
+			'full-elementor-mcp/add-icon-list'            => array( 'action' => 'add_icon_list', 'destructive' => false ),
+			'full-elementor-mcp/add-image'                => array( 'action' => 'add_image', 'destructive' => false ),
+			'full-elementor-mcp/add-image-box'            => array( 'action' => 'add_image_box', 'destructive' => false ),
+			'full-elementor-mcp/add-image-carousel'       => array( 'action' => 'add_image_carousel', 'destructive' => false ),
+			'full-elementor-mcp/add-login'                => array( 'action' => 'add_login', 'destructive' => false ),
+			'full-elementor-mcp/add-loop-carousel'        => array( 'action' => 'add_loop_carousel', 'destructive' => false ),
+			'full-elementor-mcp/add-loop-grid'            => array( 'action' => 'add_loop_grid', 'destructive' => false ),
+			'full-elementor-mcp/add-lottie'               => array( 'action' => 'add_lottie', 'destructive' => false ),
+			'full-elementor-mcp/add-media-carousel'       => array( 'action' => 'add_media_carousel', 'destructive' => false ),
+			'full-elementor-mcp/add-menu-anchor'          => array( 'action' => 'add_menu_anchor', 'destructive' => false ),
+			'full-elementor-mcp/add-nav-menu'             => array( 'action' => 'add_nav_menu', 'destructive' => false ),
+			'full-elementor-mcp/add-nested-accordion'     => array( 'action' => 'add_nested_accordion', 'destructive' => false ),
+			'full-elementor-mcp/add-nested-tabs'          => array( 'action' => 'add_nested_tabs', 'destructive' => false ),
+			'full-elementor-mcp/add-off-canvas'           => array( 'action' => 'add_off_canvas', 'destructive' => false ),
+			'full-elementor-mcp/add-portfolio'            => array( 'action' => 'add_portfolio', 'destructive' => false ),
+			'full-elementor-mcp/add-posts-grid'           => array( 'action' => 'add_posts_grid', 'destructive' => false ),
+			'full-elementor-mcp/add-price-list'           => array( 'action' => 'add_price_list', 'destructive' => false ),
+			'full-elementor-mcp/add-price-table'          => array( 'action' => 'add_price_table', 'destructive' => false ),
+			'full-elementor-mcp/add-progress'             => array( 'action' => 'add_progress', 'destructive' => false ),
+			'full-elementor-mcp/add-progress-tracker'     => array( 'action' => 'add_progress_tracker', 'destructive' => false ),
+			'full-elementor-mcp/add-rating'               => array( 'action' => 'add_rating', 'destructive' => false ),
+			'full-elementor-mcp/add-reviews'              => array( 'action' => 'add_reviews', 'destructive' => false ),
+			'full-elementor-mcp/add-search'               => array( 'action' => 'add_search', 'destructive' => false ),
+			'full-elementor-mcp/add-share-buttons'        => array( 'action' => 'add_share_buttons', 'destructive' => false ),
+			'full-elementor-mcp/add-shortcode'            => array( 'action' => 'add_shortcode', 'destructive' => false ),
+			'full-elementor-mcp/add-slides'               => array( 'action' => 'add_slides', 'destructive' => false ),
+			'full-elementor-mcp/add-social-icons'         => array( 'action' => 'add_social_icons', 'destructive' => false ),
+			'full-elementor-mcp/add-spacer'               => array( 'action' => 'add_spacer', 'destructive' => false ),
+			'full-elementor-mcp/add-star-rating'          => array( 'action' => 'add_star_rating', 'destructive' => false ),
+			'full-elementor-mcp/add-table-of-contents'    => array( 'action' => 'add_table_of_contents', 'destructive' => false ),
+			'full-elementor-mcp/add-tabs'                 => array( 'action' => 'add_tabs', 'destructive' => false ),
+			'full-elementor-mcp/add-testimonial'          => array( 'action' => 'add_testimonial', 'destructive' => false ),
+			'full-elementor-mcp/add-testimonial-carousel' => array( 'action' => 'add_testimonial_carousel', 'destructive' => false ),
+			'full-elementor-mcp/add-text-editor'          => array( 'action' => 'add_text_editor', 'destructive' => false ),
+			'full-elementor-mcp/add-text-path'            => array( 'action' => 'add_text_path', 'destructive' => false ),
+			'full-elementor-mcp/add-toggle'               => array( 'action' => 'add_toggle', 'destructive' => false ),
+			'full-elementor-mcp/add-video'                => array( 'action' => 'add_video', 'destructive' => false ),
+			'full-elementor-mcp/add-wc-add-to-cart'       => array( 'action' => 'add_wc_add_to_cart', 'destructive' => false ),
+			'full-elementor-mcp/add-wc-cart'              => array( 'action' => 'add_wc_cart', 'destructive' => false ),
+			'full-elementor-mcp/add-wc-checkout'          => array( 'action' => 'add_wc_checkout', 'destructive' => false ),
+			'full-elementor-mcp/add-wc-menu-cart'         => array( 'action' => 'add_wc_menu_cart', 'destructive' => false ),
+			'full-elementor-mcp/add-wc-products'          => array( 'action' => 'add_wc_products', 'destructive' => false ),
 		);
 
-		// Helper resolvers for elementor data abilities.
-		$post_id_resolver = static function ( array $args = array() ): int {
-			return absint( $args['post_id'] ?? ( $args['object_id'] ?? 0 ) );
-		};
-		$post_resource_key_resolver = static function ( array $args = array() ): string {
-			$post_id = absint( $args['post_id'] ?? ( $args['object_id'] ?? 0 ) );
-			return self::build_resource_key( 'post', $post_id );
-		};
-
-		// Helper capture & restore callbacks.
 		$capture_elementor_data = static function ( int $post_id, array $args = array() ) {
 			return self::capture_page_data_callback( $post_id );
 		};
@@ -391,42 +564,84 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		// ---------------------------------------------------------------------
-		// 2. Elementor Page Settings Mutations
+		// 2. Elementor Page Settings (1 ability)
 		// ---------------------------------------------------------------------
-		$page_settings_abilities = array(
-			'full-elementor-mcp/update-page-settings' => 'update_page_settings',
-			'full-elementor-mcp/set-featured-image'   => 'set_featured_image',
-			'full-elementor-mcp/set-page-meta'        => 'set_page_meta',
-			'full-elementor-mcp/set-page-slug'        => 'set_page_slug',
+		self::register(
+			array(
+				'ability'                 => 'full-elementor-mcp/update-page-settings',
+				'action'                  => 'update_page_settings',
+				'object_type'             => 'post',
+				'category'                => self::CATEGORY_PAGE_SETTINGS,
+				'resource_key_resolver'   => $post_resource_key_resolver,
+				'object_id_resolver'      => $post_id_resolver,
+				'capture_before'          => static function ( int $post_id, array $args = array() ) {
+					return self::capture_page_settings_callback( $post_id );
+				},
+				'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					return self::restore_page_settings_callback( $before_state, $context );
+				},
+				'capture_after'           => static function ( int $post_id, array $args = array(), mixed $result = null ) {
+					return self::capture_page_settings_callback( $post_id );
+				},
+				'supports_rollback'       => true,
+				'created_object_tracking' => false,
+				'is_destructive'          => false,
+			)
 		);
 
-		foreach ( $page_settings_abilities as $ability => $action ) {
-			self::register(
-				array(
-					'ability'                 => $ability,
-					'action'                  => $action,
-					'object_type'             => 'post',
-					'category'                => self::CATEGORY_PAGE_SETTINGS,
-					'resource_key_resolver'   => $post_resource_key_resolver,
-					'object_id_resolver'      => $post_id_resolver,
-					'capture_before'          => static function ( int $post_id, array $args = array() ) {
-						return self::capture_page_settings_callback( $post_id );
-					},
-					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
-						return self::restore_page_settings_callback( $before_state, $context );
-					},
-					'capture_after'           => static function ( int $post_id, array $args = array(), mixed $result = null ) {
-						return self::capture_page_settings_callback( $post_id );
-					},
-					'supports_rollback'       => true,
-					'created_object_tracking' => false,
-					'is_destructive'          => false,
-				)
-			);
-		}
+		// ---------------------------------------------------------------------
+		// 3. Dedicated Post Fields (2 abilities)
+		// ---------------------------------------------------------------------
+		// set-featured-image: WordPress featured image attachment ID
+		self::register(
+			array(
+				'ability'                 => 'full-elementor-mcp/set-featured-image',
+				'action'                  => 'set_featured_image',
+				'object_type'             => 'post',
+				'category'                => self::CATEGORY_WP_OBJECT_UPDATE,
+				'resource_key_resolver'   => $post_resource_key_resolver,
+				'object_id_resolver'      => $post_id_resolver,
+				'capture_before'          => static function ( int $post_id, array $args = array() ) {
+					return self::capture_featured_image_callback( $post_id );
+				},
+				'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					return self::restore_featured_image_callback( $before_state, $context );
+				},
+				'capture_after'           => static function ( int $post_id, array $args = array(), mixed $result = null ) {
+					return self::capture_featured_image_callback( $post_id );
+				},
+				'supports_rollback'       => true,
+				'created_object_tracking' => false,
+				'is_destructive'          => false,
+			)
+		);
+
+		// set-page-slug: WordPress post_name field
+		self::register(
+			array(
+				'ability'                 => 'full-elementor-mcp/set-page-slug',
+				'action'                  => 'set_page_slug',
+				'object_type'             => 'post',
+				'category'                => self::CATEGORY_WP_OBJECT_UPDATE,
+				'resource_key_resolver'   => $post_resource_key_resolver,
+				'object_id_resolver'      => $post_id_resolver,
+				'capture_before'          => static function ( int $post_id, array $args = array() ) {
+					return self::capture_page_slug_callback( $post_id );
+				},
+				'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					return self::restore_page_slug_callback( $before_state, $context );
+				},
+				'capture_after'           => static function ( int $post_id, array $args = array(), mixed $result = null ) {
+					return self::capture_page_slug_callback( $post_id );
+				},
+				'supports_rollback'       => true,
+				'created_object_tracking' => false,
+				'is_destructive'          => false,
+			)
+		);
 
 		// ---------------------------------------------------------------------
-		// 3. WordPress Object Creation (create-page, duplicate-page, import-template)
+		// 4. WordPress Object Creation (7 abilities)
 		// ---------------------------------------------------------------------
 		$create_abilities = array(
 			'full-elementor-mcp/create-page'           => array( 'action' => 'create_page', 'object_type' => 'page' ),
@@ -434,40 +649,49 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'full-elementor-mcp/import-template'       => array( 'action' => 'import_template', 'object_type' => 'template' ),
 			'full-elementor-mcp/create-theme-template' => array( 'action' => 'create_theme_template', 'object_type' => 'template' ),
 			'full-elementor-mcp/create-popup'          => array( 'action' => 'create_popup', 'object_type' => 'popup' ),
+			'full-elementor-mcp/build-page'            => array( 'action' => 'build_page', 'object_type' => 'page' ),
+			'full-elementor-mcp/save-as-template'      => array( 'action' => 'save_as_template', 'object_type' => 'template' ),
 		);
 
 		foreach ( $create_abilities as $ability => $meta ) {
 			self::register(
 				array(
-					'ability'                 => $ability,
-					'action'                  => $meta['action'],
-					'object_type'             => $meta['object_type'],
-					'category'                => self::CATEGORY_WP_OBJECT_CREATE,
-					'resource_key_resolver'   => static function ( array $args = array() ): string {
-						$seed = ! empty( $args['title'] ) ? (string) $args['title'] : ( ! empty( $args['source_id'] ) ? 'copy:' . $args['source_id'] : 'create:' . uniqid() );
-						return self::build_resource_key( 'create', hash( 'sha256', $seed ) );
+					'ability'                        => $ability,
+					'action'                         => $meta['action'],
+					'object_type'                    => $meta['object_type'],
+					'category'                       => self::CATEGORY_WP_OBJECT_CREATE,
+					'resource_key_resolver'          => static function ( array $args = array() ) use ( $ability ): string {
+						return self::build_create_resource_key( $ability, $args );
 					},
-					'object_id_resolver'      => static function ( array $args = array() ): int {
-						return 0; // Does not exist yet.
+					'rollback_resource_key_resolver' => static function ( array $entry, array $args = array() ): string {
+						$created_id = absint( $entry['created_object_id'] ?? ( $args['created_object_id'] ?? 0 ) );
+						if ( $created_id > 0 ) {
+							$type = (string) ( $entry['object_type'] ?? 'post' );
+							return self::build_resource_key( $type, $created_id );
+						}
+						return (string) ( $entry['resource_key'] ?? '' );
 					},
-					'capture_before'          => static function ( int $object_id, array $args = array() ) {
+					'object_id_resolver'             => static function ( array $args = array() ): int {
+						return 0; // Object does not exist yet.
+					},
+					'capture_before'                 => static function ( int $object_id, array $args = array() ) {
 						return array( 'exists' => false );
 					},
-					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					'restore_before'                 => static function ( mixed $before_state, array $context = array() ) {
 						return self::restore_created_object_callback( $before_state, $context );
 					},
-					'capture_after'           => static function ( int $object_id, array $args = array(), mixed $result = null ) {
+					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) {
 						return array( 'created' => true, 'result' => $result );
 					},
-					'supports_rollback'       => true,
-					'created_object_tracking' => true,
-					'is_destructive'          => false,
+					'supports_rollback'              => true,
+					'created_object_tracking'        => true,
+					'is_destructive'                 => false,
 				)
 			);
 		}
 
 		// ---------------------------------------------------------------------
-		// 4. Delete / Trash Operations (delete-page, delete-template)
+		// 5. Delete / Trash Operations (2 abilities)
 		// ---------------------------------------------------------------------
 		$delete_abilities = array(
 			'full-elementor-mcp/delete-page'     => array( 'action' => 'delete_page', 'object_type' => 'page' ),
@@ -477,66 +701,89 @@ class Full_Elementor_MCP_Mutation_Registry {
 		foreach ( $delete_abilities as $ability => $meta ) {
 			self::register(
 				array(
-					'ability'                 => $ability,
-					'action'                  => $meta['action'],
-					'object_type'             => $meta['object_type'],
-					'category'                => self::CATEGORY_WP_OBJECT_DELETE,
-					'resource_key_resolver'   => static function ( array $args = array() ) use ( $meta ): string {
+					'ability'                    => $ability,
+					'action'                     => $meta['action'],
+					'object_type'                => $meta['object_type'],
+					'category'                   => self::CATEGORY_WP_OBJECT_DELETE,
+					'resource_key_resolver'      => static function ( array $args = array() ) use ( $meta ): string {
 						$id = absint( $args['post_id'] ?? ( $args['template_id'] ?? ( $args['object_id'] ?? 0 ) ) );
 						return self::build_resource_key( $meta['object_type'], $id );
 					},
-					'object_id_resolver'      => static function ( array $args = array() ): int {
+					'object_id_resolver'         => static function ( array $args = array() ): int {
 						return absint( $args['post_id'] ?? ( $args['template_id'] ?? ( $args['object_id'] ?? 0 ) ) );
 					},
-					'capture_before'          => static function ( int $object_id, array $args = array() ) {
+					'capture_before'             => static function ( int $object_id, array $args = array() ) {
+						$force = ! empty( $args['force'] ) || ! empty( $args['force_delete'] );
+						if ( $force ) {
+							return array(
+								'id'    => $object_id,
+								'force' => true,
+							);
+						}
 						$status = get_post_status( $object_id );
 						return array(
 							'id'     => $object_id,
 							'status' => false !== $status ? $status : 'publish',
+							'force'  => false,
 						);
 					},
-					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					'restore_before'             => static function ( mixed $before_state, array $context = array() ) {
 						return self::restore_deleted_object_callback( $before_state, $context );
 					},
-					'capture_after'           => static function ( int $object_id, array $args = array(), mixed $result = null ) {
+					'capture_after'              => static function ( int $object_id, array $args = array(), mixed $result = null ) {
 						return array( 'status' => get_post_status( $object_id ) );
 					},
-					'supports_rollback'       => true,
-					'created_object_tracking' => false,
-					'is_destructive'          => true,
+					'supports_rollback'          => true,
+					'supports_rollback_for_args' => static function ( array $args = array() ): bool {
+						$force = ! empty( $args['force'] ) || ! empty( $args['force_delete'] );
+						return ! $force;
+					},
+					'created_object_tracking'    => false,
+					'is_destructive'             => true,
 				)
 			);
 		}
 
 		// ---------------------------------------------------------------------
-		// 5. Global Settings & Custom Code Mutations (Declared Unsupported for Rollback)
+		// 6. Unsupported & Composite Mutations (15 abilities)
 		// ---------------------------------------------------------------------
-		$unsupported_abilities = array(
-			'full-elementor-mcp/update-global-colors'       => array( 'action' => 'update_global_colors', 'object_type' => 'kit' ),
-			'full-elementor-mcp/update-global-typography'   => array( 'action' => 'update_global_typography', 'object_type' => 'kit' ),
-			'full-elementor-mcp/set-active-kit'             => array( 'action' => 'set_active_kit', 'object_type' => 'kit' ),
-			'full-elementor-mcp/add-custom-css'             => array( 'action' => 'add_custom_css', 'object_type' => 'custom_code' ),
-			'full-elementor-mcp/add-code-snippet'           => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code' ),
-			'full-elementor-mcp/update-code-snippet'        => array( 'action' => 'update_code_snippet', 'object_type' => 'custom_code' ),
-			'full-elementor-mcp/delete-code-snippet'        => array( 'action' => 'delete_code_snippet', 'object_type' => 'custom_code' ),
-			'full-elementor-mcp/toggle-code-snippet-status' => array( 'action' => 'toggle_code_snippet', 'object_type' => 'custom_code' ),
-			'full-elementor-mcp/sideload-image'             => array( 'action' => 'sideload_image', 'object_type' => 'attachment' ),
-			'full-elementor-mcp/upload-svg-icon'            => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment' ),
+		$unsupported_or_composite = array(
+			// set-page-meta touches sensitive post_password; rollback unsupported fail-closed
+			'full-elementor-mcp/set-page-meta'              => array( 'action' => 'set_page_meta', 'object_type' => 'post', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			// set-popup-settings touches settings + _elementor_conditions (composite)
+			'full-elementor-mcp/set-popup-settings'         => array( 'action' => 'set_popup_settings', 'object_type' => 'popup', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			// set/unset template conditions
+			'full-elementor-mcp/set-template-conditions'    => array( 'action' => 'set_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			'full-elementor-mcp/unset-template-conditions'  => array( 'action' => 'unset_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			// Global settings & Kits
+			'full-elementor-mcp/update-global-colors'       => array( 'action' => 'update_global_colors', 'object_type' => 'kit', 'category' => self::CATEGORY_GLOBAL_SETTINGS, 'destructive' => false ),
+			'full-elementor-mcp/update-global-typography'   => array( 'action' => 'update_global_typography', 'object_type' => 'kit', 'category' => self::CATEGORY_GLOBAL_SETTINGS, 'destructive' => false ),
+			'full-elementor-mcp/set-active-kit'             => array( 'action' => 'set_active_kit', 'object_type' => 'kit', 'category' => self::CATEGORY_GLOBAL_SETTINGS, 'destructive' => false ),
+			// Custom code
+			'full-elementor-mcp/add-custom-css'             => array( 'action' => 'add_custom_css', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
+			'full-elementor-mcp/add-code-snippet'           => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
+			'full-elementor-mcp/update-code-snippet'        => array( 'action' => 'update_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
+			'full-elementor-mcp/delete-code-snippet'        => array( 'action' => 'delete_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => true ),
+			'full-elementor-mcp/toggle-code-snippet-status' => array( 'action' => 'toggle_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
+			// Media & stock images
+			'full-elementor-mcp/sideload-image'             => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			'full-elementor-mcp/upload-svg-icon'            => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			'full-elementor-mcp/add-stock-image'            => array( 'action' => 'add_stock_image', 'object_type' => 'post', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
 		);
 
-		foreach ( $unsupported_abilities as $ability => $meta ) {
+		foreach ( $unsupported_or_composite as $ability => $meta ) {
 			self::register(
 				array(
 					'ability'                 => $ability,
 					'action'                  => $meta['action'],
 					'object_type'             => $meta['object_type'],
-					'category'                => self::CATEGORY_UNSUPPORTED,
+					'category'                => $meta['category'],
 					'resource_key_resolver'   => static function ( array $args = array() ) use ( $meta ): string {
-						$id = absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) );
+						$id = absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) ) ) );
 						return self::build_resource_key( $meta['object_type'], $id );
 					},
 					'object_id_resolver'      => static function ( array $args = array() ): int {
-						return absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) );
+						return absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) ) ) );
 					},
 					'capture_before'          => static function ( int $object_id, array $args = array() ) {
 						return null;
@@ -550,7 +797,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'capture_after'           => null,
 					'supports_rollback'       => false,
 					'created_object_tracking' => false,
-					'is_destructive'          => 'delete_code_snippet' === $meta['action'],
+					'is_destructive'          => $meta['destructive'],
 				)
 			);
 		}
@@ -603,7 +850,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		$post_id = absint( $context['object_id'] ?? 0 );
+		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $post_id < 1 ) {
 			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for page data restoration.', 'full-elementor-mcp' ) );
 		}
@@ -665,7 +912,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		$post_id = absint( $context['object_id'] ?? 0 );
+		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $post_id < 1 ) {
 			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for page settings restoration.', 'full-elementor-mcp' ) );
 		}
@@ -680,6 +927,107 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		update_post_meta( $post_id, '_elementor_page_settings', $before_state );
+		return true;
+	}
+
+	/**
+	 * Captures current featured image attachment ID.
+	 *
+	 * @param int $post_id The post ID.
+	 * @return array{thumbnail_id: int}
+	 */
+	public static function capture_featured_image_callback( int $post_id ): array {
+		if ( $post_id < 1 ) {
+			return array( 'thumbnail_id' => 0 );
+		}
+
+		$thumb_id = function_exists( 'get_post_thumbnail_id' ) ? get_post_thumbnail_id( $post_id ) : get_post_meta( $post_id, '_thumbnail_id', true );
+		return array( 'thumbnail_id' => absint( $thumb_id ) );
+	}
+
+	/**
+	 * Restores featured image from before-state.
+	 *
+	 * @param mixed                $before_state Captured before state.
+	 * @param array<string, mixed> $context      Restoration context.
+	 * @return bool|\WP_Error True on success, WP_Error on failure.
+	 */
+	public static function restore_featured_image_callback( mixed $before_state, array $context = array() ) {
+		$filtered = apply_filters( 'full_elementor_mcp_restore_featured_image', null, $before_state, $context );
+		if ( null !== $filtered ) {
+			return $filtered;
+		}
+
+		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
+		if ( $post_id < 1 ) {
+			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for featured image restoration.', 'full-elementor-mcp' ) );
+		}
+
+		$thumb_id = absint( is_array( $before_state ) ? ( $before_state['thumbnail_id'] ?? 0 ) : 0 );
+
+		if ( $thumb_id > 0 ) {
+			if ( function_exists( 'set_post_thumbnail' ) ) {
+				$res = set_post_thumbnail( $post_id, $thumb_id );
+				return false !== $res;
+			}
+			return false !== update_post_meta( $post_id, '_thumbnail_id', $thumb_id );
+		}
+
+		if ( function_exists( 'delete_post_thumbnail' ) ) {
+			return delete_post_thumbnail( $post_id );
+		}
+
+		return delete_post_meta( $post_id, '_thumbnail_id' );
+	}
+
+	/**
+	 * Captures current WordPress post slug (post_name).
+	 *
+	 * @param int $post_id The post ID.
+	 * @return array{post_name: string}
+	 */
+	public static function capture_page_slug_callback( int $post_id ): array {
+		if ( $post_id < 1 ) {
+			return array( 'post_name' => '' );
+		}
+
+		$post = function_exists( 'get_post' ) ? get_post( $post_id ) : null;
+		return array(
+			'post_name' => $post && isset( $post->post_name ) ? (string) $post->post_name : '',
+		);
+	}
+
+	/**
+	 * Restores WordPress post slug (post_name) from before-state.
+	 *
+	 * @param mixed                $before_state Captured before state.
+	 * @param array<string, mixed> $context      Restoration context.
+	 * @return bool|\WP_Error True on success, WP_Error on failure.
+	 */
+	public static function restore_page_slug_callback( mixed $before_state, array $context = array() ) {
+		$filtered = apply_filters( 'full_elementor_mcp_restore_page_slug', null, $before_state, $context );
+		if ( null !== $filtered ) {
+			return $filtered;
+		}
+
+		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
+		if ( $post_id < 1 ) {
+			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for page slug restoration.', 'full-elementor-mcp' ) );
+		}
+
+		$slug = is_array( $before_state ) ? (string) ( $before_state['post_name'] ?? '' ) : '';
+
+		if ( function_exists( 'wp_update_post' ) ) {
+			$res = wp_update_post(
+				array(
+					'ID'        => $post_id,
+					'post_name' => $slug,
+				),
+				true
+			);
+			return ! is_wp_error( $res );
+		}
+
 		return true;
 	}
 
@@ -712,12 +1060,26 @@ class Full_Elementor_MCP_Mutation_Registry {
 	/**
 	 * Restores a deleted entity by untrashing it.
 	 *
+	 * Fails closed if permanent deletion was requested.
+	 *
 	 * @param mixed                $before_state Captured before state.
 	 * @param array<string, mixed> $context      Restoration context.
 	 * @return bool|\WP_Error True on success, WP_Error on failure.
 	 */
-	public static function restore_deleted_object_callback( mixed $before_state, array $context ) {
-		$object_id = absint( $context['object_id'] ?? 0 );
+	public static function restore_deleted_object_callback( mixed $before_state, array $context = array() ) {
+		$filtered = apply_filters( 'full_elementor_mcp_restore_deleted_object', null, $before_state, $context );
+		if ( null !== $filtered ) {
+			return $filtered;
+		}
+
+		if ( is_array( $before_state ) && ! empty( $before_state['force'] ) ) {
+			return new \WP_Error(
+				'permanent_delete_not_rollbackable',
+				__( 'Cannot rollback: object was permanently deleted and cannot be untrashed.', 'full-elementor-mcp' )
+			);
+		}
+
+		$object_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $object_id < 1 ) {
 			return new \WP_Error( 'invalid_object_id', __( 'Invalid object ID for untrash restoration.', 'full-elementor-mcp' ) );
 		}
