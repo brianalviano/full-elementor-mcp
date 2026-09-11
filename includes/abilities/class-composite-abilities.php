@@ -213,7 +213,10 @@ class Full_Elementor_MCP_Composite_Abilities {
 
 		// 4. Save page settings if provided.
 		if ( ! empty( $page_settings ) ) {
-			$this->data->save_page_settings( $post_id, $page_settings );
+			$settings_result = $this->data->save_page_settings( $post_id, $page_settings );
+			if ( is_wp_error( $settings_result ) ) {
+				return $settings_result;
+			}
 		}
 
 		$edit_url    = admin_url( 'post.php?post=' . $post_id . '&action=elementor' );

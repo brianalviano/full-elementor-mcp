@@ -563,15 +563,33 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 		}
 
 		// Set the custom code meta fields (matching Elementor Pro's Custom Code module).
-		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_location', $elementor_location );
-		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_priority', $priority );
-		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_code', $code );
-		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_template_type', 'code_snippet' );
-		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+		$m1 = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_location', $elementor_location );
+		if ( is_wp_error( $m1 ) ) {
+			return $m1;
+		}
+		$m2 = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_priority', $priority );
+		if ( is_wp_error( $m2 ) ) {
+			return $m2;
+		}
+		$m3 = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_code', $code );
+		if ( is_wp_error( $m3 ) ) {
+			return $m3;
+		}
+		$m4 = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_template_type', 'code_snippet' );
+		if ( is_wp_error( $m4 ) ) {
+			return $m4;
+		}
+		$m5 = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+		if ( is_wp_error( $m5 ) ) {
+			return $m5;
+		}
 
 		// Set ensure_jquery extra option if requested.
 		if ( $ensure_jquery ) {
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+			$m6 = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+			if ( is_wp_error( $m6 ) ) {
+				return $m6;
+			}
 		}
 
 		$edit_url = admin_url( 'post.php?post=' . $post_id . '&action=edit' );
@@ -803,7 +821,10 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 		}
 
 		if ( array_key_exists( 'code', $input ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_code', (string) $input['code'] );
+			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_code', (string) $input['code'] );
+			if ( is_wp_error( $res ) ) {
+				return $res;
+			}
 		}
 
 		if ( array_key_exists( 'location', $input ) ) {
@@ -814,19 +835,28 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 			);
 			$location_key = sanitize_key( $input['location'] );
 			if ( isset( $location_map[ $location_key ] ) ) {
-				Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_location', $location_map[ $location_key ] );
+				$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_location', $location_map[ $location_key ] );
+				if ( is_wp_error( $res ) ) {
+					return $res;
+				}
 			}
 		}
 
 		if ( array_key_exists( 'priority', $input ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_priority', max( 1, (int) $input['priority'] ) );
+			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_priority', max( 1, (int) $input['priority'] ) );
+			if ( is_wp_error( $res ) ) {
+				return $res;
+			}
 		}
 
 		if ( array_key_exists( 'ensure_jquery', $input ) ) {
 			if ( ! empty( $input['ensure_jquery'] ) ) {
-				Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+				$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
 			} else {
-				Full_Elementor_MCP_Safe_Writes::delete_post_meta( $snippet_id, '_elementor_extra_options' );
+				$res = Full_Elementor_MCP_Safe_Writes::delete_post_meta( $snippet_id, '_elementor_extra_options' );
+			}
+			if ( is_wp_error( $res ) ) {
+				return $res;
 			}
 		}
 

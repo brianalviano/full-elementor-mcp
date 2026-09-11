@@ -452,10 +452,13 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		// Set title if provided.
 		$title = sanitize_text_field( $input['title'] ?? '' );
 		if ( ! empty( $title ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post( array(
+			$title_res = Full_Elementor_MCP_Safe_Writes::update_post( array(
 				'ID'         => $attachment_id,
 				'post_title' => $title,
 			) );
+			if ( is_wp_error( $title_res ) ) {
+				return $title_res;
+			}
 		} else {
 			$title = get_the_title( $attachment_id );
 		}
@@ -463,7 +466,10 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		// Set alt text if provided.
 		$alt_text = sanitize_text_field( $input['alt_text'] ?? '' );
 		if ( ! empty( $alt_text ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $attachment_id, '_wp_attachment_image_alt', $alt_text );
+			$alt_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $attachment_id, '_wp_attachment_image_alt', $alt_text );
+			if ( is_wp_error( $alt_res ) ) {
+				return $alt_res;
+			}
 		}
 
 		// Set caption or attribution as post excerpt.
@@ -472,10 +478,13 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		$excerpt     = ! empty( $caption ) ? $caption : $attribution;
 
 		if ( ! empty( $excerpt ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post( array(
+			$excerpt_res = Full_Elementor_MCP_Safe_Writes::update_post( array(
 				'ID'           => $attachment_id,
 				'post_excerpt' => $excerpt,
 			) );
+			if ( is_wp_error( $excerpt_res ) ) {
+				return $excerpt_res;
+			}
 		}
 
 		$local_url = wp_get_attachment_url( $attachment_id );

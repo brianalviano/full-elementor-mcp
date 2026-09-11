@@ -87,8 +87,21 @@ class Full_Elementor_MCP_Safe_Writes {
 
 		if ( $journal_id > 0 && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
 			$journal_bind = Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, $post_id, $fencing_token );
-			if ( is_wp_error( $journal_bind ) ) {
-				return $journal_bind;
+			if ( is_wp_error( $journal_bind ) || true !== $journal_bind ) {
+				$error_data = array(
+					'post_id'           => $post_id,
+					'journal_id'        => $journal_id,
+					'recovery_required' => true,
+				);
+				if ( is_wp_error( $journal_bind ) ) {
+					$error_data['cause']      = $journal_bind->get_error_message();
+					$error_data['cause_code'] = $journal_bind->get_error_code();
+				}
+				return new \WP_Error(
+					'created_post_journal_binding_failed',
+					__( 'Post created but durable journal record failed. Recovery required.', 'full-elementor-mcp' ),
+					$error_data
+				);
 			}
 		}
 

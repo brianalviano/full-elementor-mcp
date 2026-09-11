@@ -38,6 +38,10 @@ if ( ! defined( 'ELEMENTOR_VERSION' ) ) {
 	define( 'ELEMENTOR_VERSION', '4.0.0' );
 }
 
+if ( ! defined( 'ELEMENTOR_PRO_VERSION' ) ) {
+	define( 'ELEMENTOR_PRO_VERSION', '4.0.0' );
+}
+
 if ( ! defined( 'ARRAY_A' ) ) {
 	define( 'ARRAY_A', 'ARRAY_A' );
 }
@@ -71,7 +75,7 @@ $GLOBALS['wp_test_options']     = array();
 $GLOBALS['mock_post_meta']      = array();
 $GLOBALS['mock_posts']          = array();
 $GLOBALS['wp_test_user_id']     = 1;
-$GLOBALS['wp_test_caps']        = array( 'manage_options' => true, 'edit_posts' => true, 'unfiltered_html' => true );
+$GLOBALS['wp_test_caps']        = array( 'manage_options' => true, 'edit_posts' => true, 'unfiltered_html' => true, 'publish_pages' => true, 'edit_pages' => true );
 $GLOBALS['wp_test_app_pwd_uuid'] = null;
 
 if ( ! function_exists( 'get_option' ) ) {
@@ -98,7 +102,7 @@ if ( ! function_exists( 'get_current_user_id' ) ) {
 }
 if ( ! function_exists( 'current_user_can' ) ) {
 	function current_user_can( string $cap, ...$args ): bool {
-		if ( ( 'edit_post' === $cap || 'edit_page' === $cap || 'publish_page' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['edit_posts'] ) ) {
+		if ( ( 'edit_post' === $cap || 'edit_page' === $cap || 'publish_page' === $cap || 'publish_pages' === $cap || 'edit_pages' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['edit_posts'] ) ) {
 			return true;
 		}
 		if ( ( 'delete_post' === $cap || 'delete_page' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['delete_posts'] ) ) {
@@ -182,6 +186,9 @@ if ( ! function_exists( 'delete_post_meta' ) ) {
 }
 if ( ! function_exists( 'get_post' ) ) {
 	function get_post( int $post_id ): ?object {
+		if ( isset( $GLOBALS['wp_test_get_post_hook'] ) && is_callable( $GLOBALS['wp_test_get_post_hook'] ) ) {
+			( $GLOBALS['wp_test_get_post_hook'] )( $post_id );
+		}
 		return $GLOBALS['mock_posts'][ $post_id ] ?? (object) array( 'ID' => $post_id, 'post_type' => 'page', 'post_title' => 'Page ' . $post_id, 'post_name' => 'page-' . $post_id );
 	}
 }
@@ -224,7 +231,37 @@ if ( ! function_exists( 'wp_insert_post' ) ) {
 			$postarr,
 			array( 'ID' => $id )
 		);
+		if ( ! empty( $postarr['meta_input'] ) && is_array( $postarr['meta_input'] ) ) {
+			foreach ( $postarr['meta_input'] as $mk => $mv ) {
+				update_post_meta( $id, $mk, $mv );
+			}
+		}
+		if ( isset( $GLOBALS['wp_test_insert_post_hook'] ) && is_callable( $GLOBALS['wp_test_insert_post_hook'] ) ) {
+			( $GLOBALS['wp_test_insert_post_hook'] )( $id, $postarr );
+		}
 		return $id;
+	}
+}
+if ( ! function_exists( 'get_post_type' ) ) {
+	function get_post_type( int|object|null $post = null ): string|false {
+		if ( is_object( $post ) ) {
+			return $post->post_type ?? false;
+		}
+		$post_id = (int) $post;
+		return $GLOBALS['mock_posts'][ $post_id ]->post_type ?? false;
+	}
+}
+if ( ! function_exists( 'get_permalink' ) ) {
+	function get_permalink( int|object $post = 0 ): string|false {
+		$id = is_object( $post ) ? $post->ID : (int) $post;
+		return 'https://example.com/?p=' . $id;
+	}
+}
+if ( ! function_exists( 'get_post_thumbnail_id' ) ) {
+	function get_post_thumbnail_id( int|object|null $post = null ): int|false {
+		$id = is_object( $post ) ? $post->ID : (int) $post;
+		$thumb = get_post_meta( $id, '_thumbnail_id', true );
+		return ! empty( $thumb ) ? (int) $thumb : false;
 	}
 }
 if ( ! function_exists( 'wp_update_post' ) ) {
@@ -283,16 +320,67 @@ if ( ! function_exists( 'delete_post_thumbnail' ) ) {
 }
 if ( ! function_exists( 'wp_set_object_terms' ) ) {
 	function wp_set_object_terms( int $object_id, mixed $terms, string $taxonomy, bool $append = false ): array|WP_Error {
+		if ( isset( $GLOBALS['wp_test_set_terms_hook'] ) && is_callable( $GLOBALS['wp_test_set_terms_hook'] ) ) {
+			( $GLOBALS['wp_test_set_terms_hook'] )( $object_id, $terms, $taxonomy );
+		}
 		return is_array( $terms ) ? $terms : array( (int) $terms );
 	}
 }
 if ( ! function_exists( 'media_handle_sideload' ) ) {
 	function media_handle_sideload( array $file_array, int $post_id = 0, ?string $desc = null, array $post_data = array() ): int|WP_Error {
-		return wp_insert_post( array(
+		$res = wp_insert_post( array(
 			'post_type'      => 'attachment',
 			'post_mime_type' => $file_array['type'] ?? 'image/jpeg',
 			'post_title'     => $desc ?? 'Sideloaded',
 		) );
+		if ( isset( $GLOBALS['wp_test_sideload_hook'] ) && is_callable( $GLOBALS['wp_test_sideload_hook'] ) ) {
+			( $GLOBALS['wp_test_sideload_hook'] )( $res, $file_array );
+		}
+		return $res;
+	}
+}
+if ( ! function_exists( 'admin_url' ) ) {
+	function admin_url( string $path = '', ?string $scheme = 'admin' ): string {
+		return 'https://example.com/wp-admin/' . ltrim( $path, '/' );
+	}
+}
+if ( ! function_exists( 'sanitize_file_name' ) ) {
+	function sanitize_file_name( string $name ): string {
+		return preg_replace( '/[^a-zA-Z0-9_\.-]/', '', $name ) ?? '';
+	}
+}
+if ( ! function_exists( 'wp_parse_url' ) ) {
+	function wp_parse_url( string $url, int $component = -1 ): mixed {
+		return parse_url( $url, $component );
+	}
+}
+if ( ! function_exists( 'wp_get_attachment_url' ) ) {
+	function wp_get_attachment_url( int $post_id = 0 ): string|false {
+		return 'https://example.com/wp-content/uploads/' . $post_id . '.jpg';
+	}
+}
+if ( ! function_exists( 'wp_delete_file' ) ) {
+	function wp_delete_file( string $file ): bool {
+		if ( file_exists( $file ) ) {
+			@unlink( $file );
+		}
+		return true;
+	}
+}
+if ( ! function_exists( 'wp_check_filetype' ) ) {
+	function wp_check_filetype( string $filename, ?array $mimes = null ): array {
+		return array( 'ext' => 'jpg', 'type' => 'image/jpeg' );
+	}
+}
+if ( ! function_exists( 'get_the_title' ) ) {
+	function get_the_title( int|object $post = 0 ): string {
+		$id = is_object( $post ) ? $post->ID : (int) $post;
+		return $GLOBALS['mock_posts'][ $id ]->post_title ?? ( 'Post ' . $id );
+	}
+}
+if ( ! function_exists( 'wp_kses_post' ) ) {
+	function wp_kses_post( string $data ): string {
+		return $data;
 	}
 }
 
@@ -317,6 +405,9 @@ class MockElementorDocument {
 		}
 		if ( isset( $data['settings'] ) ) {
 			update_post_meta( $this->post_id, '_elementor_page_settings', $data['settings'] );
+		}
+		if ( isset( $GLOBALS['wp_test_document_save_hook'] ) && is_callable( $GLOBALS['wp_test_document_save_hook'] ) ) {
+			( $GLOBALS['wp_test_document_save_hook'] )( $this->post_id, $data );
 		}
 		return true;
 	}
@@ -514,6 +605,13 @@ require_once __DIR__ . '/../includes/class-elementor-data.php';
 require_once __DIR__ . '/../includes/class-id-generator.php';
 require_once __DIR__ . '/../includes/class-element-factory.php';
 require_once __DIR__ . '/../includes/abilities/class-page-abilities.php';
+require_once __DIR__ . '/../includes/abilities/class-template-abilities.php';
+require_once __DIR__ . '/../includes/abilities/class-composite-abilities.php';
+require_once __DIR__ . '/../includes/abilities/class-custom-code-abilities.php';
+require_once __DIR__ . '/../includes/class-openverse-client.php';
+require_once __DIR__ . '/../includes/abilities/class-stock-image-abilities.php';
+require_once __DIR__ . '/../includes/abilities/class-svg-icon-abilities.php';
+require_once __DIR__ . '/../includes/abilities/class-global-abilities.php';
 
 if ( ! function_exists( 'full_elementor_mcp_register_ability' ) ) {
 	function full_elementor_mcp_register_ability( string $name, array $args ) {
@@ -564,7 +662,13 @@ function assert_is_wp_error( mixed $thing, string $message = 'Expected WP_Error 
 
 function assert_error_code( string $code, mixed $thing, string $message = '' ): void {
 	assert_is_wp_error( $thing, $message );
-	assert_equals( $code, $thing->get_error_code(), $message );
+	if ( $code !== $thing->get_error_code() ) {
+		$err_detail = $thing->get_error_code() . ': ' . $thing->get_error_message();
+		if ( is_array( $thing->get_error_data() ) ) {
+			$err_detail .= ' Data: ' . json_encode( $thing->get_error_data() );
+		}
+		throw new \Exception( "ASSERTION FAILED: Expected [{$code}], got [{$err_detail}]. {$message}" );
+	}
 }
 
 function run_test( string $name, callable $test ): void {
@@ -578,6 +682,9 @@ function run_test( string $name, callable $test ): void {
 			'edit_posts'      => true,
 			'publish_posts'   => true,
 			'delete_posts'    => true,
+			'edit_pages'      => true,
+			'publish_pages'   => true,
+			'delete_pages'    => true,
 			'unfiltered_html' => true,
 		);
 		$GLOBALS['wp_test_user_id'] = 1;
@@ -1085,16 +1192,21 @@ run_test( 'Idempotency: same key with different args returns idempotency_conflic
 run_test( 'CREATE: created_object_id is recorded immediately and journal committed with ID', function () {
 	global $wpdb;
 	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
-		return array( 'post_id' => 777, 'edit_url' => 'https://example.com/wp-admin/post.php?post=777' );
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post( array(
+			'post_title' => $input['title'] ?? 'Brand New Page',
+			'post_type'  => 'page',
+		) );
+		return array( 'post_id' => $post_id, 'edit_url' => 'https://example.com/wp-admin/post.php?post=' . $post_id );
 	} );
 
 	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
 		'title' => 'Brand New Page',
 	) );
 
-	assert_equals( 777, $res['post_id'] );
+	assert_false( is_wp_error( $res ) );
+	assert_true( ( $res['post_id'] ?? 0 ) > 0 );
 	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/create-page' ORDER BY id DESC LIMIT 1", ARRAY_A );
-	assert_equals( 777, (int) $row['created_object_id'] );
+	assert_equals( (int) $res['post_id'], (int) $row['created_object_id'] );
 	assert_equals( 'committed', $row['status'] );
 } );
 
@@ -2144,6 +2256,464 @@ run_test( 'Dry-run: delete-page reports accurate argument-level rollback_support
 	) );
 	assert_false( is_wp_error( $res_trash ) );
 	assert_true( $res_trash['rollback_supported'], 'Trashing dry-run must report rollback_supported = true' );
+} );
+
+// Helper to ensure core ability instances are available
+function get_test_abilities(): array {
+	static $instances = null;
+	if ( null === $instances ) {
+		$data      = new Full_Elementor_MCP_Data();
+		$factory   = new Full_Elementor_MCP_Element_Factory();
+		$instances = array(
+			'page'        => new Full_Elementor_MCP_Page_Abilities( $data, $factory ),
+			'template'    => new Full_Elementor_MCP_Template_Abilities( $data, $factory ),
+			'composite'   => new Full_Elementor_MCP_Composite_Abilities( $data, $factory ),
+			'custom_code' => new Full_Elementor_MCP_Custom_Code_Abilities( $data, $factory ),
+			'stock_image' => new Full_Elementor_MCP_Stock_Image_Abilities( $data, $factory ),
+			'svg_icon'    => new Full_Elementor_MCP_Svg_Icon_Abilities( $data, $factory ),
+			'global'      => new Full_Elementor_MCP_Global_Abilities( $data, $factory ),
+		);
+		foreach ( $instances as $inst ) {
+			$inst->register();
+		}
+	}
+	return $instances;
+}
+
+// -----------------------------------------------------------------------------
+// 16. CREATE Identity Fail-Closed Invariants
+// -----------------------------------------------------------------------------
+
+run_test( 'CREATE identity: bound 123 + callback 123 results in success', function () {
+	global $wpdb;
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post( array(
+			'post_title' => 'Bound 123 Test',
+			'post_type'  => 'page',
+		) );
+		return array( 'post_id' => $post_id, 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Bound 123 Test',
+	) );
+
+	assert_false( is_wp_error( $res ) );
+	assert_true( ( $res['post_id'] ?? 0 ) > 0 );
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/create-page' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_equals( (int) $res['post_id'], (int) $row['created_object_id'] );
+	assert_equals( 'committed', $row['status'] );
+} );
+
+run_test( 'CREATE identity: bound 123 + callback 124 results in created_object_result_mismatch', function () {
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post( array(
+			'post_title' => 'Mismatch Test',
+			'post_type'  => 'page',
+		) );
+		return array( 'post_id' => $post_id + 1, 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Mismatch Test',
+	) );
+
+	assert_error_code( 'created_object_result_mismatch', $res );
+} );
+
+run_test( 'CREATE identity: bound 123 + callback missing ID results in created_object_result_missing', function () {
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post( array(
+			'post_title' => 'Missing Callback ID Test',
+			'post_type'  => 'page',
+		) );
+		return array( 'success' => true ); // Missing 'post_id'
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Missing ID Test',
+	) );
+
+	assert_error_code( 'created_object_result_missing', $res );
+} );
+
+run_test( 'CREATE identity: callback 123 + no durable bound results in created_object_identity_not_durable', function () {
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		// Does NOT call Safe_Writes::insert_post()
+		return array( 'post_id' => 123, 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Not Durable Test',
+	) );
+
+	assert_error_code( 'created_object_identity_not_durable', $res );
+} );
+
+run_test( 'CREATE identity: no bound + no callback ID results in created_object_id_unresolved', function () {
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		// Neither binds nor returns ID
+		return array( 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Unresolved Test',
+	) );
+
+	assert_error_code( 'created_object_id_unresolved', $res );
+} );
+
+run_test( 'CREATE identity: middleware NEVER calls record_created_object_id after callback returns', function () {
+	global $wpdb;
+	$calls_during_callback = 0;
+
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) use ( &$calls_during_callback ) {
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post( array(
+			'post_title' => 'No Late Binding Test',
+			'post_type'  => 'page',
+		) );
+		$calls_during_callback++;
+		return array( 'post_id' => $post_id );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'No Late Binding Test',
+	) );
+
+	assert_false( is_wp_error( $res ) );
+	assert_equals( 1, $calls_during_callback, 'Physical create must bind during callback execution' );
+
+	// Now verify that if callback returns an ID without durable binding, middleware rejects and NEVER attempts late recording
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		return array( 'post_id' => 999 );
+	} );
+
+	$res_fail = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Attempt Late Binding Test',
+	) );
+
+	assert_error_code( 'created_object_identity_not_durable', $res_fail );
+	$latest_entry = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( empty( $latest_entry['created_object_id'] ), 'Middleware must NOT have written created_object_id 999 into journal' );
+} );
+
+// -----------------------------------------------------------------------------
+// 17. Fencing Loss Propagation
+// -----------------------------------------------------------------------------
+
+run_test( 'Fencing loss: create-page loses fence before optional template meta write does not report success', function () {
+	global $wpdb;
+	get_test_abilities();
+
+	$GLOBALS['wp_test_insert_post_hook'] = function ( $id, $postarr ) use ( $wpdb ) {
+		$ctx = Full_Elementor_MCP_Mutation_Context::current();
+		if ( $ctx ) {
+			$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+			$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+		}
+	};
+
+	$idemp_key = 'idem_create_page_fence_loss';
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title'           => 'Fence Lost Page',
+		'template'        => 'elementor_canvas',
+		'idempotency_key' => $idemp_key,
+	) );
+
+	$GLOBALS['wp_test_insert_post_hook'] = null;
+
+	assert_true( is_wp_error( $res ), 'Ability must fail when fencing is lost before template meta write' );
+	assert_equals( 'stale_writer_conflict', $res->get_error_code() );
+
+	// Assert journal and idempotency remain truthful
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/create-page' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( 'committed' !== $row['status'], 'Journal status must not be committed' );
+	$claim = Full_Elementor_MCP_Idempotency_Manager::claim( $idemp_key, 'full-elementor-mcp/create-page', 1, null, array( 'title' => 'Fence Lost Page', 'template' => 'elementor_canvas' ), 'worker_2' );
+	assert_true( is_wp_error( $claim ) && 'idempotency_recovery_required' === $claim->get_error_code(), 'Idempotency must be recovery_required' );
+} );
+
+run_test( 'Fencing loss: build-page loses fence before page-settings write does not report success', function () {
+	global $wpdb;
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'elementor' => true, 'containers' => true ) );
+	get_test_abilities();
+
+	$GLOBALS['wp_test_document_save_hook'] = function ( $post_id, $data ) use ( $wpdb ) {
+		if ( isset( $data['elements'] ) ) {
+			$ctx = Full_Elementor_MCP_Mutation_Context::current();
+			if ( $ctx ) {
+				$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+				$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+			}
+		}
+	};
+
+	$idemp_key = 'idem_build_page_fence_loss';
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/build-page', array(
+		'title'           => 'Fence Lost Build Page',
+		'structure'       => array(
+			array(
+				'type' => 'container',
+			),
+		),
+		'page_settings'   => array(
+			'custom_css' => 'body { background: #000; }',
+		),
+		'idempotency_key' => $idemp_key,
+	) );
+
+	$GLOBALS['wp_test_document_save_hook'] = null;
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+
+	assert_error_code( 'stale_writer_conflict', $res, 'build-page must fail when fence is lost before page-settings write' );
+
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/build-page' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( 'committed' !== $row['status'], 'Journal status must not be committed' );
+} );
+
+run_test( 'Fencing loss: create-theme-template loses fence before initialization save does not report success', function () {
+	global $wpdb;
+	get_test_abilities();
+
+	$GLOBALS['wp_test_set_terms_hook'] = function ( $object_id, $terms, $taxonomy ) use ( $wpdb ) {
+		$ctx = Full_Elementor_MCP_Mutation_Context::current();
+		if ( $ctx ) {
+			$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+			$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+		}
+	};
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-theme-template', array(
+		'title'         => 'Theme Template Header',
+		'template_type' => 'header',
+	) );
+
+	$GLOBALS['wp_test_set_terms_hook'] = null;
+
+	assert_error_code( 'stale_writer_conflict', $res, 'create-theme-template must fail when fence is lost before initialization save' );
+
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/create-theme-template' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( 'committed' !== $row['status'], 'Journal status must not be committed' );
+} );
+
+run_test( 'Fencing loss: create-popup loses fence before initialization save does not report success', function () {
+	global $wpdb;
+	get_test_abilities();
+
+	$GLOBALS['wp_test_set_terms_hook'] = function ( $object_id, $terms, $taxonomy ) use ( $wpdb ) {
+		$ctx = Full_Elementor_MCP_Mutation_Context::current();
+		if ( $ctx ) {
+			$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+			$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+		}
+	};
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-popup', array(
+		'title' => 'Lost Popup',
+	) );
+
+	$GLOBALS['wp_test_set_terms_hook'] = null;
+
+	assert_error_code( 'stale_writer_conflict', $res, 'create-popup must fail when fence is lost before initialization save' );
+
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/create-popup' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( 'committed' !== $row['status'], 'Journal status must not be committed' );
+} );
+
+run_test( 'Fencing loss: add-code-snippet loses fence during required metadata writes does not report success', function () {
+	global $wpdb;
+	get_test_abilities();
+
+	$snippet_args = array(
+		'title'    => 'Custom Snippet',
+		'code'     => 'console.log("test");',
+		'location' => 'head',
+	);
+
+	$res_key   = Full_Elementor_MCP_Mutation_Registry::build_create_resource_key( 'full-elementor-mcp/add-code-snippet', $snippet_args );
+	$challenge = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/add-code-snippet',
+		$snippet_args,
+		1,
+		null,
+		$res_key
+	);
+	$token = $challenge['confirmation_token'];
+
+	$GLOBALS['wp_test_insert_post_hook'] = function ( $id, $postarr ) use ( $wpdb ) {
+		$ctx = Full_Elementor_MCP_Mutation_Context::current();
+		if ( $ctx ) {
+			$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+			$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+		}
+	};
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/add-code-snippet', array_merge(
+		$snippet_args,
+		array( 'confirmation_token' => $token )
+	) );
+
+	$GLOBALS['wp_test_insert_post_hook'] = null;
+
+	assert_error_code( 'stale_writer_conflict', $res, 'add-code-snippet must fail when fence is lost during metadata writes' );
+
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/add-code-snippet' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( 'committed' !== $row['status'], 'Journal status must not be committed' );
+} );
+
+run_test( 'Fencing loss: update-code-snippet loses fence during metadata update does not report success', function () {
+	global $wpdb;
+	get_test_abilities();
+
+	$snippet_id = wp_insert_post( array(
+		'post_title'  => 'Snippet To Update',
+		'post_type'   => 'elementor_snippet',
+		'post_status' => 'publish',
+	) );
+
+	$update_args = array(
+		'snippet_id' => $snippet_id,
+		'code'       => 'console.log("updated code");',
+	);
+
+	$challenge = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/update-code-snippet',
+		$update_args,
+		1,
+		null,
+		'post:' . $snippet_id
+	);
+	$token = $challenge['confirmation_token'];
+
+	$GLOBALS['wp_test_get_post_hook'] = function ( $post_id ) use ( $wpdb, $snippet_id ) {
+		if ( (int) $post_id === (int) $snippet_id ) {
+			$ctx = Full_Elementor_MCP_Mutation_Context::current();
+			if ( $ctx ) {
+				$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+				$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+			}
+		}
+	};
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-code-snippet', array_merge(
+		$update_args,
+		array( 'confirmation_token' => $token )
+	) );
+
+	$GLOBALS['wp_test_get_post_hook'] = null;
+
+	assert_error_code( 'stale_writer_conflict', $res, 'update-code-snippet must fail when fence is lost during metadata update' );
+
+	$row = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal WHERE ability = 'full-elementor-mcp/update-code-snippet' ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_true( 'committed' !== $row['status'], 'Journal status must not be committed' );
+} );
+
+run_test( 'Fencing loss: sideload-image loses fence after attachment creation but before title/alt metadata enters recovery behavior', function () {
+	global $wpdb;
+	$token_key = 'idem_sideload_fence_loss_' . bin2hex( random_bytes( 4 ) );
+
+	register_mock_ability( 'full-elementor-mcp/sideload-image', false, function ( $input ) use ( $wpdb ) {
+		$file   = array( 'name' => 'photo.jpg', 'tmp_name' => '/tmp/photo.jpg' );
+		$att_id = Full_Elementor_MCP_Safe_Writes::media_handle_sideload( $file, 0 );
+		if ( is_wp_error( $att_id ) ) {
+			return $att_id;
+		}
+
+		// Simulate losing lease/fence right after physical attachment creation:
+		$ctx      = Full_Elementor_MCP_Mutation_Context::current();
+		$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+		$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+
+		// Secondary write must fail with stale_writer_conflict:
+		$upd = Full_Elementor_MCP_Safe_Writes::update_post( array(
+			'ID'         => $att_id,
+			'post_title' => 'Custom Title',
+		) );
+		if ( is_wp_error( $upd ) ) {
+			return $upd;
+		}
+
+		return array( 'attachment_id' => $att_id );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/sideload-image', array(
+		'url'             => 'https://example.com/photo.jpg',
+		'title'           => 'Custom Title',
+		'idempotency_key' => $token_key,
+	) );
+
+	assert_error_code( 'stale_writer_conflict', $res, 'Must fail when fence is lost before metadata write' );
+
+	// Verify idempotency record is marked recovery_required:
+	$claim = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/sideload-image', 1, null, array( 'url' => 'https://example.com/photo.jpg', 'title' => 'Custom Title' ), 'worker_retry' );
+	assert_true( is_wp_error( $claim ) && 'idempotency_recovery_required' === $claim->get_error_code(), 'Idempotency must be recovery_required' );
+} );
+
+run_test( 'Fencing loss: upload-svg-icon loses fence before title update does not report success', function () {
+	global $wpdb;
+	register_mock_ability( 'full-elementor-mcp/upload-svg-icon', false, function ( $input ) use ( $wpdb ) {
+		$file   = array( 'name' => 'icon.svg', 'tmp_name' => '/tmp/icon.svg' );
+		$att_id = Full_Elementor_MCP_Safe_Writes::media_handle_sideload( $file, 0 );
+		if ( is_wp_error( $att_id ) ) {
+			return $att_id;
+		}
+
+		// Simulate losing fence before title update:
+		$ctx      = Full_Elementor_MCP_Mutation_Context::current();
+		$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+		$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+
+		$title_res = Full_Elementor_MCP_Safe_Writes::update_post( array(
+			'ID'         => $att_id,
+			'post_title' => 'Brand Icon',
+		) );
+		if ( is_wp_error( $title_res ) ) {
+			return $title_res;
+		}
+
+		return array( 'attachment_id' => $att_id, 'id' => $att_id );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/upload-svg-icon', array(
+		'svg'   => '<svg></svg>',
+		'title' => 'Brand Icon',
+	) );
+
+	assert_error_code( 'stale_writer_conflict', $res, 'upload-svg-icon must fail when fence is lost before title update' );
+} );
+
+run_test( 'Fencing loss: set-featured-image Safe_Write returns stale_writer_conflict', function () {
+	global $wpdb;
+	get_test_abilities();
+
+	$post_id = wp_insert_post( array(
+		'post_title'  => 'Page for Thumbnail',
+		'post_type'   => 'page',
+		'post_status' => 'publish',
+	) );
+	$att_id = wp_insert_post( array(
+		'post_title'  => 'Thumbnail Image',
+		'post_type'   => 'attachment',
+		'post_status' => 'inherit',
+	) );
+
+	$GLOBALS['wp_test_get_post_hook'] = function ( $p_id ) use ( $wpdb, $post_id ) {
+		if ( (int) $p_id === (int) $post_id ) {
+			$ctx = Full_Elementor_MCP_Mutation_Context::current();
+			if ( $ctx ) {
+				$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $ctx['resource_key'] );
+				$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+			}
+		}
+	};
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/set-featured-image', array(
+		'post_id'       => $post_id,
+		'attachment_id' => $att_id,
+	) );
+
+	$GLOBALS['wp_test_get_post_hook'] = null;
+
+	assert_error_code( 'stale_writer_conflict', $res, 'Caller must receive stale_writer_conflict error' );
 } );
 
 echo "\n=======================================================\n";

@@ -562,6 +562,13 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'resource_key',
 			'before_state',
 			'after_state',
+			'confirmation_token',
+			'dry_run',
+			'idempotency_key',
+			'_safety',
+			'allow_critical_override',
+			'rollback_supported',
+			'created_object_id',
 		);
 		foreach ( $runtime_keys as $rk ) {
 			unset( $filtered_args[ $rk ] );

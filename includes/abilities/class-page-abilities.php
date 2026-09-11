@@ -240,7 +240,10 @@ class Full_Elementor_MCP_Page_Abilities {
 
 		// Set page template if provided.
 		if ( ! empty( $input['template'] ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_wp_page_template', sanitize_text_field( $input['template'] ) );
+			$meta_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_wp_page_template', sanitize_text_field( $input['template'] ) );
+			if ( is_wp_error( $meta_res ) ) {
+				return $meta_res;
+			}
 		}
 
 		// Save initial content if provided.
@@ -725,27 +728,38 @@ class Full_Elementor_MCP_Page_Abilities {
 			}
 		} else {
 			// Still need to flag the duplicate as Elementor-built.
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $new_id, '_elementor_edit_mode', 'builder' );
+			$mode_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $new_id, '_elementor_edit_mode', 'builder' );
+			if ( is_wp_error( $mode_res ) ) {
+				return $mode_res;
+			}
 		}
 
 		// Mirror the most common Elementor meta keys.
 		$copyable_meta = array(
 			'_elementor_template_type',
 			'_elementor_version',
-			'_elementor_page_settings',
+			'_elementor_pro_version',
+			'_elementor_page_assets',
+			'_wp_page_template',
 		);
 
 		foreach ( $copyable_meta as $key ) {
 			$value = get_post_meta( $source_id, $key, true );
 			if ( '' !== $value && false !== $value ) {
-				Full_Elementor_MCP_Safe_Writes::update_post_meta( $new_id, $key, $value );
+				$copy_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $new_id, $key, $value );
+				if ( is_wp_error( $copy_res ) ) {
+					return $copy_res;
+				}
 			}
 		}
 
 		// Also copy featured image if present.
 		$thumb = get_post_thumbnail_id( $source_id );
 		if ( $thumb ) {
-			Full_Elementor_MCP_Safe_Writes::set_post_thumbnail( $new_id, $thumb );
+			$thumb_res = Full_Elementor_MCP_Safe_Writes::set_post_thumbnail( $new_id, $thumb );
+			if ( is_wp_error( $thumb_res ) ) {
+				return $thumb_res;
+			}
 		}
 
 		return array(
@@ -815,6 +829,9 @@ class Full_Elementor_MCP_Page_Abilities {
 
 		if ( empty( $attachment_id ) ) {
 			$result = Full_Elementor_MCP_Safe_Writes::delete_post_thumbnail( $post_id );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
 			return array(
 				'success'       => true,
 				'post_id'       => $post_id,
@@ -828,7 +845,10 @@ class Full_Elementor_MCP_Page_Abilities {
 		}
 
 		$result = Full_Elementor_MCP_Safe_Writes::set_post_thumbnail( $post_id, $attachment_id );
-		if ( false === $result ) {
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+		if ( false === $result && (int) get_post_thumbnail_id( $post_id ) !== (int) $attachment_id ) {
 			return new \WP_Error( 'set_failed', __( 'Failed to set the featured image.', 'full-elementor-mcp' ) );
 		}
 

@@ -224,7 +224,10 @@ class Full_Elementor_MCP_Template_Abilities {
 		}
 
 		// Set the template type taxonomy.
-		Full_Elementor_MCP_Safe_Writes::set_object_terms( $template_id, $template_type, 'elementor_library_type' );
+		$term_res = Full_Elementor_MCP_Safe_Writes::set_object_terms( $template_id, $template_type, 'elementor_library_type' );
+		if ( is_wp_error( $term_res ) ) {
+			return $term_res;
+		}
 
 		// Save the element data to the template.
 		$save_result = $this->data->save_page_data( $template_id, $elements_data );
@@ -443,10 +446,16 @@ class Full_Elementor_MCP_Template_Abilities {
 			return $post_id;
 		}
 
-		Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, $template_type, 'elementor_library_type' );
+		$term_res = Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, $template_type, 'elementor_library_type' );
+		if ( is_wp_error( $term_res ) ) {
+			return $term_res;
+		}
 
 		// Initialize with empty Elementor data.
-		$this->data->save_page_data( $post_id, array() );
+		$save_res = $this->data->save_page_data( $post_id, array() );
+		if ( is_wp_error( $save_res ) ) {
+			return $save_res;
+		}
 
 		return array(
 			'post_id'  => $post_id,
@@ -514,7 +523,10 @@ class Full_Elementor_MCP_Template_Abilities {
 			}
 		}
 
-		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $formatted );
+		$meta_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $formatted );
+		if ( is_wp_error( $meta_res ) ) {
+			return $meta_res;
+		}
 
 		// Bust Elementor Pro's modern Theme Builder conditions cache. The old
 		// `elementor_pro_theme_builder_conditions` option key was removed in
@@ -769,8 +781,14 @@ class Full_Elementor_MCP_Template_Abilities {
 			return $post_id;
 		}
 
-		Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, 'popup', 'elementor_library_type' );
-		$this->data->save_page_data( $post_id, array() );
+		$term_res = Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, 'popup', 'elementor_library_type' );
+		if ( is_wp_error( $term_res ) ) {
+			return $term_res;
+		}
+		$save_res = $this->data->save_page_data( $post_id, array() );
+		if ( is_wp_error( $save_res ) ) {
+			return $save_res;
+		}
 
 		return array(
 			'post_id'  => $post_id,
@@ -874,7 +892,10 @@ class Full_Elementor_MCP_Template_Abilities {
 					$formatted[] = $condition;
 				}
 			}
-			Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $formatted );
+			$meta_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $formatted );
+			if ( is_wp_error( $meta_res ) ) {
+				return $meta_res;
+			}
 
 			delete_transient( 'elementor_theme_builder_conditions_cache' );
 			delete_option( 'elementor_pro_theme_builder_conditions' );
@@ -1119,16 +1140,25 @@ class Full_Elementor_MCP_Template_Abilities {
 		$remove = $input['conditions'] ?? null;
 
 		if ( null === $remove ) {
-			Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
+			$del_res = Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
+			if ( is_wp_error( $del_res ) ) {
+				return $del_res;
+			}
 			$remaining = array();
 		} else {
 			$remove    = array_map( 'sanitize_text_field', (array) $remove );
 			$existing  = (array) get_post_meta( $post_id, '_elementor_conditions', true );
 			$remaining = array_values( array_diff( $existing, $remove ) );
 			if ( empty( $remaining ) ) {
-				Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
+				$del_res = Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
+				if ( is_wp_error( $del_res ) ) {
+					return $del_res;
+				}
 			} else {
-				Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $remaining );
+				$upd_res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $remaining );
+				if ( is_wp_error( $upd_res ) ) {
+					return $upd_res;
+				}
 			}
 		}
 

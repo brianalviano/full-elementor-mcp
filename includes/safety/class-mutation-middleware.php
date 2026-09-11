@@ -627,52 +627,68 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				$callback_id = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( $ability, $result );
 
 				if ( $bound_id > 0 && $callback_id > 0 && $bound_id !== $callback_id ) {
-					// Durable created ID vs callback result mismatch!
-					$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
-					if ( is_wp_error( $rollback_res ) && $idemp_token_key ) {
-						Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, 'created_object_result_mismatch' );
-					} elseif ( $idemp_token_key ) {
-						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'created_object_result_mismatch' );
-					}
-					return new \WP_Error(
-						'created_object_result_mismatch',
-						sprintf(
-							/* translators: 1: bound ID, 2: callback ID */
-							__( 'Durable created object ID (%1$d) does not match callback declared ID (%2$d).', 'full-elementor-mcp' ),
-							$bound_id,
-							$callback_id
-						),
-						array(
-							'bound_object_id'    => $bound_id,
-							'callback_object_id' => $callback_id,
-						)
+					// Mismatch: bound=123, callback=124
+					$error_code = 'created_object_result_mismatch';
+					$error_msg  = sprintf(
+						/* translators: 1: bound ID, 2: callback ID */
+						__( 'Durable created object ID (%1$d) does not match callback declared ID (%2$d).', 'full-elementor-mcp' ),
+						$bound_id,
+						$callback_id
 					);
+					$error_data = array(
+						'bound_object_id'    => $bound_id,
+						'callback_object_id' => $callback_id,
+					);
+				} elseif ( $bound_id > 0 && $callback_id <= 0 ) {
+					// Missing callback ID: bound=123, callback=0
+					$error_code = 'created_object_result_missing';
+					$error_msg  = sprintf(
+						/* translators: %d: bound ID */
+						__( 'Durable created object ID (%d) exists but callback result is missing the required ID field.', 'full-elementor-mcp' ),
+						$bound_id
+					);
+					$error_data = array(
+						'bound_object_id' => $bound_id,
+					);
+				} elseif ( $bound_id <= 0 && $callback_id > 0 ) {
+					// Identity not durable: bound=0, callback=123
+					$error_code = 'created_object_identity_not_durable';
+					$error_msg  = sprintf(
+						/* translators: %d: callback ID */
+						__( 'Callback returned created object ID (%d) but object identity was not durably recorded during creation.', 'full-elementor-mcp' ),
+						$callback_id
+					);
+					$error_data = array(
+						'callback_object_id' => $callback_id,
+					);
+				} elseif ( $bound_id <= 0 && $callback_id <= 0 ) {
+					// Unresolved: bound=0, callback=0
+					$error_code = 'created_object_id_unresolved';
+					$error_msg  = __( 'Creation completed but created object ID could not be detected or durably bound.', 'full-elementor-mcp' );
+					$error_data = array();
+				} else {
+					$error_code = null;
 				}
 
-				$created_id = $bound_id > 0 ? $bound_id : $callback_id;
-
-				if ( empty( $bound_id ) && $callback_id > 0 ) {
-					Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, $callback_id, $fencing_token );
-					Full_Elementor_MCP_Mutation_Context::bind_created_object_id( $callback_id );
-				}
-
-				if ( empty( $created_id ) || $created_id < 1 ) {
-					$write_started = Full_Elementor_MCP_Mutation_Context::has_write_started();
+				if ( null !== $error_code ) {
+					$write_started = Full_Elementor_MCP_Mutation_Context::has_write_started() || $bound_id > 0;
 					if ( $write_started ) {
 						$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
 						if ( is_wp_error( $rollback_res ) && $idemp_token_key ) {
-							Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, 'created_object_id_unresolved' );
+							Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, $error_code );
 						} elseif ( $idemp_token_key ) {
-							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'created_object_id_unresolved' );
+							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $error_code );
 						}
 					} else {
-						Full_Elementor_MCP_Journal::mark_failed( $journal_id, 'created_object_id_unresolved', $fencing_token );
+						Full_Elementor_MCP_Journal::mark_failed( $journal_id, $error_code, $fencing_token );
 						if ( $idemp_token_key ) {
-							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'created_object_id_unresolved' );
+							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $error_code );
 						}
 					}
-					return new \WP_Error( 'created_object_id_unresolved', __( 'Creation completed but created object ID could not be detected.', 'full-elementor-mcp' ) );
+					return new \WP_Error( $error_code, $error_msg, $error_data );
 				}
+
+				$created_id = $bound_id;
 			}
 
 			// 21. Post-Mutation Validation & Same-Generation Rollback on Corruption:

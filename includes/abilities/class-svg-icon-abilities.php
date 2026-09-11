@@ -234,10 +234,13 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 
 		// Set the title.
 		if ( ! empty( $title ) ) {
-			Full_Elementor_MCP_Safe_Writes::update_post( array(
+			$title_res = Full_Elementor_MCP_Safe_Writes::update_post( array(
 				'ID'         => $attachment_id,
 				'post_title' => $title,
 			) );
+			if ( is_wp_error( $title_res ) ) {
+				return $title_res;
+			}
 		}
 
 		// Build the Elementor icon object.
