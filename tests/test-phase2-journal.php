@@ -1958,6 +1958,338 @@ run_test( 'Final Pass: audit all 121 mutating strategies and verify zero post:0 
 	}
 } );
 
+// =========================================================================
+// 7. WAL-INTEGRITY REGRESSIONS & WRITE-ONCE ENFORCEMENT
+// =========================================================================
+
+run_test( 'WAL-Integrity: created_object_id cannot be replaced by another ID', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+	assert_true( $j > 0 );
+
+	// First record succeeds
+	$ok1 = Full_Elementor_MCP_Journal::record_created_object_id( $j, 888, 1 );
+	assert_true( true === $ok1 );
+
+	// Repeat 888 with same fence succeeds (idempotent)
+	$ok2 = Full_Elementor_MCP_Journal::record_created_object_id( $j, 888, 1 );
+	assert_true( true === $ok2 );
+
+	// Attempt 999 with same fence fails
+	$err1 = Full_Elementor_MCP_Journal::record_created_object_id( $j, 999, 1 );
+	assert_is_wp_error( $err1 );
+	assert_equals( 'created_object_conflict', $err1->get_error_code() );
+
+	// Attempt 888 with stale fence fails
+	$err2 = Full_Elementor_MCP_Journal::record_created_object_id( $j, 888, 2 );
+	assert_is_wp_error( $err2 );
+	assert_equals( 'stale_writer_conflict', $err2->get_error_code() );
+} );
+
+run_test( 'WAL-Integrity: tracked CREATE cannot commit without created_object_id', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+	assert_true( $j > 0 );
+
+	// Attempt commit before recording created ID
+	$err = Full_Elementor_MCP_Journal::commit( $j, array( 'dummy' => 1 ), 1 );
+	assert_is_wp_error( $err );
+	assert_equals( 'created_object_id_required', $err->get_error_code() );
+
+	// Record created ID and then commit succeeds
+	$GLOBALS['mock_created_objects'][889] = 'publish';
+	$GLOBALS['mock_posts'][889] = array( 'ID' => 889, 'post_title' => 'Page 889' );
+	Full_Elementor_MCP_Journal::record_created_object_id( $j, 889, 1 );
+
+	$ok = Full_Elementor_MCP_Journal::commit( $j, array( 'dummy' => 1 ), 1 );
+	assert_true( true === $ok );
+} );
+
+run_test( 'WAL-Integrity: caller cannot spoof CREATE after-state fingerprint', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+
+	$GLOBALS['mock_created_objects'][890] = 'publish';
+	$GLOBALS['mock_posts'][890] = array(
+		'ID'           => 890,
+		'post_title'   => 'Authoritative Title',
+		'post_name'    => 'auth-slug',
+		'post_excerpt' => 'auth-excerpt',
+	);
+	Full_Elementor_MCP_Journal::record_created_object_id( $j, 890, 1 );
+
+	// Caller attempts to pass fake after-state
+	$fake_after = array( 'exists' => true, 'spoofed_key' => 'fake_value' );
+	$ok = Full_Elementor_MCP_Journal::commit( $j, $fake_after, 1 );
+	assert_true( true === $ok );
+
+	// Authoritative fingerprint must be stored, not the caller's fake payload
+	$entry = Full_Elementor_MCP_Journal::get_entry( $j );
+	$expected_fp   = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( 890 );
+	$expected_hash = Full_Elementor_MCP_Journal::hash_state( $expected_fp );
+
+	assert_equals( $expected_hash, $entry['after_hash'] );
+	assert_true( $entry['after_hash'] !== Full_Elementor_MCP_Journal::hash_state( $fake_after ) );
+} );
+
+run_test( 'WAL-Integrity: create with unknown/unrecorded ID cannot be marked rolled_back', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+	assert_true( $j > 0 );
+
+	// Acquire lock on create resource
+	$entry = Full_Elementor_MCP_Journal::get_entry( $j );
+	$lock  = Full_Elementor_MCP_Lock_Manager::acquire_lock( $entry['resource_key'], 'unrecorded-worker', 30 );
+
+	// Attempt rollback without recorded created_object_id
+	$res = Full_Elementor_MCP_Journal::rollback( $j, 'unrecorded-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'created_object_identity_unknown', $res->get_error_code() );
+
+	// Journal must NOT be rolled_back
+	$entry_after = Full_Elementor_MCP_Journal::get_entry( $j );
+	assert_true( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK !== $entry_after['status'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $entry['resource_key'], 'unrecorded-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: post_excerpt modification detected by create fingerprint', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+
+	$GLOBALS['mock_created_objects'][891] = 'publish';
+	$GLOBALS['mock_posts'][891] = array(
+		'ID'           => 891,
+		'post_title'   => 'Base Title',
+		'post_excerpt' => 'initial excerpt',
+	);
+	Full_Elementor_MCP_Journal::record_created_object_id( $j, 891, 1 );
+	Full_Elementor_MCP_Journal::commit( $j, array(), 1 );
+
+	// Modify post_excerpt (newer work)
+	$GLOBALS['mock_posts'][891]['post_excerpt'] = 'modified excerpt by another tool';
+
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:891', 'excerpt-worker', 30 );
+	$res  = Full_Elementor_MCP_Journal::rollback( $j, 'excerpt-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'journal_state_conflict', $res->get_error_code() );
+	assert_equals( 'publish', $GLOBALS['mock_created_objects'][891] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:891', 'excerpt-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: featured-image modification detected by create fingerprint', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+
+	$GLOBALS['mock_created_objects'][892] = 'publish';
+	$GLOBALS['mock_posts'][892] = array( 'ID' => 892, 'post_title' => 'Title 892' );
+	$GLOBALS['mock_thumbnails'][892] = 55;
+	Full_Elementor_MCP_Journal::record_created_object_id( $j, 892, 1 );
+	Full_Elementor_MCP_Journal::commit( $j, array(), 1 );
+
+	// Modify featured image
+	$GLOBALS['mock_thumbnails'][892] = 99;
+
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:892', 'feat-worker', 30 );
+	$res  = Full_Elementor_MCP_Journal::rollback( $j, 'feat-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'journal_state_conflict', $res->get_error_code() );
+	assert_equals( 'publish', $GLOBALS['mock_created_objects'][892] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:892', 'feat-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: template-condition modification detected by create fingerprint', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-theme-template',
+		'fencing_token' => 1,
+	) );
+
+	$GLOBALS['mock_created_objects'][893] = 'publish';
+	$GLOBALS['mock_posts'][893] = array( 'ID' => 893, 'post_title' => 'Theme Header' );
+	$GLOBALS['mock_post_meta'][893]['_elementor_conditions'] = array( 'include/general' );
+	Full_Elementor_MCP_Journal::record_created_object_id( $j, 893, 1 );
+	Full_Elementor_MCP_Journal::commit( $j, array(), 1 );
+
+	// Modify template conditions
+	$GLOBALS['mock_post_meta'][893]['_elementor_conditions'] = array( 'include/archive' );
+
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:893', 'cond-worker', 30 );
+	$res  = Full_Elementor_MCP_Journal::rollback( $j, 'cond-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'journal_state_conflict', $res->get_error_code() );
+	assert_equals( 'publish', $GLOBALS['mock_created_objects'][893] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:893', 'cond-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: FAILED manual-recovery journal cannot be ordinary-rollback overwritten', function () {
+	global $wpdb;
+
+	// Original worker acquires generation 1
+	$orig_lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:894', 'orig-worker', 30 );
+	assert_equals( 1, (int) $orig_lock['fencing_token'] );
+
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 894,
+		'fencing_token' => (int) $orig_lock['fencing_token'],
+		'before_state'  => array( 'elements' => array( 'original_894' ) ),
+	) );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:894', 'orig-worker', (int) $orig_lock['fencing_token'] );
+
+	// Manually set status = failed (as recovery would do on manual_recovery_required)
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->query( "UPDATE {$table} SET status = 'failed', error_message = 'manual_recovery_required' WHERE id = {$j}" );
+
+	// Live state diverged from before_state
+	$GLOBALS['mock_post_storage'][894] = array( 'elements' => array( 'divergent_newer_work' ) );
+
+	// New generation writer acquires lock (fencing token 2)
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:894', 'new-gen-worker', 30 );
+	assert_equals( 2, (int) $lock['fencing_token'] );
+
+	// Ordinary rollback MUST NOT overwrite unverifiable divergent state
+	$res = Full_Elementor_MCP_Journal::rollback( $j, 'new-gen-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'manual_recovery_required', $res->get_error_code() );
+	assert_equals( array( 'elements' => array( 'divergent_newer_work' ) ), $GLOBALS['mock_post_storage'][894] );
+
+	// But explicit force=true path allows authorized overwrite under active fencing
+	$forced = Full_Elementor_MCP_Journal::rollback( $j, 'new-gen-worker', (int) $lock['fencing_token'], array( 'force' => true ) );
+	assert_true( is_array( $forced ) && ! empty( $forced['success'] ) );
+	assert_equals( array( 'elements' => array( 'original_894' ) ), $GLOBALS['mock_post_storage'][894] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:894', 'new-gen-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: PENDING new-generation rollback cannot overwrite unverifiable state', function () {
+	// Original worker acquires generation 1
+	$orig_lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:895', 'orig-worker-2', 30 );
+	assert_equals( 1, (int) $orig_lock['fencing_token'] );
+
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 895,
+		'fencing_token' => (int) $orig_lock['fencing_token'],
+		'before_state'  => array( 'elements' => array( 'original_895' ) ),
+	) );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:895', 'orig-worker-2', (int) $orig_lock['fencing_token'] );
+
+	// Live state diverged
+	$GLOBALS['mock_post_storage'][895] = array( 'elements' => array( 'divergent_895' ) );
+
+	// New generation writer acquires lock (fencing token 2)
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:895', 'new-gen-worker-2', 30 );
+	assert_equals( 2, (int) $lock['fencing_token'] );
+
+	// Ordinary rollback fails closed
+	$res = Full_Elementor_MCP_Journal::rollback( $j, 'new-gen-worker-2', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'manual_recovery_required', $res->get_error_code() );
+	assert_equals( array( 'elements' => array( 'divergent_895' ) ), $GLOBALS['mock_post_storage'][895] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:895', 'new-gen-worker-2', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: PENDING original-generation cleanup remains possible where resource/fence identity proves same execution', function () {
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:896', 'orig-worker', 30 );
+	assert_true( $lock['acquired'] );
+
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 896,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => array( 'elements' => array( 'clean_base_896' ) ),
+	) );
+
+	// Partial mutation occurred before execution failure:
+	$GLOBALS['mock_post_storage'][896] = array( 'elements' => array( 'partial_failed_mutation' ) );
+
+	// Same worker cleaning up its own failure in the same execution:
+	$res = Full_Elementor_MCP_Journal::rollback( $j, 'orig-worker', (int) $lock['fencing_token'] );
+	assert_true( is_array( $res ) && ! empty( $res['success'] ) );
+	assert_equals( array( 'elements' => array( 'clean_base_896' ) ), $GLOBALS['mock_post_storage'][896] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:896', 'orig-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: pending CREATE with created ID but no after_hash remains conservative', function () {
+	$j = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+
+	$GLOBALS['mock_created_objects'][897] = 'publish';
+	$GLOBALS['mock_posts'][897] = array( 'ID' => 897, 'post_title' => 'Page 897' );
+	Full_Elementor_MCP_Journal::record_created_object_id( $j, 897, 1 );
+	// Notice: NOT committed! No after_hash exists.
+
+	// Caller acquires lock on created object resource (post:897)
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:897', 'post-worker', 30 );
+	assert_true( $lock['acquired'] );
+
+	// Normal rollback MUST NOT trash the object without an authoritative baseline
+	$res = Full_Elementor_MCP_Journal::rollback( $j, 'post-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'manual_recovery_required', $res->get_error_code() );
+	assert_equals( 'publish', $GLOBALS['mock_created_objects'][897] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:897', 'post-worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'WAL-Integrity: persisted Elementor page-data mismatch blocks rollback', function () {
+	$resource_key = 'post:898';
+	$owner_id     = 'data-verifier';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$before_data  = array( 'elements' => array( 'widget_1' ) );
+	$mutated_data = array( 'elements' => array( 'widget_1', 'widget_2' ) );
+
+	$GLOBALS['mock_post_storage'][898] = $mutated_data;
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 898,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => $before_data,
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, $mutated_data, (int) $lock['fencing_token'] );
+
+	// Simulate persistent DB write failure: update_post_metadata filter rejects _elementor_data write
+	add_filter( 'update_post_metadata', function ( $null, $object_id, $meta_key, $meta_value ) {
+		if ( 898 === (int) $object_id && '_elementor_data' === $meta_key ) {
+			return false; // persistent DB write rejected
+		}
+		return null;
+	}, 10, 4 );
+
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	remove_all_filters( 'update_post_metadata' );
+
+	// Journal must NOT become rolled_back
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_true( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK !== $entry['status'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
+} );
+
 echo "\n=======================================================\n";
 echo " Test Results: {$tests_passed}/" . ( $tests_passed + $tests_failed ) . " passed.\n";
 echo "=======================================================\n\n";

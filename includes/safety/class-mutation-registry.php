@@ -969,15 +969,47 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$page_data     = self::capture_page_data_callback( $post_id );
 		$page_settings = self::capture_page_settings_callback( $post_id );
 
+		$get_prop = static function ( mixed $obj, string $key, mixed $default = '' ): mixed {
+			if ( is_array( $obj ) ) {
+				return $obj[ $key ] ?? $default;
+			}
+			if ( is_object( $obj ) ) {
+				return $obj->$key ?? $default;
+			}
+			return $default;
+		};
+
+		$raw_password = (string) $get_prop( $post, 'post_password', '' );
+
+		$thumb_id = function_exists( 'get_post_thumbnail_id' ) ? (int) get_post_thumbnail_id( $post_id ) : 0;
+		if ( 0 === $thumb_id && function_exists( 'get_post_meta' ) ) {
+			$thumb_id = (int) get_post_meta( $post_id, '_thumbnail_id', true );
+		}
+
+		$template_type = function_exists( 'get_post_meta' ) ? (string) get_post_meta( $post_id, '_elementor_template_type', true ) : '';
+		$conditions    = function_exists( 'get_post_meta' ) ? get_post_meta( $post_id, '_elementor_conditions', true ) : null;
+		$popup_display = function_exists( 'get_post_meta' ) ? get_post_meta( $post_id, '_elementor_popup_display_settings', true ) : null;
+
 		return array(
-			'exists'        => true,
-			'ID'            => $post_id,
-			'status'        => $status,
-			'post_title'    => $post ? (string) ( is_array( $post ) ? ( $post['post_title'] ?? '' ) : ( $post->post_title ?? '' ) ) : '',
-			'post_name'     => $post ? (string) ( is_array( $post ) ? ( $post['post_name'] ?? '' ) : ( $post->post_name ?? '' ) ) : '',
-			'post_type'     => $post ? (string) ( is_array( $post ) ? ( $post['post_type'] ?? '' ) : ( $post->post_type ?? '' ) ) : '',
-			'page_data'     => $page_data,
-			'page_settings' => $page_settings,
+			'exists'                  => true,
+			'ID'                      => $post_id,
+			'status'                  => $status,
+			'post_type'               => (string) $get_prop( $post, 'post_type', '' ),
+			'post_title'              => (string) $get_prop( $post, 'post_title', '' ),
+			'post_name'               => (string) $get_prop( $post, 'post_name', '' ),
+			'post_content'            => (string) $get_prop( $post, 'post_content', '' ),
+			'post_excerpt'            => (string) $get_prop( $post, 'post_excerpt', '' ),
+			'post_parent'             => (int) $get_prop( $post, 'post_parent', 0 ),
+			'menu_order'              => (int) $get_prop( $post, 'menu_order', 0 ),
+			'comment_status'          => (string) $get_prop( $post, 'comment_status', '' ),
+			'ping_status'             => (string) $get_prop( $post, 'ping_status', '' ),
+			'post_password_hash'      => '' !== $raw_password ? hash( 'sha256', $raw_password ) : '',
+			'featured_image_id'       => $thumb_id,
+			'elementor_template_type' => $template_type,
+			'template_conditions'     => $conditions,
+			'popup_display_settings'  => $popup_display,
+			'page_data'               => $page_data,
+			'page_settings'           => $page_settings,
 		);
 	}
 
@@ -1022,17 +1054,56 @@ class Full_Elementor_MCP_Mutation_Registry {
 
 		if ( class_exists( 'Full_Elementor_MCP_Data' ) ) {
 			$data_layer = new \Full_Elementor_MCP_Data();
-			return $data_layer->save_page_data( $post_id, $before_state );
+			$save_res   = $data_layer->save_page_data( $post_id, $before_state );
+			if ( is_wp_error( $save_res ) ) {
+				return $save_res;
+			}
+		} else {
+			// Fallback: direct meta restore.
+			$json = wp_json_encode( $before_state );
+			if ( false === $json ) {
+				return new \WP_Error( 'json_encode_failed', __( 'Failed to encode element data as JSON.', 'full-elementor-mcp' ) );
+			}
+
+			update_post_meta( $post_id, '_elementor_data', wp_slash( $json ) );
+			update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
 		}
 
-		// Fallback: direct meta restore.
-		$json = wp_json_encode( $before_state );
-		if ( false === $json ) {
-			return new \WP_Error( 'json_encode_failed', __( 'Failed to encode element data as JSON.', 'full-elementor-mcp' ) );
+		// Verify persisted state from authoritative storage BEFORE claiming success.
+		$persisted_raw = get_post_meta( $post_id, '_elementor_data', true );
+		if ( is_string( $persisted_raw ) ) {
+			$persisted_data = json_decode( wp_unslash( $persisted_raw ), true );
+		} elseif ( is_array( $persisted_raw ) ) {
+			$persisted_data = $persisted_raw;
+		} else {
+			$persisted_data = null;
 		}
 
-		update_post_meta( $post_id, '_elementor_data', wp_slash( $json ) );
-		update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+		if ( ! is_array( $persisted_data ) ) {
+			return new \WP_Error(
+				'rollback_write_failed',
+				__( 'Persisted element data meta is invalid or missing after restoration write.', 'full-elementor-mcp' )
+			);
+		}
+
+		$persisted_canonical = Full_Elementor_MCP_Journal::canonicalize_data( $persisted_data );
+		$expected_canonical  = Full_Elementor_MCP_Journal::canonicalize_data( $before_state );
+		if ( $persisted_canonical !== $expected_canonical ) {
+			return new \WP_Error(
+				'rollback_verification_failed',
+				__( 'Database write failed during page data restore: persisted storage does not match before-state.', 'full-elementor-mcp' )
+			);
+		}
+
+		// Invalidate Elementor CSS cache.
+		delete_post_meta( $post_id, '_elementor_css' );
+		$upload_dir = function_exists( 'wp_get_upload_dir' ) ? wp_get_upload_dir() : null;
+		if ( is_array( $upload_dir ) && isset( $upload_dir['basedir'] ) ) {
+			$css_file = $upload_dir['basedir'] . '/elementor/css/post-' . $post_id . '.css';
+			if ( file_exists( $css_file ) ) {
+				@unlink( $css_file );
+			}
+		}
 
 		return true;
 	}

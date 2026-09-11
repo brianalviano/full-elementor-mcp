@@ -599,7 +599,8 @@ class Full_Elementor_MCP_Journal {
 			SET created_object_id = %d, updated_at = UTC_TIMESTAMP()
 			WHERE id = %d
 			  AND status = %s
-			  AND fencing_token = %d",
+			  AND fencing_token = %d
+			  AND (created_object_id IS NULL OR created_object_id = 0)",
 			$created_object_id,
 			$journal_id,
 			self::STATUS_PENDING,
@@ -616,14 +617,39 @@ class Full_Elementor_MCP_Journal {
 
 		if ( 0 === $updated ) {
 			$recheck = self::get_entry( $journal_id );
-			if ( $recheck && (int) ( $recheck['created_object_id'] ?? 0 ) === $created_object_id && self::STATUS_PENDING === $recheck['status'] && (int) $recheck['fencing_token'] === $fencing_token ) {
-				return true;
+			if ( ! $recheck ) {
+				return new \WP_Error( 'journal_not_found', __( 'Journal entry not found during verification.', 'full-elementor-mcp' ) );
 			}
 
-			if ( $recheck && (int) $recheck['fencing_token'] !== $fencing_token ) {
+			if ( self::STATUS_PENDING !== $recheck['status'] ) {
+				return new \WP_Error(
+					'journal_state_conflict',
+					__( 'Could not record created object ID: journal is not in pending status.', 'full-elementor-mcp' )
+				);
+			}
+
+			if ( (int) $recheck['fencing_token'] !== $fencing_token ) {
 				return new \WP_Error(
 					'stale_writer_conflict',
 					__( 'Could not record created object ID: fencing token mismatch.', 'full-elementor-mcp' )
+				);
+			}
+
+			$existing_id = (int) ( $recheck['created_object_id'] ?? 0 );
+			if ( $existing_id === $created_object_id ) {
+				// Idempotent retry under same fencing token and pending status.
+				return true;
+			}
+
+			if ( $existing_id > 0 && $existing_id !== $created_object_id ) {
+				return new \WP_Error(
+					'created_object_conflict',
+					sprintf(
+						/* translators: 1: existing ID, 2: attempted ID */
+						__( 'Cannot overwrite already recorded created_object_id %1$d with new ID %2$d (write-once identity violation).', 'full-elementor-mcp' ),
+						$existing_id,
+						$created_object_id
+					)
 				);
 			}
 
@@ -665,13 +691,21 @@ class Full_Elementor_MCP_Journal {
 			);
 		}
 
-		// For create strategies, capture post-creation persistent state fingerprint if not already provided.
+		// For tracked creation strategies, require created_object_id to be durably recorded first,
+		// and ALWAYS generate after_state from authoritative persistent recapture.
 		$strategy  = Full_Elementor_MCP_Mutation_Registry::get( $entry['ability'] );
 		$is_create = $strategy && ( Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'] || ! empty( $strategy['created_object_tracking'] ) );
-		if ( $is_create && (int) ( $entry['created_object_id'] ?? 0 ) > 0 ) {
-			if ( ! is_array( $after_state ) || ! isset( $after_state['exists'] ) ) {
-				$after_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( (int) $entry['created_object_id'] );
+		if ( $is_create ) {
+			$created_id = (int) ( $entry['created_object_id'] ?? 0 );
+			if ( $created_id <= 0 ) {
+				return new \WP_Error(
+					'created_object_id_required',
+					__( 'Cannot commit creation mutation: created_object_id must be durably recorded prior to commit.', 'full-elementor-mcp' )
+				);
 			}
+
+			// Authoritatively recapture persistent state. Caller result payload must never replace safety fingerprint.
+			$after_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( $created_id );
 		}
 
 		$after_serialized = self::serialize_state( $after_state );
@@ -989,8 +1023,10 @@ class Full_Elementor_MCP_Journal {
 		if ( $is_create ) {
 			$target_id = (int) ( $entry['created_object_id'] ?? 0 );
 			if ( $target_id <= 0 ) {
-				// Object was never created or recorded in DB. No persistent resource was mutated.
-				return self::mark_rolled_back_internal( $journal_id, $entry['status'], 0 );
+				return new \WP_Error(
+					'created_object_identity_unknown',
+					__( 'Cannot rollback creation mutation: created_object_id is missing or untracked. Entity may exist in unrecorded state.', 'full-elementor-mcp' )
+				);
 			}
 		} else {
 			$target_id = (int) $entry['object_id'];
@@ -1034,70 +1070,131 @@ class Full_Elementor_MCP_Journal {
 		$is_force = ( true === ( $options['force'] ?? false ) );
 
 		// Conflict detection and crash-safe idempotent rollback reconciliation.
-		if ( self::STATUS_COMMITTED === $entry['status'] && ! empty( $entry['after_hash'] ) && ! $is_force ) {
-			if ( $is_create ) {
-				// Check if already trashed/deleted from prior successful rollback attempt (idempotent retry).
-				$status = function_exists( 'get_post_status' ) ? get_post_status( $target_id ) : false;
-				if ( false === $status || 'trash' === $status || 'trashed' === $status ) {
-					// Created object is already gone; reconcile journal status.
-					return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
-				}
+		if ( ! $is_force ) {
+			if ( self::STATUS_COMMITTED === $entry['status'] ) {
+				if ( $is_create ) {
+					// Check if already trashed/deleted from prior successful rollback attempt (idempotent retry).
+					$status = function_exists( 'get_post_status' ) ? get_post_status( $target_id ) : false;
+					if ( false === $status || 'trash' === $status || 'trashed' === $status ) {
+						// Created object is already gone; reconcile journal status.
+						return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
+					}
 
-				// Recapture created object state and compare against committed after_hash.
-				$current_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( $target_id );
-				$current_hash  = self::hash_state( $current_state );
-				if ( is_wp_error( $current_hash ) || '' === $current_hash ) {
-					return new \WP_Error(
-						'journal_state_unverifiable',
-						__( 'Cannot rollback: created object state hashing failed during conflict verification.', 'full-elementor-mcp' )
-					);
-				}
+					// Recapture created object state and compare against committed after_hash.
+					$current_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( $target_id );
+					$current_hash  = self::hash_state( $current_state );
+					if ( is_wp_error( $current_hash ) || '' === $current_hash ) {
+						return new \WP_Error(
+							'journal_state_unverifiable',
+							__( 'Cannot rollback: created object state hashing failed during conflict verification.', 'full-elementor-mcp' )
+						);
+					}
 
-				if ( ! hash_equals( (string) $entry['after_hash'], $current_hash ) ) {
-					return new \WP_Error(
-						'journal_state_conflict',
-						__( 'Cannot rollback created object: entity has been modified after creation (newer work detected).', 'full-elementor-mcp' )
-					);
+					if ( empty( $entry['after_hash'] ) || ! hash_equals( (string) $entry['after_hash'], $current_hash ) ) {
+						return new \WP_Error(
+							'journal_state_conflict',
+							__( 'Cannot rollback created object: entity has been modified after creation (newer work detected).', 'full-elementor-mcp' )
+						);
+					}
+				} else {
+					$capture_fn = $strategy['capture_after'] ?? $strategy['capture_before'];
+					if ( ! is_callable( $capture_fn ) ) {
+						return new \WP_Error(
+							'journal_state_unverifiable',
+							__( 'Cannot rollback: strategy does not provide state capture for conflict verification.', 'full-elementor-mcp' )
+						);
+					}
+
+					$live_state = $capture_fn( $target_id, $resolver_args, null );
+					if ( is_wp_error( $live_state ) || null === $live_state ) {
+						return new \WP_Error(
+							'journal_state_unverifiable',
+							sprintf(
+								/* translators: %s: failure detail */
+								__( 'Cannot rollback: live state could not be captured for verification: %s', 'full-elementor-mcp' ),
+								is_wp_error( $live_state ) ? $live_state->get_error_message() : 'State returned null'
+							)
+						);
+					}
+
+					$live_hash = self::hash_state( $live_state );
+					if ( is_wp_error( $live_hash ) || '' === $live_hash ) {
+						return new \WP_Error(
+							'journal_state_unverifiable',
+							__( 'Cannot rollback: live state hashing failed during conflict verification.', 'full-elementor-mcp' )
+						);
+					}
+
+					// Crash-safe idempotent retry: resource was already successfully restored to before_state!
+					if ( hash_equals( (string) $entry['before_hash'], $live_hash ) ) {
+						return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
+					}
+
+					if ( empty( $entry['after_hash'] ) || ! hash_equals( (string) $entry['after_hash'], $live_hash ) ) {
+						return new \WP_Error(
+							'journal_state_conflict',
+							__( 'Cannot rollback: live state has diverged from journal committed state (newer modifications detected).', 'full-elementor-mcp' )
+						);
+					}
 				}
 			} else {
-				$capture_fn = $strategy['capture_after'] ?? $strategy['capture_before'];
-				if ( ! is_callable( $capture_fn ) ) {
-					return new \WP_Error(
-						'journal_state_unverifiable',
-						__( 'Cannot rollback: strategy does not provide state capture for conflict verification.', 'full-elementor-mcp' )
-					);
-				}
+				// STATUS_PENDING or STATUS_FAILED:
+				if ( $is_create ) {
+					// Check if already trashed/deleted from prior rollback attempt (idempotent retry).
+					$status = function_exists( 'get_post_status' ) ? get_post_status( $target_id ) : false;
+					if ( false === $status || 'trash' === $status || 'trashed' === $status ) {
+						return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
+					}
 
-				$live_state = $capture_fn( $target_id, $resolver_args, null );
-				if ( is_wp_error( $live_state ) || null === $live_state ) {
-					return new \WP_Error(
-						'journal_state_unverifiable',
-						sprintf(
-							/* translators: %s: failure detail */
-							__( 'Cannot rollback: live state could not be captured for verification: %s', 'full-elementor-mcp' ),
-							is_wp_error( $live_state ) ? $live_state->get_error_message() : 'State returned null'
-						)
-					);
-				}
+					// For CREATE journals without an authoritative committed after_hash,
+					// do NOT automatically trash. Fail closed with manual_recovery_required.
+					if ( empty( $entry['after_hash'] ) ) {
+						return new \WP_Error(
+							'manual_recovery_required',
+							__( 'Cannot safely rollback uncommitted created entity without authoritative baseline: manual recovery required.', 'full-elementor-mcp' )
+						);
+					}
 
-				$live_hash = self::hash_state( $live_state );
-				if ( is_wp_error( $live_hash ) || '' === $live_hash ) {
-					return new \WP_Error(
-						'journal_state_unverifiable',
-						__( 'Cannot rollback: live state hashing failed during conflict verification.', 'full-elementor-mcp' )
+					$current_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( $target_id );
+					$current_hash  = self::hash_state( $current_state );
+					if ( is_wp_error( $current_hash ) || ! hash_equals( (string) $entry['after_hash'], $current_hash ) ) {
+						return new \WP_Error(
+							'journal_state_conflict',
+							__( 'Cannot rollback created object: entity state diverged or unverifiable.', 'full-elementor-mcp' )
+						);
+					}
+				} else {
+					$is_same_generation = (
+						$rollback_resource_key === (string) $entry['resource_key'] &&
+						$caller_fencing_token === (int) $entry['fencing_token']
 					);
-				}
 
-				// Crash-safe idempotent retry: resource was already successfully restored to before_state!
-				if ( hash_equals( (string) $entry['before_hash'], $live_hash ) ) {
-					return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
-				}
+					if ( ! $is_same_generation ) {
+						// Attempting rollback under a NEW generation / different fence.
+						$capture_fn = $strategy['capture_before'] ?? ( $strategy['capture_after'] ?? null );
+						if ( ! is_callable( $capture_fn ) ) {
+							return new \WP_Error(
+								'journal_state_unverifiable',
+								__( 'Cannot rollback pending/failed journal: state cannot be verified.', 'full-elementor-mcp' )
+							);
+						}
 
-				if ( ! hash_equals( (string) $entry['after_hash'], $live_hash ) ) {
-					return new \WP_Error(
-						'journal_state_conflict',
-						__( 'Cannot rollback: live state has diverged from journal committed state (newer modifications detected).', 'full-elementor-mcp' )
-					);
+						$current_state = $capture_fn( $target_id, $resolver_args, null );
+						$current_hash  = ( is_wp_error( $current_state ) || null === $current_state ) ? '' : self::hash_state( $current_state );
+
+						if ( ! is_wp_error( $current_hash ) && '' !== $current_hash && hash_equals( (string) $entry['before_hash'], $current_hash ) ) {
+							// Current state already equals before_hash: no write needed, reconcile status safely.
+							return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
+						}
+
+						// Current state differs from before_hash and no authoritative after_hash exists:
+						return new \WP_Error(
+							'manual_recovery_required',
+							__( 'Cannot rollback pending or failed journal under a new generation: live state differs from before-state and no committed baseline exists.', 'full-elementor-mcp' )
+						);
+					}
+					// If is_same_generation: caller owns original journal generation on same resource,
+					// allowed as same-execution failure cleanup.
 				}
 			}
 		}
@@ -1382,17 +1479,17 @@ class Full_Elementor_MCP_Journal {
 						'error'             => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
 				} else {
-					// No object was created. Resolve bookkeeping without deleting anything.
+					// ID was not recorded before crash. State is unknown. Do NOT assume no object was created.
 					$mf = self::mark_failed(
 						$journal_id,
-						'abandoned_create_no_object_created',
+						'abandoned_create_identity_unknown',
 						$journal_fence
 					);
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
 						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_no_object_created',
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_identity_unknown',
 						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
 				}
