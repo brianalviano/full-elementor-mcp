@@ -835,7 +835,7 @@ run_test( 'Registry Coverage Audit: every registered readonly=false ability in c
 
 	$data             = new Full_Elementor_MCP_Data();
 	$factory          = new Full_Elementor_MCP_Element_Factory();
-	$schema_generator = new Full_Elementor_MCP_Schema_Generator( $data );
+	$schema_generator = new Full_Elementor_MCP_Schema_Generator();
 	$validator        = new Full_Elementor_MCP_Settings_Validator( $schema_generator );
 
 	$registrar = new Full_Elementor_MCP_Ability_Registrar( $data, $factory, $schema_generator, $validator );
