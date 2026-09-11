@@ -384,17 +384,30 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		// 11. Dry-Run Handling (predictive execution analysis):
 		if ( $is_dry_run ) {
+			$chk_req = false;
+			$chk_sup = false;
+			$chk_cap = 'unsupported';
+			if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+				$chk_policy = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint_requirement( $ability, $input, $strategy );
+				$chk_req    = ( Full_Elementor_MCP_Checkpoint_Manager::REQUIREMENT_REQUIRED === $chk_policy );
+				$chk_cap    = Full_Elementor_MCP_Checkpoint_Strategies::get_restore_capability( $resource_key, 'automatic', array( 'is_permanent_delete' => ! empty( $security_profile['irreversible'] ) ) );
+				$chk_sup    = ( Full_Elementor_MCP_Checkpoint_Strategies::CAPABILITY_UNSUPPORTED !== $chk_cap );
+			}
+
 			return array(
-				'dry_run'               => true,
-				'allowed'               => true,
-				'ability'               => $ability,
-				'resource_key'          => $resource_key,
-				'object_id'             => $object_id,
-				'security_profile'      => $security_profile,
-				'protected_resource'    => ! empty( $security_profile['protected_resource_possible'] ),
-				'confirmation_required' => $requires_confirmation,
-				'rollback_supported'    => Full_Elementor_MCP_Mutation_Registry::supports_rollback_for_args( $ability, $input ),
-				'reasons'               => $security_profile['reasons'] ?? array(),
+				'dry_run'                       => true,
+				'allowed'                       => true,
+				'ability'                       => $ability,
+				'resource_key'                  => $resource_key,
+				'object_id'                     => $object_id,
+				'security_profile'              => $security_profile,
+				'protected_resource'            => ! empty( $security_profile['protected_resource_possible'] ),
+				'confirmation_required'         => $requires_confirmation,
+				'rollback_supported'            => Full_Elementor_MCP_Mutation_Registry::supports_rollback_for_args( $ability, $input ),
+				'checkpoint_required'           => $chk_req,
+				'checkpoint_supported'          => $chk_sup,
+				'checkpoint_restore_capability' => $chk_cap,
+				'reasons'                       => $security_profile['reasons'] ?? array(),
 			);
 		}
 
@@ -526,6 +539,43 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				return is_wp_error( $attach_res )
 					? $attach_res
 					: new \WP_Error( 'idempotency_journal_binding_failed', __( 'Could not attach WAL journal to idempotency claim.', 'full-elementor-mcp' ) );
+			}
+		}
+
+		// 17.5. Durable Encrypted Checkpoint Policy Gate:
+		$checkpoint_info = null;
+		if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+			$checkpoint_req   = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint_requirement( $ability, $input, $strategy );
+			$caller_requested = ! empty( $input['create_checkpoint'] ) || ! empty( $input['_safety']['create_checkpoint'] );
+
+			$should_create_checkpoint = ( Full_Elementor_MCP_Checkpoint_Manager::REQUIREMENT_REQUIRED === $checkpoint_req )
+				|| ( Full_Elementor_MCP_Checkpoint_Manager::REQUIREMENT_OPTIONAL === $checkpoint_req && $caller_requested );
+
+			if ( $should_create_checkpoint ) {
+				$chk_meta = array(
+					'source_ability'      => $ability,
+					'source_journal_id'   => $journal_id,
+					'state'               => $before_state,
+					'user_id'             => $user_id,
+					'credential_uuid'     => $cred_uuid,
+					'is_permanent_delete' => ! empty( $security_profile['irreversible'] ),
+				);
+
+				$chk_type = ! empty( $security_profile['irreversible'] ) ? 'recovery' : 'automatic';
+				$chk_res  = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( $resource_key, $chk_type, $chk_meta );
+
+				if ( is_wp_error( $chk_res ) ) {
+					if ( Full_Elementor_MCP_Checkpoint_Manager::REQUIREMENT_REQUIRED === $checkpoint_req ) {
+						Full_Elementor_MCP_Journal::mark_failed( $journal_id, $chk_res->get_error_code(), $fencing_token );
+						Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+						if ( $idemp_token_key ) {
+							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $chk_res->get_error_code() );
+						}
+						return $chk_res;
+					}
+				} else {
+					$checkpoint_info = $chk_res;
+				}
 			}
 		}
 

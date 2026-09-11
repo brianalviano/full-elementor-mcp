@@ -26,9 +26,9 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Current database schema version.
 	 *
-	 * 1.0.3: Safety-schema enhancement adding persistent rollback_supported column to WAL journal.
+	 * 1.1.0: Phase 5 encrypted checkpoints and restore engine schema extensions.
 	 */
-	public const DB_VERSION = '1.0.3';
+	public const DB_VERSION = '1.1.0';
 
 	/**
 	 * Option key storing installed schema version.
@@ -115,24 +115,40 @@ class Full_Elementor_MCP_Database_Installer {
 				KEY idx_created (created_at)
 			) {$charset_collate};",
 
-			// 2. Checkpoints table.
+			// 2. Checkpoints table: durable, encrypted historical snapshots.
 			"CREATE TABLE {$checkpoints_table} (
 				id bigint(20) unsigned NOT NULL auto_increment,
+				checkpoint_uuid varchar(64) NOT NULL default '',
 				created_at datetime NOT NULL default CURRENT_TIMESTAMP,
-				label varchar(255) NOT NULL,
-				description text default NULL,
-				trigger_type varchar(20) NOT NULL default 'manual',
-				file_path varchar(500) NOT NULL,
-				file_hash_hmac varchar(64) NOT NULL,
+				resource_key varchar(128) NOT NULL default '',
+				object_type varchar(30) NOT NULL default '',
+				object_id bigint(20) unsigned NOT NULL default 0,
+				checkpoint_type varchar(30) NOT NULL default 'automatic',
+				restore_capability varchar(30) NOT NULL default 'exact',
+				payload_schema_version int(10) unsigned NOT NULL default 1,
 				encryption_algorithm varchar(30) NOT NULL default 'none',
 				key_version int(10) unsigned NOT NULL default 1,
 				key_id varchar(64) default NULL,
+				nonce varchar(64) NOT NULL default '',
+				auth_tag varchar(64) default NULL,
+				encrypted_payload longtext default NULL,
+				state_hash varchar(64) NOT NULL default '',
+				compression_algorithm varchar(20) default 'none',
 				size_bytes bigint(20) unsigned default 0,
-				items_count int(10) unsigned default 0,
-				elementor_version varchar(20) default NULL,
-				wp_version varchar(20) default NULL,
+				label varchar(255) NOT NULL default '',
+				description text default NULL,
+				trigger_type varchar(20) NOT NULL default 'manual',
+				file_path varchar(500) NOT NULL default '',
+				file_hash_hmac varchar(64) NOT NULL default '',
+				source_ability varchar(100) default NULL,
+				source_journal_id bigint(20) unsigned default NULL,
 				created_by bigint(20) unsigned default NULL,
+				credential_uuid varchar(64) default NULL,
+				is_pinned tinyint(1) NOT NULL default 0,
 				PRIMARY KEY  (id),
+				KEY idx_checkpoint_uuid (checkpoint_uuid),
+				KEY idx_resource (resource_key),
+				KEY idx_checkpoint_type (checkpoint_type),
 				KEY idx_created (created_at)
 			) {$charset_collate};",
 
@@ -203,6 +219,9 @@ class Full_Elementor_MCP_Database_Installer {
 			}
 		}
 
+		// Ensure any missing columns from expected schema are added via ALTER TABLE migration:
+		self::ensure_missing_columns();
+
 		// Verify that all 4 required tables, columns, indexes, and unique constraints exist!
 		if ( ! self::verify_schema() ) {
 			return false;
@@ -218,8 +237,47 @@ class Full_Elementor_MCP_Database_Installer {
 	}
 
 	/**
-	 * Checks if schema upgrade is needed and executes it.
-	 *
+	 * Ensures all expected columns exist on all four safety tables, issuing ALTER TABLE ADD COLUMN where missing.
+	 */
+	public static function ensure_missing_columns(): void {
+		global $wpdb;
+
+		$col_defs = array(
+			'checkpoint_uuid'        => "varchar(64) NOT NULL default ''",
+			'resource_key'           => "varchar(128) NOT NULL default ''",
+			'object_type'            => "varchar(30) NOT NULL default ''",
+			'object_id'              => "bigint(20) unsigned NOT NULL default 0",
+			'checkpoint_type'        => "varchar(30) NOT NULL default 'automatic'",
+			'restore_capability'     => "varchar(30) NOT NULL default 'exact'",
+			'payload_schema_version' => "int(10) unsigned NOT NULL default 1",
+			'nonce'                  => "varchar(64) NOT NULL default ''",
+			'auth_tag'               => "varchar(64) default NULL",
+			'encrypted_payload'      => "longtext default NULL",
+			'state_hash'             => "varchar(64) NOT NULL default ''",
+			'compression_algorithm'  => "varchar(20) default 'none'",
+			'source_ability'         => "varchar(100) default NULL",
+			'source_journal_id'      => "bigint(20) unsigned default NULL",
+			'credential_uuid'        => "varchar(64) default NULL",
+			'is_pinned'              => "tinyint(1) NOT NULL default 0",
+			'rollback_supported'     => "tinyint(1) NOT NULL default 0",
+		);
+
+		$expected = self::get_expected_schema();
+		foreach ( $expected as $table => $spec ) {
+			$actual = self::get_table_columns( $table );
+			if ( empty( $actual ) ) {
+				continue;
+			}
+			foreach ( $spec['columns'] as $col ) {
+				$col_lower = strtolower( $col );
+				if ( ! in_array( $col_lower, $actual, true ) && isset( $col_defs[ $col_lower ] ) ) {
+					$def = $col_defs[ $col_lower ];
+					$wpdb->query( "ALTER TABLE {$table} ADD COLUMN {$col_lower} {$def}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				}
+			}
+		}
+	}
+
 	/**
 	 * Centralized specification of required safety schema constraints across all 4 tables.
 	 *
@@ -280,27 +338,42 @@ class Full_Elementor_MCP_Database_Installer {
 				'primary'       => 'id',
 				'single_unique' => 'id',
 			),
-			// Checkpoints table: full-site rollback points.
+			// Checkpoints table: full-site and resource rollback points.
 			self::get_checkpoints_table() => array(
 				'columns'       => array(
 					'id',
+					'checkpoint_uuid',
 					'created_at',
+					'resource_key',
+					'object_type',
+					'object_id',
+					'checkpoint_type',
+					'restore_capability',
+					'payload_schema_version',
+					'encryption_algorithm',
+					'key_version',
+					'key_id',
+					'nonce',
+					'auth_tag',
+					'encrypted_payload',
+					'state_hash',
+					'compression_algorithm',
+					'size_bytes',
 					'label',
 					'description',
 					'trigger_type',
 					'file_path',
 					'file_hash_hmac',
-					'encryption_algorithm',
-					'key_version',
-					'key_id',
-					'size_bytes',
-					'items_count',
-					'elementor_version',
-					'wp_version',
+					'source_ability',
+					'source_journal_id',
 					'created_by',
+					'credential_uuid',
+					'is_pinned',
 				),
 				'indexes'       => array(
 					'idx_created',
+					'idx_checkpoint_uuid',
+					'idx_resource',
 				),
 				'primary'       => 'id',
 				'single_unique' => 'id',

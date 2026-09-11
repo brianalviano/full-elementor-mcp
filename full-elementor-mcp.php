@@ -218,6 +218,9 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-safe-writes.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-confirmation-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-idempotency-manager.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-checkpoint-crypto.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-checkpoint-strategies.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-checkpoint-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-middleware.php';
 
 	// Initialize mutation strategies:
