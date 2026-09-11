@@ -41,6 +41,11 @@ class Full_Elementor_MCP_Journal {
 	public const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 	/**
+	 * Maximum size in bytes for serialized before_state in WAL payload (4 MB).
+	 */
+	public const MAX_BEFORE_STATE_BYTES = 4194304;
+
+	/**
 	 * Permitted status transitions in the journal state machine.
 	 *
 	 * Legal paths:
@@ -412,8 +417,34 @@ class Full_Elementor_MCP_Journal {
 		}
 		$resource_key = $expected_key;
 
+		// Resolve expected object ID from strategy and actual args.
+		$is_create = Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
+		if ( $is_create ) {
+			$expected_object_id = 0;
+		} else {
+			$expected_object_id = Full_Elementor_MCP_Mutation_Registry::resolve_object_id( $ability, $actual_args );
+			if ( is_wp_error( $expected_object_id ) ) {
+				return $expected_object_id;
+			}
+		}
+
+		if ( isset( $params['object_id'] ) ) {
+			$provided_object_id = (int) $params['object_id'];
+			if ( $provided_object_id !== $expected_object_id ) {
+				return new \WP_Error(
+					'strategy_object_mismatch',
+					sprintf(
+						/* translators: 1: provided ID, 2: expected ID */
+						__( 'Caller-provided object ID %1$d does not match expected strategy object ID %2$d.', 'full-elementor-mcp' ),
+						$provided_object_id,
+						$expected_object_id
+					)
+				);
+			}
+		}
+		$object_id = $expected_object_id;
+
 		// Enforce before_state contract and derive durable rollback capability.
-		$is_create         = Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
 		$supports_rollback = Full_Elementor_MCP_Mutation_Registry::supports_rollback_for_args( $ability, $actual_args );
 
 		if ( $is_create ) {
@@ -432,18 +463,37 @@ class Full_Elementor_MCP_Journal {
 				}
 				$before_state_raw = $params['before_state'];
 			} else {
-				$before_state_raw = $params['before_state'] ?? null;
+				// Non-rollbackable: do NOT persist arbitrary caller before_state (prevent secret leakage).
+				$before_state_raw = null;
 			}
 		}
 
 		// Serialize pre-mutation state.
-		$before_state_str = self::serialize_state( $before_state_raw );
-		if ( is_wp_error( $before_state_str ) ) {
-			return $before_state_str;
+		if ( null !== $before_state_raw ) {
+			$before_state_str = self::serialize_state( $before_state_raw );
+			if ( is_wp_error( $before_state_str ) ) {
+				return $before_state_str;
+			}
+
+			// Size limit check on WAL payload.
+			if ( strlen( $before_state_str ) > self::MAX_BEFORE_STATE_BYTES ) {
+				return new \WP_Error(
+					'journal_state_too_large',
+					sprintf(
+						/* translators: 1: state size in bytes, 2: maximum allowed bytes */
+						__( 'Serialized before_state size (%1$d bytes) exceeds WAL payload limit of %2$d bytes.', 'full-elementor-mcp' ),
+						strlen( $before_state_str ),
+						self::MAX_BEFORE_STATE_BYTES
+					)
+				);
+			}
+
+			$before_hash = hash( 'sha256', $before_state_str );
+		} else {
+			$before_state_str = null;
+			$before_hash      = null;
 		}
 
-		$before_hash     = hash( 'sha256', $before_state_str );
-		$object_id       = max( 0, (int) ( $params['object_id'] ?? 0 ) );
 		$user_id         = ! empty( $params['user_id'] ) ? (int) $params['user_id'] : get_current_user_id();
 		$credential_uuid = isset( $params['credential_uuid'] ) ? sanitize_text_field( (string) $params['credential_uuid'] ) : null;
 		$table           = Full_Elementor_MCP_Database_Installer::get_journal_table();
@@ -523,6 +573,26 @@ class Full_Elementor_MCP_Journal {
 			);
 		}
 
+		$row = self::get_entry( $journal_id );
+		if ( ! $row ) {
+			return new \WP_Error(
+				'journal_not_found',
+				__( 'Journal entry not found.', 'full-elementor-mcp' )
+			);
+		}
+
+		$strategy = Full_Elementor_MCP_Mutation_Registry::get( (string) $row['ability'] );
+		if ( ! $strategy || empty( $strategy['created_object_tracking'] ) ) {
+			return new \WP_Error(
+				'invalid_journal_operation',
+				sprintf(
+					/* translators: %s: ability name */
+					__( 'Ability "%s" does not support created object tracking.', 'full-elementor-mcp' ),
+					esc_html( (string) $row['ability'] )
+				)
+			);
+		}
+
 		$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
 		$sql   = $wpdb->prepare(
 			"UPDATE {$table}
@@ -545,10 +615,16 @@ class Full_Elementor_MCP_Journal {
 		}
 
 		if ( 0 === $updated ) {
-			// Check if already updated to identical created_object_id (idempotent re-entry).
-			$row = self::get_entry( $journal_id );
-			if ( $row && (int) ( $row['created_object_id'] ?? 0 ) === $created_object_id && self::STATUS_PENDING === $row['status'] ) {
+			$recheck = self::get_entry( $journal_id );
+			if ( $recheck && (int) ( $recheck['created_object_id'] ?? 0 ) === $created_object_id && self::STATUS_PENDING === $recheck['status'] && (int) $recheck['fencing_token'] === $fencing_token ) {
 				return true;
+			}
+
+			if ( $recheck && (int) $recheck['fencing_token'] !== $fencing_token ) {
+				return new \WP_Error(
+					'stale_writer_conflict',
+					__( 'Could not record created object ID: fencing token mismatch.', 'full-elementor-mcp' )
+				);
 			}
 
 			return new \WP_Error(
@@ -587,6 +663,15 @@ class Full_Elementor_MCP_Journal {
 				'journal_not_found',
 				__( 'Journal entry not found.', 'full-elementor-mcp' )
 			);
+		}
+
+		// For create strategies, capture post-creation persistent state fingerprint if not already provided.
+		$strategy  = Full_Elementor_MCP_Mutation_Registry::get( $entry['ability'] );
+		$is_create = $strategy && ( Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'] || ! empty( $strategy['created_object_tracking'] ) );
+		if ( $is_create && (int) ( $entry['created_object_id'] ?? 0 ) > 0 ) {
+			if ( ! is_array( $after_state ) || ! isset( $after_state['exists'] ) ) {
+				$after_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( (int) $entry['created_object_id'] );
+			}
 		}
 
 		$after_serialized = self::serialize_state( $after_state );
@@ -948,42 +1033,72 @@ class Full_Elementor_MCP_Journal {
 		// Strict literal boolean force check.
 		$is_force = ( true === ( $options['force'] ?? false ) );
 
-		// Conflict detection: verify live state has not diverged from committed after_hash.
-		// Creation mutations skip content divergence check and proceed to trashing the created object.
-		if ( ! $is_create && self::STATUS_COMMITTED === $entry['status'] && ! empty( $entry['after_hash'] ) && ! $is_force ) {
-			$capture_fn = $strategy['capture_after'] ?? $strategy['capture_before'];
-			if ( ! is_callable( $capture_fn ) ) {
-				return new \WP_Error(
-					'journal_state_unverifiable',
-					__( 'Cannot rollback: strategy does not provide state capture for conflict verification.', 'full-elementor-mcp' )
-				);
-			}
+		// Conflict detection and crash-safe idempotent rollback reconciliation.
+		if ( self::STATUS_COMMITTED === $entry['status'] && ! empty( $entry['after_hash'] ) && ! $is_force ) {
+			if ( $is_create ) {
+				// Check if already trashed/deleted from prior successful rollback attempt (idempotent retry).
+				$status = function_exists( 'get_post_status' ) ? get_post_status( $target_id ) : false;
+				if ( false === $status || 'trash' === $status || 'trashed' === $status ) {
+					// Created object is already gone; reconcile journal status.
+					return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
+				}
 
-			$live_state = $capture_fn( $target_id, $resolver_args, null );
-			if ( is_wp_error( $live_state ) || null === $live_state ) {
-				return new \WP_Error(
-					'journal_state_unverifiable',
-					sprintf(
-						/* translators: %s: failure detail */
-						__( 'Cannot rollback: live state could not be captured for verification: %s', 'full-elementor-mcp' ),
-						is_wp_error( $live_state ) ? $live_state->get_error_message() : 'State returned null'
-					)
-				);
-			}
+				// Recapture created object state and compare against committed after_hash.
+				$current_state = Full_Elementor_MCP_Mutation_Registry::capture_created_object_callback( $target_id );
+				$current_hash  = self::hash_state( $current_state );
+				if ( is_wp_error( $current_hash ) || '' === $current_hash ) {
+					return new \WP_Error(
+						'journal_state_unverifiable',
+						__( 'Cannot rollback: created object state hashing failed during conflict verification.', 'full-elementor-mcp' )
+					);
+				}
 
-			$live_hash = self::hash_state( $live_state );
-			if ( is_wp_error( $live_hash ) || '' === $live_hash ) {
-				return new \WP_Error(
-					'journal_state_unverifiable',
-					__( 'Cannot rollback: live state hashing failed during conflict verification.', 'full-elementor-mcp' )
-				);
-			}
+				if ( ! hash_equals( (string) $entry['after_hash'], $current_hash ) ) {
+					return new \WP_Error(
+						'journal_state_conflict',
+						__( 'Cannot rollback created object: entity has been modified after creation (newer work detected).', 'full-elementor-mcp' )
+					);
+				}
+			} else {
+				$capture_fn = $strategy['capture_after'] ?? $strategy['capture_before'];
+				if ( ! is_callable( $capture_fn ) ) {
+					return new \WP_Error(
+						'journal_state_unverifiable',
+						__( 'Cannot rollback: strategy does not provide state capture for conflict verification.', 'full-elementor-mcp' )
+					);
+				}
 
-			if ( ! hash_equals( (string) $entry['after_hash'], $live_hash ) ) {
-				return new \WP_Error(
-					'journal_state_conflict',
-					__( 'Cannot rollback: live state has diverged from journal committed state (newer modifications detected).', 'full-elementor-mcp' )
-				);
+				$live_state = $capture_fn( $target_id, $resolver_args, null );
+				if ( is_wp_error( $live_state ) || null === $live_state ) {
+					return new \WP_Error(
+						'journal_state_unverifiable',
+						sprintf(
+							/* translators: %s: failure detail */
+							__( 'Cannot rollback: live state could not be captured for verification: %s', 'full-elementor-mcp' ),
+							is_wp_error( $live_state ) ? $live_state->get_error_message() : 'State returned null'
+						)
+					);
+				}
+
+				$live_hash = self::hash_state( $live_state );
+				if ( is_wp_error( $live_hash ) || '' === $live_hash ) {
+					return new \WP_Error(
+						'journal_state_unverifiable',
+						__( 'Cannot rollback: live state hashing failed during conflict verification.', 'full-elementor-mcp' )
+					);
+				}
+
+				// Crash-safe idempotent retry: resource was already successfully restored to before_state!
+				if ( hash_equals( (string) $entry['before_hash'], $live_hash ) ) {
+					return self::mark_rolled_back_internal( $journal_id, $entry['status'], $target_id );
+				}
+
+				if ( ! hash_equals( (string) $entry['after_hash'], $live_hash ) ) {
+					return new \WP_Error(
+						'journal_state_conflict',
+						__( 'Cannot rollback: live state has diverged from journal committed state (newer modifications detected).', 'full-elementor-mcp' )
+					);
+				}
 			}
 		}
 
@@ -1195,12 +1310,13 @@ class Full_Elementor_MCP_Journal {
 			$strategy      = Full_Elementor_MCP_Mutation_Registry::get( $ability );
 
 			if ( '' === trim( $resource_key ) ) {
-				self::mark_failed( $journal_id, 'abandoned_pending_unresolvable_key', $journal_fence );
+				$mf = self::mark_failed( $journal_id, 'abandoned_pending_unresolvable_key', $journal_fence );
 				$results[] = array(
 					'journal_id' => $journal_id,
 					'ability'    => $ability,
-					'status'     => self::STATUS_FAILED,
-					'reason'     => 'unresolvable_resource_key',
+					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unresolvable_resource_key',
+					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 				);
 				continue;
 			}
@@ -1252,7 +1368,7 @@ class Full_Elementor_MCP_Journal {
 				$created_id = absint( $row['created_object_id'] ?? 0 );
 				if ( $created_id > 0 ) {
 					// Object was created! Do NOT automatically trash it. Report and transition to safe failure.
-					self::mark_failed(
+					$mf = self::mark_failed(
 						$journal_id,
 						'abandoned_create_requires_manual_recovery',
 						$journal_fence
@@ -1260,13 +1376,14 @@ class Full_Elementor_MCP_Journal {
 					$results[] = array(
 						'journal_id'        => $journal_id,
 						'ability'           => $ability,
-						'status'            => self::STATUS_FAILED,
-						'reason'            => 'abandoned_create_requires_manual_recovery',
+						'status'            => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+						'reason'            => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_requires_manual_recovery',
 						'created_object_id' => $created_id,
+						'error'             => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
 				} else {
 					// No object was created. Resolve bookkeeping without deleting anything.
-					self::mark_failed(
+					$mf = self::mark_failed(
 						$journal_id,
 						'abandoned_create_no_object_created',
 						$journal_fence
@@ -1274,8 +1391,9 @@ class Full_Elementor_MCP_Journal {
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
-						'status'     => self::STATUS_FAILED,
-						'reason'     => 'abandoned_create_no_object_created',
+						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_no_object_created',
+						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
 				}
 				continue;
@@ -1285,7 +1403,7 @@ class Full_Elementor_MCP_Journal {
 			if ( ! empty( $lock_info ) ) {
 				$current_lock_fence = (int) $lock_info['fencing_token'];
 				if ( $current_lock_fence > $journal_fence ) {
-					self::mark_failed(
+					$mf = self::mark_failed(
 						$journal_id,
 						'abandoned_pending_stale_generation',
 						$journal_fence
@@ -1293,8 +1411,9 @@ class Full_Elementor_MCP_Journal {
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
-						'status'     => self::STATUS_FAILED,
-						'reason'     => 'stale_generation',
+						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'stale_generation',
+						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
 					continue;
 				}
@@ -1302,7 +1421,7 @@ class Full_Elementor_MCP_Journal {
 
 			// Verify durable rollback capability.
 			if ( array_key_exists( 'rollback_supported', $row ) && empty( $row['rollback_supported'] ) ) {
-				self::mark_failed(
+				$mf = self::mark_failed(
 					$journal_id,
 					'abandoned_pending_unsupported_strategy',
 					$journal_fence
@@ -1310,14 +1429,15 @@ class Full_Elementor_MCP_Journal {
 				$results[] = array(
 					'journal_id' => $journal_id,
 					'ability'    => $ability,
-					'status'     => self::STATUS_FAILED,
-					'reason'     => 'unsupported_strategy',
+					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unsupported_strategy',
+					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 				);
 				continue;
 			}
 
 			if ( ! $strategy || empty( $strategy['supports_rollback'] ) ) {
-				self::mark_failed(
+				$mf = self::mark_failed(
 					$journal_id,
 					'abandoned_pending_unsupported_strategy',
 					$journal_fence
@@ -1325,8 +1445,9 @@ class Full_Elementor_MCP_Journal {
 				$results[] = array(
 					'journal_id' => $journal_id,
 					'ability'    => $ability,
-					'status'     => self::STATUS_FAILED,
-					'reason'     => 'unsupported_strategy',
+					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unsupported_strategy',
+					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 				);
 				continue;
 			}
@@ -1343,7 +1464,7 @@ class Full_Elementor_MCP_Journal {
 
 				if ( ! is_wp_error( $live_hash ) && '' !== $live_hash && hash_equals( (string) $row['before_hash'], $live_hash ) ) {
 					// Live state matches before_state: mutation left no changes. Safe clean resolution without write.
-					self::mark_failed(
+					$mf = self::mark_failed(
 						$journal_id,
 						'abandoned_pending_clean_noop',
 						$journal_fence
@@ -1351,14 +1472,15 @@ class Full_Elementor_MCP_Journal {
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
-						'status'     => self::STATUS_FAILED,
-						'reason'     => 'clean_noop',
+						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'clean_noop',
+						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
 					continue;
 				}
 
 				// Live state diverged or unverifiable: fail closed; do not speculatively overwrite.
-				self::mark_failed(
+				$mf = self::mark_failed(
 					$journal_id,
 					'abandoned_pending_divergent_state_manual_recovery_required',
 					$journal_fence
@@ -1366,14 +1488,15 @@ class Full_Elementor_MCP_Journal {
 				$results[] = array(
 					'journal_id' => $journal_id,
 					'ability'    => $ability,
-					'status'     => self::STATUS_FAILED,
-					'reason'     => 'manual_recovery_required',
+					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'manual_recovery_required',
+					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 				);
 				continue;
 			}
 
 			// Unverifiable live state.
-			self::mark_failed(
+			$mf = self::mark_failed(
 				$journal_id,
 				'abandoned_pending_unverifiable_live_state',
 				$journal_fence
@@ -1381,8 +1504,9 @@ class Full_Elementor_MCP_Journal {
 			$results[] = array(
 				'journal_id' => $journal_id,
 				'ability'    => $ability,
-				'status'     => self::STATUS_FAILED,
-				'reason'     => 'unverifiable_live_state',
+				'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+				'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unverifiable_live_state',
+				'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 			);
 		}
 

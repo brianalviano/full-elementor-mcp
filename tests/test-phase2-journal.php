@@ -197,6 +197,12 @@ if ( ! function_exists( 'get_post_meta' ) ) {
 
 if ( ! function_exists( 'update_post_meta' ) ) {
 	function update_post_meta( int $post_id, string $key, mixed $value ): bool {
+		if ( function_exists( 'apply_filters' ) ) {
+			$check = apply_filters( 'update_post_metadata', null, $post_id, $key, $value );
+			if ( false === $check ) {
+				return false;
+			}
+		}
 		if ( '_elementor_data' === $key ) {
 			$decoded = is_string( $value ) ? json_decode( (string) $value, true ) : $value;
 			$GLOBALS['mock_post_storage'][ $post_id ] = $decoded;
@@ -399,7 +405,10 @@ class Phase2_Mock_WPDB {
 
 	public function query( string $query ): int|bool {
 		if ( $this->on_before_query ) {
-			( $this->on_before_query )( $query, $this );
+			$cb_res = ( $this->on_before_query )( $query, $this );
+			if ( false === $cb_res ) {
+				return false;
+			}
 		}
 
 		if ( $this->simulate_write_failure ) {
@@ -749,22 +758,40 @@ run_test( 'Registry: set-featured-image captures and restores actual thumbnail a
 	$captured = Full_Elementor_MCP_Mutation_Registry::capture_featured_image_callback( 501 );
 	assert_equals( array( 'thumbnail_id' => 99 ), $captured );
 
+	// Mandatory fencing check: calling without fencing context MUST fail closed.
+	$no_fence = Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( $captured, array( 'post_id' => 501 ) );
+	assert_is_wp_error( $no_fence );
+	assert_equals( 'rollback_fencing_required', $no_fence->get_error_code() );
+
+	// Acquire valid lock and provide fencing context.
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:501', 'feat-worker', 30 );
+	assert_true( $lock['acquired'] );
+
+	$context = array(
+		'post_id'               => 501,
+		'rollback_resource_key' => 'post:501',
+		'current_owner_id'      => 'feat-worker',
+		'caller_fencing_token'  => (int) $lock['fencing_token'],
+	);
+
 	// Change live thumbnail.
 	$GLOBALS['mock_thumbnails'][501] = 105;
 
 	// Restore original thumbnail.
-	$res = Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( $captured, array( 'post_id' => 501 ) );
+	$res = Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( $captured, $context );
 	assert_true( true === $res );
 	assert_equals( 99, $GLOBALS['mock_thumbnails'][501] );
 
 	// Restore empty thumbnail (removal).
-	Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( array( 'thumbnail_id' => 0 ), array( 'post_id' => 501 ) );
+	Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( array( 'thumbnail_id' => 0 ), $context );
 	assert_equals( 0, (int) ( $GLOBALS['mock_thumbnails'][501] ?? 0 ) );
 
 	// Idempotent restoration when already having no thumbnail:
-	$idemp = Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( array( 'thumbnail_id' => 0 ), array( 'post_id' => 501 ) );
+	$idemp = Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( array( 'thumbnail_id' => 0 ), $context );
 	assert_true( true === $idemp, 'Restoring no-thumbnail when already no thumbnail must succeed idempotently' );
 	assert_equals( 0, (int) ( $GLOBALS['mock_thumbnails'][501] ?? 0 ) );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:501', 'feat-worker', (int) $lock['fencing_token'] );
 } );
 
 run_test( 'Registry: set-page-slug captures and restores actual post_name', function () {
@@ -773,13 +800,31 @@ run_test( 'Registry: set-page-slug captures and restores actual post_name', func
 	$captured = Full_Elementor_MCP_Mutation_Registry::capture_page_slug_callback( 502 );
 	assert_equals( array( 'post_name' => 'original-slug' ), $captured );
 
+	// Mandatory fencing check: calling without fencing context MUST fail closed.
+	$no_fence = Full_Elementor_MCP_Mutation_Registry::restore_page_slug_callback( $captured, array( 'post_id' => 502 ) );
+	assert_is_wp_error( $no_fence );
+	assert_equals( 'rollback_fencing_required', $no_fence->get_error_code() );
+
+	// Acquire valid lock and provide fencing context.
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:502', 'slug-worker', 30 );
+	assert_true( $lock['acquired'] );
+
+	$context = array(
+		'post_id'               => 502,
+		'rollback_resource_key' => 'post:502',
+		'current_owner_id'      => 'slug-worker',
+		'caller_fencing_token'  => (int) $lock['fencing_token'],
+	);
+
 	// Modify slug.
 	$GLOBALS['mock_posts'][502]['post_name'] = 'modified-slug';
 
 	// Restore slug.
-	$res = Full_Elementor_MCP_Mutation_Registry::restore_page_slug_callback( $captured, array( 'post_id' => 502 ) );
+	$res = Full_Elementor_MCP_Mutation_Registry::restore_page_slug_callback( $captured, $context );
 	assert_true( true === $res );
 	assert_equals( 'original-slug', $GLOBALS['mock_posts'][502]['post_name'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:502', 'slug-worker', (int) $lock['fencing_token'] );
 } );
 
 run_test( 'Registry: permanent deletion (force=true) is marked non-rollbackable', function () {
@@ -1548,6 +1593,369 @@ run_test( 'Journal: deserialize_state returns error on corrupted JSON', function
 	$deserialized = Full_Elementor_MCP_Journal::deserialize_state( '{"invalid": json' );
 	assert_is_wp_error( $deserialized );
 	assert_equals( 'deserialization_failed', $deserialized->get_error_code() );
+} );
+
+// =========================================================================
+// 6. FINAL CONSOLIDATED PHASE 2 CORRECTNESS & RESILIENCE REGRESSIONS
+// =========================================================================
+
+// Item 1: Journal::begin() derives object_id from Mutation Registry
+run_test( 'Final Pass: begin with nested args post_id stores authoritative object_id', function () {
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'fencing_token' => 1,
+		'args'          => array( 'post_id' => 123 ),
+		'before_state'  => array( 'elements' => array() ),
+	) );
+	assert_true( $journal_id > 0 );
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_equals( 123, (int) $entry['object_id'] );
+	assert_equals( 'post:123', (string) $entry['resource_key'] );
+} );
+
+run_test( 'Final Pass: begin with args post_id and mismatched object_id is rejected', function () {
+	$err = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 999,
+		'fencing_token' => 1,
+		'args'          => array( 'post_id' => 123 ),
+		'before_state'  => array( 'elements' => array() ),
+	) );
+	assert_is_wp_error( $err );
+	assert_equals( 'strategy_object_mismatch', $err->get_error_code() );
+} );
+
+run_test( 'Final Pass: template_id resolver stores correct object_id in begin', function () {
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/delete-template',
+		'fencing_token' => 1,
+		'args'          => array( 'template_id' => 456 ),
+		'before_state'  => array( 'exists' => true ),
+	) );
+	assert_true( $journal_id > 0 );
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_equals( 456, (int) $entry['object_id'] );
+	assert_equals( 'post:456', (string) $entry['resource_key'] );
+} );
+
+run_test( 'Final Pass: create-page stores object_id = 0 in begin', function () {
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+		'args'          => array( 'title' => 'New Page' ),
+	) );
+	assert_true( $journal_id > 0 );
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_equals( 0, (int) $entry['object_id'] );
+} );
+
+// Item 2: Fix Elementor global-kit resource identity
+run_test( 'Final Pass: global-kit mutations share canonical global:elementor-kit-state lock domain', function () {
+	$k_colors = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key(
+		'full-elementor-mcp/update-global-colors',
+		array( 'colors' => array() )
+	);
+	$k_typo = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key(
+		'full-elementor-mcp/update-global-typography',
+		array( 'typography' => array() )
+	);
+	$k_kit10 = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key(
+		'full-elementor-mcp/set-active-kit',
+		array( 'kit_id' => 10 )
+	);
+	$k_kit20 = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key(
+		'full-elementor-mcp/set-active-kit',
+		array( 'kit_id' => 20 )
+	);
+
+	assert_equals( 'global:elementor-kit-state', $k_colors );
+	assert_equals( 'global:elementor-kit-state', $k_typo );
+	assert_equals( 'global:elementor-kit-state', $k_kit10 );
+	assert_equals( 'global:elementor-kit-state', $k_kit20 );
+	assert_true( $k_colors === $k_typo );
+	assert_true( $k_kit10 === $k_kit20 );
+	assert_true( $k_colors === $k_kit10 );
+} );
+
+// Item 3: Make page-settings persistence verification authoritative
+run_test( 'Final Pass: page-settings restore fails closed when DB write fails or retains mutated state', function () {
+	$resource_key = 'post:601';
+	$owner_id     = 'settings-verifier';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$before_settings  = array( 'site_layout' => 'boxed' );
+	$mutated_settings = array( 'site_layout' => 'full_width', 'evil' => 'data' );
+
+	$GLOBALS['mock_post_meta'][601]['_elementor_page_settings'] = $mutated_settings;
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/update-page-settings',
+		'object_id'     => 601,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => $before_settings,
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, $mutated_settings, (int) $lock['fencing_token'] );
+
+	// Simulate persistent DB write failure: update_post_meta fails or retains mutated state
+	add_filter( 'update_post_metadata', function ( $null, $object_id, $meta_key, $meta_value ) {
+		if ( 601 === (int) $object_id && '_elementor_page_settings' === $meta_key ) {
+			return false; // DB write rejected
+		}
+		return null;
+	}, 10, 4 );
+
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	remove_all_filters( 'update_post_metadata' );
+
+	// Verify journal did NOT become rolled_back
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_true( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK !== $entry['status'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
+} );
+
+// Item 4: Make committed rollback retry crash-safe (idempotent reconciliation)
+run_test( 'Final Pass: committed rollback retry reconciles idempotently after DB update failure', function () {
+	global $wpdb;
+	$resource_key = 'post:602';
+	$owner_id     = 'crash-worker';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$before_state = array( 'elements' => array( 'base' ) );
+	$after_state  = array( 'elements' => array( 'mutated' ) );
+	$GLOBALS['mock_post_storage'][602] = $after_state;
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 602,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => $before_state,
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, $after_state, (int) $lock['fencing_token'] );
+
+	// Step 1: Simulate DB update failure right when transitioning journal status to rolled_back
+	// Resource restore will succeed (setting live storage to $before_state), but journal UPDATE fails
+	$wpdb->on_before_query = function ( $sql ) {
+		if ( str_contains( $sql, 'SET status =' ) && str_contains( $sql, 'rolled_back' ) ) {
+			return false; // fail the UPDATE
+		}
+		return null;
+	};
+
+	$first_try = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $first_try );
+	assert_equals( 'journal_write_failed', $first_try->get_error_code() );
+
+	// Live state was restored to before_state!
+	assert_equals( $before_state, $GLOBALS['mock_post_storage'][602] );
+	$wpdb->on_before_query = null;
+
+	// Journal status is still committed
+	$entry_middle = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_equals( Full_Elementor_MCP_Journal::STATUS_COMMITTED, $entry_middle['status'] );
+
+	// Step 2: Retry rollback!
+	// Must recognize that live_hash === before_hash, skip second restore, and transition status to rolled_back
+	$retry = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_true( is_array( $retry ) && ! empty( $retry['success'] ) );
+
+	$entry_final = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_equals( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK, $entry_final['status'] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
+} );
+
+// Item 5: Prevent stale committed CREATE rollback from deleting newer work
+run_test( 'Final Pass: committed create rollback rejected when object was modified after creation', function () {
+	$GLOBALS['mock_created_objects'][777] = 'publish';
+	$GLOBALS['mock_posts'][777] = array(
+		'ID'         => 777,
+		'post_title' => 'Initial Title',
+		'post_name'  => 'initial-title',
+		'post_type'  => 'page',
+	);
+	$GLOBALS['mock_post_storage'][777] = array( 'elements' => array() );
+	$GLOBALS['mock_post_meta'][777]['_elementor_page_settings'] = array();
+
+	$owner_id = 'create-tester';
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+	Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, 777, 1 );
+	Full_Elementor_MCP_Journal::commit( $journal_id, array( 'post_id' => 777 ), 1 );
+
+	// Scenario A: Later modification occurs! (Newer work on created object)
+	$GLOBALS['mock_posts'][777]['post_title'] = 'Modified After Creation';
+
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:777', $owner_id, 30 );
+	assert_true( $lock['acquired'] );
+
+	// Rollback attempt MUST be rejected with conflict because entity has newer work!
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'journal_state_conflict', $res->get_error_code() );
+	// Object remains active (NOT trashed)
+	assert_equals( 'publish', $GLOBALS['mock_created_objects'][777] );
+
+	// Scenario B: Without modifications (matching initial baseline), rollback succeeds
+	$GLOBALS['mock_posts'][777]['post_title'] = 'Initial Title'; // revert to committed baseline
+	$res2 = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_true( is_array( $res2 ) && ! empty( $res2['success'] ) );
+	assert_equals( 'trash', $GLOBALS['mock_created_objects'][777] );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:777', $owner_id, (int) $lock['fencing_token'] );
+} );
+
+// Item 6: Fix record_created_object_id() fencing recheck
+run_test( 'Final Pass: record_created_object_id recheck enforces fencing token and strategy tracking', function () {
+	// Subtest 1: Strategy without created_object_tracking fails closed
+	$j_widget = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 10,
+		'fencing_token' => 1,
+		'before_state'  => array( 'elements' => array() ),
+	) );
+	$err_strat = Full_Elementor_MCP_Journal::record_created_object_id( $j_widget, 99, 1 );
+	assert_is_wp_error( $err_strat );
+	assert_equals( 'invalid_journal_operation', $err_strat->get_error_code() );
+
+	// Subtest 2: Stale fencing token on retry fails with stale_writer_conflict
+	$j_create = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 1,
+	) );
+	$ok = Full_Elementor_MCP_Journal::record_created_object_id( $j_create, 888, 1 );
+	assert_true( true === $ok );
+
+	// Calling again with same ID but different fencing token (token 2) MUST fail
+	$err_fence = Full_Elementor_MCP_Journal::record_created_object_id( $j_create, 888, 2 );
+	assert_is_wp_error( $err_fence );
+	assert_equals( 'stale_writer_conflict', $err_fence->get_error_code() );
+} );
+
+// Item 7: Do not persist arbitrary before_state for non-rollbackable strategies
+run_test( 'Final Pass: non-rollbackable strategy set-page-meta does not persist post_password in journal', function () {
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/set-page-meta',
+		'object_id'     => 123,
+		'fencing_token' => 1,
+		'before_state'  => array( 'post_password' => 'super_secret_password_123' ),
+	) );
+	assert_true( $journal_id > 0 );
+
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_false( str_contains( (string) $entry['before_state'], 'super_secret_password_123' ) );
+	assert_true( null === $entry['before_state'] || 'null' === $entry['before_state'] || '' === $entry['before_state'] );
+} );
+
+// Item 8: WAL before-state payload size limit
+run_test( 'Final Pass: oversized WAL before_state payload is rejected before DB insert', function () {
+	$huge_state = str_repeat( 'X', Full_Elementor_MCP_Journal::MAX_BEFORE_STATE_BYTES + 1024 );
+
+	$err = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/update-page-settings',
+		'object_id'     => 200,
+		'fencing_token' => 1,
+		'before_state'  => array( 'huge' => $huge_state ),
+	) );
+
+	assert_is_wp_error( $err );
+	assert_equals( 'journal_state_too_large', $err->get_error_code() );
+
+	// Payload within limit succeeds
+	$normal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/update-page-settings',
+		'object_id'     => 200,
+		'fencing_token' => 1,
+		'before_state'  => array( 'small' => 'valid_data' ),
+	) );
+	assert_true( $normal_id > 0 );
+} );
+
+// Item 9: Make recovery reports reflect actual journal DB state
+run_test( 'Final Pass: recovery reports recovery_failed when mark_failed DB write fails', function () {
+	global $wpdb;
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 991,
+		'fencing_token' => 1,
+		'before_state'  => array( 'elements' => array() ),
+	) );
+	assert_true( $journal_id > 0 );
+
+	// Backdate journal row and simulate lock expired + past grace period
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->query( "UPDATE {$table} SET created_at = '2020-01-01 00:00:00' WHERE id = {$journal_id}" );
+	$GLOBALS['mock_post_storage'][991] = array( 'elements' => array() );
+
+	// Fail the mark_failed UPDATE query
+	$wpdb->on_before_query = function ( $sql ) {
+		if ( str_contains( $sql, 'SET error_message =' ) && str_contains( $sql, 'status =' ) ) {
+			return false; // DB query fails
+		}
+		return null;
+	};
+
+	$reports = Full_Elementor_MCP_Journal::recover_pending( 10 );
+	$wpdb->on_before_query = null;
+
+	$matched = null;
+	foreach ( $reports as $r ) {
+		if ( (int) $r['journal_id'] === $journal_id ) {
+			$matched = $r;
+			break;
+		}
+	}
+	assert_true( null !== $matched );
+	assert_equals( 'recovery_failed', $matched['status'] );
+	assert_equals( 'journal_write_failed', $matched['reason'] );
+} );
+
+// Item 10: Harden restore callbacks fencing contract
+run_test( 'Final Pass: direct restore callback invocation without fencing context returns rollback_fencing_required', function () {
+	$res1 = Full_Elementor_MCP_Mutation_Registry::restore_page_data_callback( array( 'elements' => array() ), array( 'post_id' => 10 ) );
+	assert_is_wp_error( $res1 );
+	assert_equals( 'rollback_fencing_required', $res1->get_error_code() );
+
+	$res2 = Full_Elementor_MCP_Mutation_Registry::restore_page_settings_callback( array( 'a' => 1 ), array( 'post_id' => 10 ) );
+	assert_is_wp_error( $res2 );
+	assert_equals( 'rollback_fencing_required', $res2->get_error_code() );
+
+	$res3 = Full_Elementor_MCP_Mutation_Registry::restore_created_object_callback( null, array( 'created_object_id' => 10 ) );
+	assert_is_wp_error( $res3 );
+	assert_equals( 'rollback_fencing_required', $res3->get_error_code() );
+} );
+
+// Item 11: Final strategy resource audit - NO mutating strategy resolves to post:0
+run_test( 'Final Pass: audit all 121 mutating strategies and verify zero post:0 resolutions', function () {
+	$all_strategies = Full_Elementor_MCP_Mutation_Registry::all();
+	assert_true( count( $all_strategies ) >= 121, 'Must have at least 121 mutation strategies registered' );
+
+	$test_args = array(
+		'post_id'           => 999,
+		'page_id'           => 999,
+		'template_id'       => 999,
+		'popup_id'          => 999,
+		'id'                => 999,
+		'kit_id'            => 999,
+		'font_family'       => 'Roboto',
+		'title'             => 'Test Entity',
+		'elements'          => array(),
+		'settings'          => array(),
+		'created_object_id' => 999,
+	);
+
+	foreach ( $all_strategies as $ability => $strategy ) {
+		$res_key = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( $ability, $test_args );
+		assert_false( is_wp_error( $res_key ), "Strategy {$ability} failed to resolve resource key: " . ( is_wp_error( $res_key ) ? $res_key->get_error_message() : '' ) );
+		assert_true( is_string( $res_key ) && '' !== trim( $res_key ), "Strategy {$ability} resolved empty resource key" );
+		assert_true( 'post:0' !== $res_key, "Strategy {$ability} resolved to prohibited post:0!" );
+		assert_false( str_ends_with( $res_key, ':0' ), "Strategy {$ability} resolved to zero-ID resource key ({$res_key})" );
+	}
 } );
 
 echo "\n=======================================================\n";

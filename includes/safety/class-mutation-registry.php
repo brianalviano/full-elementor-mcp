@@ -203,6 +203,19 @@ class Full_Elementor_MCP_Mutation_Registry {
 	}
 
 	/**
+	 * Returns all registered mutation strategies.
+	 *
+	 * @return array<string, array<string, mixed>> All strategies keyed by ability name.
+	 */
+	public static function all(): array {
+		if ( ! self::$initialized ) {
+			self::init_core_strategies();
+		}
+
+		return self::$strategies;
+	}
+
+	/**
 	 * Returns all registered ability names in the registry.
 	 *
 	 * @return string[] Array of ability names.
@@ -240,18 +253,47 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$resolver = $strategy['resource_key_resolver'];
 		$key      = (string) $resolver( $args );
 
-		if ( '' === trim( $key ) ) {
+		if ( '' === trim( $key ) || 'post:0' === $key ) {
 			return new \WP_Error(
 				'invalid_resource_key',
 				sprintf(
-					/* translators: %s: ability name */
-					__( 'Mutation strategy for "%s" resolved an empty resource key.', 'full-elementor-mcp' ),
-					esc_html( $ability )
+					/* translators: 1: ability name, 2: key */
+					__( 'Mutation strategy for "%1$s" resolved an invalid resource key ("%2$s"). Target entity ID is required.', 'full-elementor-mcp' ),
+					esc_html( $ability ),
+					esc_html( $key )
 				)
 			);
 		}
 
 		return $key;
+	}
+
+	/**
+	 * Resolves primary object ID for an ability call using its registered strategy.
+	 *
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Input arguments.
+	 * @return int|\WP_Error Object ID or WP_Error.
+	 */
+	public static function resolve_object_id( string $ability, array $args ) {
+		$strategy = self::get( $ability );
+		if ( ! $strategy ) {
+			return new \WP_Error(
+				'unknown_mutation_strategy',
+				sprintf(
+					/* translators: %s: ability name */
+					__( 'Cannot resolve object ID: ability "%s" is not registered in mutation registry.', 'full-elementor-mcp' ),
+					esc_html( $ability )
+				)
+			);
+		}
+
+		$resolver = $strategy['object_id_resolver'] ?? null;
+		if ( ! is_callable( $resolver ) ) {
+			return 0;
+		}
+
+		return max( 0, (int) $resolver( $args ) );
 	}
 
 	/**
@@ -304,25 +346,6 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		return $key;
-	}
-
-	/**
-	 * Resolves target object ID for an ability call.
-	 *
-	 * Returns 0 for creation mutations where the object does not exist yet.
-	 *
-	 * @param string               $ability Ability name.
-	 * @param array<string, mixed> $args    Input arguments.
-	 * @return int Target object ID.
-	 */
-	public static function resolve_object_id( string $ability, array $args ): int {
-		$strategy = self::get( $ability );
-		if ( ! $strategy ) {
-			return 0;
-		}
-
-		$resolver = $strategy['object_id_resolver'];
-		return max( 0, (int) $resolver( $args ) );
 	}
 
 	/**
@@ -698,7 +721,8 @@ class Full_Elementor_MCP_Mutation_Registry {
 						return self::restore_created_object_callback( $before_state, $context );
 					},
 					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) {
-						return array( 'created' => true, 'result' => $result );
+						$target_id = $object_id > 0 ? $object_id : absint( is_array( $result ) ? ( $result['id'] ?? ( $result['page_id'] ?? ( $result['post_id'] ?? 0 ) ) ) : 0 );
+						return self::capture_created_object_callback( $target_id );
 					},
 					'supports_rollback'              => true,
 					'created_object_tracking'        => true,
@@ -762,33 +786,104 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		// ---------------------------------------------------------------------
-		// 6. Unsupported & Composite Mutations (15 abilities)
+		// 6. Global Elementor Kit Settings (3 abilities)
 		// ---------------------------------------------------------------------
-		$unsupported_or_composite = array(
-			// set-page-meta touches sensitive post_password; rollback unsupported fail-closed
-			'full-elementor-mcp/set-page-meta'              => array( 'action' => 'set_page_meta', 'object_type' => 'post', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
-			// set-popup-settings touches settings + _elementor_conditions (composite)
-			'full-elementor-mcp/set-popup-settings'         => array( 'action' => 'set_popup_settings', 'object_type' => 'popup', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
-			// set/unset template conditions
-			'full-elementor-mcp/set-template-conditions'    => array( 'action' => 'set_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
-			'full-elementor-mcp/unset-template-conditions'  => array( 'action' => 'unset_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
-			// Global settings & Kits
-			'full-elementor-mcp/update-global-colors'       => array( 'action' => 'update_global_colors', 'object_type' => 'kit', 'category' => self::CATEGORY_GLOBAL_SETTINGS, 'destructive' => false ),
-			'full-elementor-mcp/update-global-typography'   => array( 'action' => 'update_global_typography', 'object_type' => 'kit', 'category' => self::CATEGORY_GLOBAL_SETTINGS, 'destructive' => false ),
-			'full-elementor-mcp/set-active-kit'             => array( 'action' => 'set_active_kit', 'object_type' => 'kit', 'category' => self::CATEGORY_GLOBAL_SETTINGS, 'destructive' => false ),
-			// Custom code
-			'full-elementor-mcp/add-custom-css'             => array( 'action' => 'add_custom_css', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
-			'full-elementor-mcp/add-code-snippet'           => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
+		// Coarse global lock domain 'global:elementor-kit-state':
+		// - Active kit selection ('elementor_active_kit' option) and kit-level color/typography
+		//   settings are coupled global state.
+		// - update-global-* resolves active kit dynamically.
+		// - set-active-kit must not switch active kit while global settings are being mutated.
+		$global_kit_abilities = array(
+			'full-elementor-mcp/update-global-colors'     => array( 'action' => 'update_global_colors', 'object_type' => 'kit', 'destructive' => false ),
+			'full-elementor-mcp/update-global-typography' => array( 'action' => 'update_global_typography', 'object_type' => 'kit', 'destructive' => false ),
+			'full-elementor-mcp/set-active-kit'           => array( 'action' => 'set_active_kit', 'object_type' => 'kit', 'destructive' => false ),
+		);
+
+		foreach ( $global_kit_abilities as $ability => $meta ) {
+			self::register(
+				array(
+					'ability'                 => $ability,
+					'action'                  => $meta['action'],
+					'object_type'             => $meta['object_type'],
+					'category'                => self::CATEGORY_GLOBAL_SETTINGS,
+					'resource_key_resolver'   => static function ( array $args = array() ): string {
+						return 'global:elementor-kit-state';
+					},
+					'object_id_resolver'      => static function ( array $args = array() ): int {
+						return absint( $args['kit_id'] ?? 0 );
+					},
+					'capture_before'          => static function ( int $object_id, array $args = array() ) {
+						return null;
+					},
+					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+						return new \WP_Error(
+							'mutation_not_rollbackable',
+							__( 'Global kit settings mutations do not support automated rollback.', 'full-elementor-mcp' )
+						);
+					},
+					'capture_after'           => null,
+					'supports_rollback'       => false,
+					'created_object_tracking' => false,
+					'is_destructive'          => $meta['destructive'],
+				)
+			);
+		}
+
+		// ---------------------------------------------------------------------
+		// 7. Newly Created Custom Code & Media Entities (3 abilities)
+		// ---------------------------------------------------------------------
+		$new_entity_abilities = array(
+			'full-elementor-mcp/add-code-snippet' => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
+			'full-elementor-mcp/sideload-image'   => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			'full-elementor-mcp/upload-svg-icon'  => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+		);
+
+		foreach ( $new_entity_abilities as $ability => $meta ) {
+			self::register(
+				array(
+					'ability'                 => $ability,
+					'action'                  => $meta['action'],
+					'object_type'             => $meta['object_type'],
+					'category'                => $meta['category'],
+					'resource_key_resolver'   => static function ( array $args = array() ) use ( $ability ): string {
+						return self::build_create_resource_key( $ability, $args );
+					},
+					'object_id_resolver'      => static function ( array $args = array() ): int {
+						return 0; // Newly created entity ID unknown before execution.
+					},
+					'capture_before'          => static function ( int $object_id, array $args = array() ) {
+						return null;
+					},
+					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+						return new \WP_Error(
+							'mutation_not_rollbackable',
+							__( 'This mutation category does not support automated rollback.', 'full-elementor-mcp' )
+						);
+					},
+					'capture_after'           => null,
+					'supports_rollback'       => false,
+					'created_object_tracking' => false,
+					'is_destructive'          => $meta['destructive'],
+				)
+			);
+		}
+
+		// ---------------------------------------------------------------------
+		// 8. Existing Post-Backed Custom Code, Meta, & Composite Mutations (9 abilities)
+		// ---------------------------------------------------------------------
+		$post_backed_custom_or_composite = array(
 			'full-elementor-mcp/update-code-snippet'        => array( 'action' => 'update_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
 			'full-elementor-mcp/delete-code-snippet'        => array( 'action' => 'delete_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => true ),
 			'full-elementor-mcp/toggle-code-snippet-status' => array( 'action' => 'toggle_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
-			// Media & stock images
-			'full-elementor-mcp/sideload-image'             => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
-			'full-elementor-mcp/upload-svg-icon'            => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			'full-elementor-mcp/add-custom-css'             => array( 'action' => 'add_custom_css', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
 			'full-elementor-mcp/add-stock-image'            => array( 'action' => 'add_stock_image', 'object_type' => 'post', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			'full-elementor-mcp/set-page-meta'              => array( 'action' => 'set_page_meta', 'object_type' => 'post', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			'full-elementor-mcp/set-popup-settings'         => array( 'action' => 'set_popup_settings', 'object_type' => 'popup', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			'full-elementor-mcp/set-template-conditions'    => array( 'action' => 'set_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			'full-elementor-mcp/unset-template-conditions'  => array( 'action' => 'unset_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
 		);
 
-		foreach ( $unsupported_or_composite as $ability => $meta ) {
+		foreach ( $post_backed_custom_or_composite as $ability => $meta ) {
 			self::register(
 				array(
 					'ability'                 => $ability,
@@ -796,11 +891,11 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'object_type'             => $meta['object_type'],
 					'category'                => $meta['category'],
 					'resource_key_resolver'   => static function ( array $args = array() ): string {
-						$id = absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) ) ) );
+						$id = absint( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['post_id'] ?? ( $args['id'] ?? ( $args['object_id'] ?? 0 ) ) ) ) ) );
 						return self::build_resource_key( 'post', $id );
 					},
 					'object_id_resolver'      => static function ( array $args = array() ): int {
-						return absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) ) ) );
+						return absint( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['post_id'] ?? ( $args['id'] ?? ( $args['object_id'] ?? 0 ) ) ) ) ) );
 					},
 					'capture_before'          => static function ( int $object_id, array $args = array() ) {
 						return null;
@@ -855,6 +950,38 @@ class Full_Elementor_MCP_Mutation_Registry {
 	}
 
 	/**
+	 * Captures current state fingerprint of a created WordPress entity for conflict detection.
+	 *
+	 * @param int $post_id Created post ID.
+	 * @return array<string, mixed> Fingerprint array.
+	 */
+	public static function capture_created_object_callback( int $post_id ): array {
+		if ( $post_id < 1 ) {
+			return array( 'exists' => false );
+		}
+
+		$status = function_exists( 'get_post_status' ) ? get_post_status( $post_id ) : false;
+		if ( false === $status || 'trash' === $status || 'trashed' === $status ) {
+			return array( 'exists' => false, 'status' => $status );
+		}
+
+		$post          = function_exists( 'get_post' ) ? get_post( $post_id ) : null;
+		$page_data     = self::capture_page_data_callback( $post_id );
+		$page_settings = self::capture_page_settings_callback( $post_id );
+
+		return array(
+			'exists'        => true,
+			'ID'            => $post_id,
+			'status'        => $status,
+			'post_title'    => $post ? (string) ( is_array( $post ) ? ( $post['post_title'] ?? '' ) : ( $post->post_title ?? '' ) ) : '',
+			'post_name'     => $post ? (string) ( is_array( $post ) ? ( $post['post_name'] ?? '' ) : ( $post->post_name ?? '' ) ) : '',
+			'post_type'     => $post ? (string) ( is_array( $post ) ? ( $post['post_type'] ?? '' ) : ( $post->post_type ?? '' ) ) : '',
+			'page_data'     => $page_data,
+			'page_settings' => $page_settings,
+		);
+	}
+
+	/**
 	 * Restores Elementor page document data from before-state.
 	 *
 	 * @param mixed                $before_state Captured before state.
@@ -867,15 +994,21 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		// Defensive fencing re-assertion immediately before persistent write.
-		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
-		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		// Mandatory authoritative fencing assertion immediately before persistent write:
+		$resource_key = trim( (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) ) );
+		$owner_id     = trim( (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) ) );
 		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
-		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
+
+		if ( '' === $resource_key || '' === $owner_id || $token < 1 ) {
+			return new \WP_Error(
+				'rollback_fencing_required',
+				__( 'Persistent restoration requires valid rollback_resource_key, owner ID, and fencing token (>= 1).', 'full-elementor-mcp' )
+			);
+		}
+
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
@@ -907,12 +1040,20 @@ class Full_Elementor_MCP_Mutation_Registry {
 	/**
 	 * Captures current page settings.
 	 *
+	 * Prioritizes raw persistent post meta to avoid masking database write failures
+	 * via transient in-memory models.
+	 *
 	 * @param int $post_id The post ID.
 	 * @return array Page settings array.
 	 */
 	public static function capture_page_settings_callback( int $post_id ): array {
 		if ( $post_id < 1 ) {
 			return array();
+		}
+
+		$existing = get_post_meta( $post_id, '_elementor_page_settings', true );
+		if ( is_array( $existing ) ) {
+			return $existing;
 		}
 
 		if ( class_exists( 'Full_Elementor_MCP_Data' ) ) {
@@ -923,12 +1064,11 @@ class Full_Elementor_MCP_Mutation_Registry {
 			}
 		}
 
-		$existing = get_post_meta( $post_id, '_elementor_page_settings', true );
-		return is_array( $existing ) ? $existing : array();
+		return array();
 	}
 
 	/**
-	 * Restores page settings from before-state.
+	 * Restores page settings from before-state with authoritative storage verification.
 	 *
 	 * @param mixed                $before_state Captured before state.
 	 * @param array<string, mixed> $context      Restoration context.
@@ -940,15 +1080,21 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		// Defensive fencing re-assertion immediately before persistent write.
-		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
-		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		// Mandatory authoritative fencing assertion immediately before persistent write:
+		$resource_key = trim( (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) ) );
+		$owner_id     = trim( (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) ) );
 		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
-		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
+
+		if ( '' === $resource_key || '' === $owner_id || $token < 1 ) {
+			return new \WP_Error(
+				'rollback_fencing_required',
+				__( 'Persistent restoration requires valid rollback_resource_key, owner ID, and fencing token (>= 1).', 'full-elementor-mcp' )
+			);
+		}
+
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
@@ -960,9 +1106,26 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return new \WP_Error( 'invalid_before_state', __( 'Before-state must be an array of settings.', 'full-elementor-mcp' ) );
 		}
 
-		// EXACT REPLACEMENT:
-		// Directly update _elementor_page_settings to guarantee no keys introduced by the mutation survive.
+		// EXACT REPLACEMENT IN AUTHORITATIVE STORAGE:
 		update_post_meta( $post_id, '_elementor_page_settings', $before_state );
+
+		// Verify persisted state from storage BEFORE updating in-memory models.
+		$persisted_meta = get_post_meta( $post_id, '_elementor_page_settings', true );
+		if ( ! is_array( $persisted_meta ) ) {
+			return new \WP_Error(
+				'rollback_write_failed',
+				__( 'Persisted page settings meta is invalid or missing after restoration write.', 'full-elementor-mcp' )
+			);
+		}
+
+		$persisted_canonical = Full_Elementor_MCP_Journal::canonicalize_data( $persisted_meta );
+		$expected_canonical  = Full_Elementor_MCP_Journal::canonicalize_data( $before_state );
+		if ( $persisted_canonical !== $expected_canonical ) {
+			return new \WP_Error(
+				'rollback_verification_failed',
+				__( 'Database write failed during page settings restore: persisted storage does not match before-state.', 'full-elementor-mcp' )
+			);
+		}
 
 		// Invalidate Elementor CSS cache.
 		delete_post_meta( $post_id, '_elementor_css' );
@@ -974,7 +1137,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 			}
 		}
 
-		// Update in-memory Elementor document settings model if active.
+		// Only after database storage is verified: update in-memory Elementor document settings model.
 		if ( class_exists( '\\Elementor\\Plugin' ) && isset( \Elementor\Plugin::$instance->documents ) ) {
 			$doc = \Elementor\Plugin::$instance->documents->get( $post_id );
 			if ( $doc && method_exists( $doc, 'get_settings_model' ) ) {
@@ -1016,15 +1179,21 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		// Defensive fencing re-assertion immediately before persistent write.
-		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
-		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		// Mandatory authoritative fencing assertion immediately before persistent write:
+		$resource_key = trim( (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) ) );
+		$owner_id     = trim( (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) ) );
 		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
-		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
+
+		if ( '' === $resource_key || '' === $owner_id || $token < 1 ) {
+			return new \WP_Error(
+				'rollback_fencing_required',
+				__( 'Persistent restoration requires valid rollback_resource_key, owner ID, and fencing token (>= 1).', 'full-elementor-mcp' )
+			);
+		}
+
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
@@ -1095,15 +1264,21 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		// Defensive fencing re-assertion immediately before persistent write.
-		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
-		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		// Mandatory authoritative fencing assertion immediately before persistent write:
+		$resource_key = trim( (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) ) );
+		$owner_id     = trim( (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) ) );
 		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
-		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
+
+		if ( '' === $resource_key || '' === $owner_id || $token < 1 ) {
+			return new \WP_Error(
+				'rollback_fencing_required',
+				__( 'Persistent restoration requires valid rollback_resource_key, owner ID, and fencing token (>= 1).', 'full-elementor-mcp' )
+			);
+		}
+
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
@@ -1156,15 +1331,21 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		// Defensive fencing re-assertion immediately before persistent write.
-		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
-		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		// Mandatory authoritative fencing assertion immediately before persistent write:
+		$resource_key = trim( (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) ) );
+		$owner_id     = trim( (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) ) );
 		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
-		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
+
+		if ( '' === $resource_key || '' === $owner_id || $token < 1 ) {
+			return new \WP_Error(
+				'rollback_fencing_required',
+				__( 'Persistent restoration requires valid rollback_resource_key, owner ID, and fencing token (>= 1).', 'full-elementor-mcp' )
+			);
+		}
+
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		$created_id = absint( $context['created_object_id'] ?? 0 );
@@ -1195,22 +1376,28 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
-		// Defensive fencing re-assertion immediately before persistent write.
-		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
-		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
-		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
-		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
-		}
-
 		if ( is_array( $before_state ) && ! empty( $before_state['force'] ) ) {
 			return new \WP_Error(
 				'permanent_delete_not_rollbackable',
 				__( 'Cannot rollback: object was permanently deleted and cannot be untrashed.', 'full-elementor-mcp' )
 			);
+		}
+
+		// Mandatory authoritative fencing assertion immediately before persistent write:
+		$resource_key = trim( (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) ) );
+		$owner_id     = trim( (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+
+		if ( '' === $resource_key || '' === $owner_id || $token < 1 ) {
+			return new \WP_Error(
+				'rollback_fencing_required',
+				__( 'Persistent restoration requires valid rollback_resource_key, owner ID, and fencing token (>= 1).', 'full-elementor-mcp' )
+			);
+		}
+
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		$object_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
