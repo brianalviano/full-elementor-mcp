@@ -29,6 +29,12 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 	public const ALGO_AES_256_GCM         = 'AES-256-GCM';
 
 	/**
+	 * Current crypto envelope and payload schema versions.
+	 */
+	public const CURRENT_ENVELOPE_VERSION       = 2;
+	public const CURRENT_PAYLOAD_SCHEMA_VERSION = 2;
+
+	/**
 	 * Hard maximum for checkpoint plaintext payload (16 MiB).
 	 */
 	public const MAX_PAYLOAD_BYTES = 16777216; // 16 * 1024 * 1024.
@@ -452,12 +458,14 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 		}
 
 		// 6. Build immutable AAD:
-		$envelope_version = (int) ( $metadata['crypto_envelope_version'] ?? 2 );
+		$envelope_version = (int) ( $metadata['crypto_envelope_version'] ?? self::CURRENT_ENVELOPE_VERSION );
+		$schema_version   = (int) ( $metadata['payload_schema_version'] ?? self::CURRENT_PAYLOAD_SCHEMA_VERSION );
 		$aad_meta         = array_merge( $metadata, array(
 			'encryption_algorithm'    => $algo,
 			'key_id'                  => $key_info['key_id'],
 			'key_version'             => $key_info['version'],
 			'crypto_envelope_version' => $envelope_version,
+			'payload_schema_version'  => $schema_version,
 		) );
 		$aad = self::build_aad( $aad_meta, $envelope_version );
 
@@ -512,6 +520,7 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			'state_hash'              => $state_hash,
 			'size_bytes'              => $size_bytes,
 			'crypto_envelope_version' => $envelope_version,
+			'payload_schema_version'  => $schema_version,
 		);
 	}
 
@@ -536,7 +545,27 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 		}
 
 		// 0. Enforce supported crypto envelope version (v1 or v2):
-		$envelope_version = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : 1;
+		$envelope_version = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : self::CURRENT_ENVELOPE_VERSION;
+		if ( 0 === $envelope_version ) {
+			$key_info = self::get_key_by_id( $key_id );
+			if ( is_wp_error( $key_info ) ) {
+				return new \WP_Error(
+					'checkpoint_legacy_envelope_unresolved',
+					__( 'Historical checkpoint crypto envelope format is unresolved and key material is unavailable for authenticated detection.', 'full-elementor-mcp' ),
+					array( 'checkpoint_uuid' => $row['checkpoint_uuid'] ?? '' )
+				);
+			}
+			$detected = self::detect_envelope_version( $row );
+			if ( $detected > 0 ) {
+				$envelope_version = $detected;
+			} else {
+				return new \WP_Error(
+					'checkpoint_integrity_failed',
+					__( 'Checkpoint envelope trial authentication failed for all supported envelope formats.', 'full-elementor-mcp' )
+				);
+			}
+		}
+
 		if ( 1 !== $envelope_version && 2 !== $envelope_version ) {
 			return new \WP_Error(
 				'checkpoint_envelope_unsupported',
@@ -549,9 +578,9 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			);
 		}
 
-		// 0.1. Enforce supported payload schema version (only v1 supported currently):
+		// 0.1. Enforce supported payload schema version (v1 or v2):
 		$schema_version = (int) ( $row['payload_schema_version'] ?? 1 );
-		if ( 1 !== $schema_version ) {
+		if ( 1 !== $schema_version && 2 !== $schema_version ) {
 			return new \WP_Error(
 				'checkpoint_schema_unsupported',
 				sprintf(
@@ -754,5 +783,109 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 		}
 
 		return $data;
+	}
+
+	/**
+	 * Detects the crypto envelope version for a stored row using authenticated AEAD tag verification.
+	 *
+	 * Tests envelope v2 first (Format B / modern 8-field AAD), then envelope v1 (Format A 6-field AAD).
+	 * Exactly one successful trial identifies the envelope format.
+	 * Returns 0 if key is unavailable or authentication fails.
+	 * Never exposes plaintext and never rewrites ciphertext.
+	 *
+	 * @param array<string, mixed> $row Checkpoint row from database.
+	 * @return int 2, 1, or 0.
+	 */
+	public static function detect_envelope_version( array $row ): int {
+		$key_id   = (string) ( $row['key_id'] ?? '' );
+		$key_info = self::get_key_by_id( $key_id );
+		if ( is_wp_error( $key_info ) ) {
+			return 0;
+		}
+
+		$v2_valid = self::verify_envelope_tag( $row, 2, $key_info );
+		$v1_valid = self::verify_envelope_tag( $row, 1, $key_info );
+
+		if ( $v2_valid && ! $v1_valid ) {
+			return 2;
+		}
+		if ( $v1_valid && ! $v2_valid ) {
+			return 1;
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Verifies AEAD authentication tag for a trial envelope version without exposing plaintext.
+	 *
+	 * @param array<string, mixed>   $row              Checkpoint row.
+	 * @param int                    $envelope_version Envelope version to test (1 or 2).
+	 * @param array{raw_key: string} $key_info         Resolved key info.
+	 * @return bool True if AEAD authentication succeeds.
+	 */
+	private static function verify_envelope_tag( array $row, int $envelope_version, array $key_info ): bool {
+		$algo      = (string) ( $row['encryption_algorithm'] ?? '' );
+		$b64_enc   = (string) ( $row['encrypted_payload'] ?? '' );
+		$b64_nonce = (string) ( $row['nonce'] ?? '' );
+		$b64_tag   = $row['auth_tag'] ?? null;
+
+		if ( empty( $b64_enc ) || empty( $b64_nonce ) ) {
+			return false;
+		}
+
+		$ciphertext = base64_decode( $b64_enc, true );
+		$nonce      = base64_decode( $b64_nonce, true );
+		if ( false === $ciphertext || false === $nonce ) {
+			return false;
+		}
+
+		$aad = self::build_aad( array(
+			'checkpoint_type'        => $row['checkpoint_type'] ?? 'automatic',
+			'checkpoint_uuid'        => $row['checkpoint_uuid'] ?? '',
+			'encryption_algorithm'   => $algo,
+			'key_id'                 => (string) ( $row['key_id'] ?? '' ),
+			'key_version'            => (int) ( $row['key_version'] ?? 1 ),
+			'payload_schema_version' => (int) ( $row['payload_schema_version'] ?? 1 ),
+			'resource_key'           => $row['resource_key'] ?? '',
+			'restore_capability'     => $row['restore_capability'] ?? 'exact',
+		), $envelope_version );
+
+		try {
+			if ( self::ALGO_XCHACHA20_POLY1305 === $algo ) {
+				if ( ! function_exists( 'sodium_crypto_aead_xchacha20poly1305_ietf_decrypt' ) ) {
+					return false;
+				}
+				$pt = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt(
+					$ciphertext,
+					$aad,
+					$nonce,
+					$key_info['raw_key']
+				);
+				return false !== $pt;
+			} elseif ( self::ALGO_AES_256_GCM === $algo ) {
+				if ( ! function_exists( 'openssl_decrypt' ) ) {
+					return false;
+				}
+				$tag = is_string( $b64_tag ) ? base64_decode( $b64_tag, true ) : '';
+				if ( false === $tag || empty( $tag ) ) {
+					return false;
+				}
+				$pt = openssl_decrypt(
+					$ciphertext,
+					'aes-256-gcm',
+					$key_info['raw_key'],
+					OPENSSL_RAW_DATA,
+					$nonce,
+					$tag,
+					$aad
+				);
+				return false !== $pt;
+			}
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+
+		return false;
 	}
 }

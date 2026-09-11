@@ -31,6 +31,11 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 	public const CAPABILITY_UNSUPPORTED   = Full_Elementor_MCP_Checkpoint_Strategies::CAPABILITY_UNSUPPORTED;
 
 	/**
+	 * Current payload schema version for new checkpoints.
+	 */
+	public const CURRENT_PAYLOAD_SCHEMA_VERSION = 2;
+
+	/**
 	 * Requirement levels for automatic checkpoint policy.
 	 */
 	public const REQUIREMENT_NONE     = 'none';
@@ -118,8 +123,9 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 		$restore_capability = Full_Elementor_MCP_Checkpoint_Strategies::get_restore_capability( $resource_key, $checkpoint_type, $meta );
 
 		// 2. Obtain state: only reuse pre-captured state if explicitly marked with trusted state_schema:
-		$state = null;
-		if ( isset( $meta['state'] ) && is_array( $meta['state'] ) && ( $meta['state_schema'] ?? '' ) === 'checkpoint_strategy_v1' ) {
+		$state        = null;
+		$state_schema = (string) ( $meta['state_schema'] ?? '' );
+		if ( isset( $meta['state'] ) && is_array( $meta['state'] ) && ( 'checkpoint_strategy_v2' === $state_schema || 'checkpoint_strategy_v1' === $state_schema ) ) {
 			$state = $meta['state'];
 		} else {
 			$state = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key, $meta );
@@ -152,7 +158,7 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 		$ability    = $meta['source_ability'] ?? null;
 		$journal_id = isset( $meta['source_journal_id'] ) ? (int) $meta['source_journal_id'] : null;
 
-		$payload_schema_version = 1;
+		$payload_schema_version = self::CURRENT_PAYLOAD_SCHEMA_VERSION;
 		$uuid                   = '';
 		$checkpoint_id          = 0;
 		$enc                    = null;
@@ -167,11 +173,12 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 			// Encrypt state via AEAD with bound AAD including checkpoint_type and restore_capability:
 			$envelope_meta = array(
-				'checkpoint_type'        => $checkpoint_type,
-				'checkpoint_uuid'        => $uuid,
-				'resource_key'           => $resource_key,
-				'restore_capability'     => $restore_capability,
-				'payload_schema_version' => $payload_schema_version,
+				'checkpoint_type'         => $checkpoint_type,
+				'checkpoint_uuid'         => $uuid,
+				'resource_key'            => $resource_key,
+				'restore_capability'      => $restore_capability,
+				'payload_schema_version'  => $payload_schema_version,
+				'crypto_envelope_version' => 2,
 			);
 
 			$enc = Full_Elementor_MCP_Checkpoint_Crypto::encrypt( $state, $envelope_meta );
@@ -475,9 +482,53 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 		$resource_key = (string) $row['resource_key'];
 
-		// 2. Validate payload schema version (fail closed on future schemas):
+		// 1.1. Validate and authenticate crypto envelope generation:
+		$envelope_version = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : 0;
+		if ( 0 === $envelope_version ) {
+			$detected = Full_Elementor_MCP_Checkpoint_Crypto::detect_envelope_version( $row );
+			if ( $detected > 0 ) {
+				$envelope_version = $detected;
+				$row['crypto_envelope_version'] = $detected;
+				$table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+				$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET crypto_envelope_version = %d WHERE id = %d", $detected, (int) $row['id'] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			} else {
+				return new \WP_Error(
+					'checkpoint_legacy_envelope_unresolved',
+					__( 'Historical checkpoint crypto envelope format is unresolved and key material is unavailable for authenticated detection.', 'full-elementor-mcp' ),
+					array( 'checkpoint_uuid' => $row['checkpoint_uuid'] ?? '' )
+				);
+			}
+		}
+
+		// Security Boundary: Envelope v1 did NOT bind or authenticate restore_capability in AAD.
+		// Never trust unauthenticated DB metadata for exact restore decision!
+		if ( 1 === $envelope_version ) {
+			return new \WP_Error(
+				'checkpoint_legacy_capability_untrusted',
+				__( 'Legacy envelope v1 checkpoints did not authenticate restore capability and cannot be restored as exact state. Recovery inspection only.', 'full-elementor-mcp' ),
+				array(
+					'checkpoint_uuid'         => $row['checkpoint_uuid'] ?? '',
+					'crypto_envelope_version' => 1,
+					'effective_capability'    => self::CAPABILITY_RECOVERY_ONLY,
+				)
+			);
+		}
+
+		if ( 2 !== $envelope_version ) {
+			return new \WP_Error(
+				'checkpoint_envelope_unsupported',
+				sprintf(
+					/* translators: %d: envelope version */
+					__( 'Unsupported checkpoint crypto envelope version: %d.', 'full-elementor-mcp' ),
+					$envelope_version
+				),
+				array( 'crypto_envelope_version' => $envelope_version )
+			);
+		}
+
+		// 2. Validate payload schema version (fail closed on unknown schemas):
 		$schema_version = (int) ( $row['payload_schema_version'] ?? 1 );
-		if ( 1 !== $schema_version ) {
+		if ( 1 !== $schema_version && 2 !== $schema_version ) {
 			return new \WP_Error(
 				'checkpoint_schema_unsupported',
 				sprintf(
@@ -508,6 +559,19 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			);
 		}
 
+		// 4.1. Reject legacy schema v1 snippet restore (cannot claim modern exactness):
+		$strategy_name = Full_Elementor_MCP_Checkpoint_Strategies::resolve_strategy( $resource_key );
+		if ( 1 === $schema_version && Full_Elementor_MCP_Checkpoint_Strategies::STRATEGY_SNIPPET === $strategy_name ) {
+			return new \WP_Error(
+				'checkpoint_legacy_snippet_not_exact',
+				__( 'Historical snippet checkpoints lack required exact fields (template_type, edit_mode) and cannot perform exact restoration. Classified as recovery-only.', 'full-elementor-mcp' ),
+				array(
+					'checkpoint_uuid'      => $row['checkpoint_uuid'] ?? '',
+					'effective_capability' => self::CAPABILITY_RECOVERY_ONLY,
+				)
+			);
+		}
+
 		// 5. Validate target resource binding & decrypted state identity:
 		if ( ! empty( $options['target_resource_key'] ) && $options['target_resource_key'] !== $resource_key ) {
 			return new \WP_Error(
@@ -521,7 +585,7 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			);
 		}
 
-		$strategy_check = Full_Elementor_MCP_Checkpoint_Strategies::validate_state_schema( $resource_key, $state );
+		$strategy_check = Full_Elementor_MCP_Checkpoint_Strategies::validate_state_schema( $resource_key, $state, $schema_version );
 		if ( is_wp_error( $strategy_check ) ) {
 			return $strategy_check;
 		}
@@ -564,13 +628,23 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 		$lock_released = false;
 
 		try {
-			// 8. Capture authoritative CURRENT resource state UNDER LOCK:
-			$current_state = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
-			if ( is_wp_error( $current_state ) ) {
-				return $current_state;
+			// 8. Capture authoritative CURRENT resource state UNDER LOCK (always modern v2 for recovery snapshot):
+			$current_state_v2 = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
+			if ( is_wp_error( $current_state_v2 ) ) {
+				return $current_state_v2;
 			}
 
-			$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state );
+			// For no-op comparison: compare state hash in the checkpoint's schema domain:
+			if ( 1 === $schema_version ) {
+				$current_state_v1 = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_schema_v1( $resource_key );
+				if ( is_wp_error( $current_state_v1 ) ) {
+					return $current_state_v1;
+				}
+				$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_v1 );
+			} else {
+				$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_v2 );
+			}
+
 			if ( is_wp_error( $current_hash ) ) {
 				return $current_hash;
 			}
@@ -588,13 +662,13 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				);
 			}
 
-			// 10. Pre-Restore Safety Checkpoint from locked current state:
+			// 10. Pre-Restore Safety Checkpoint from locked current state (ALWAYS modern v2 schema and envelope 2):
 			$pre_restore_result = self::capture_and_save(
 				$resource_key,
 				'pre_restore',
 				array(
-					'state'           => $current_state,
-					'state_schema'    => 'checkpoint_strategy_v1',
+					'state'           => $current_state_v2,
+					'state_schema'    => 'checkpoint_strategy_v2',
 					'source_ability'  => 'checkpoint-restore',
 					'label'           => 'Pre-Restore Snapshot before ' . $row['checkpoint_uuid'],
 					'user_id'         => $user_id,
@@ -608,7 +682,7 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 			self::ensure_restore_strategy_registered();
 
-			// 11. Begin WAL Journal entry using the SAME locked current state:
+			// 11. Begin WAL Journal entry using the SAME locked current state (authoritative modern v2):
 			$journal_id = Full_Elementor_MCP_Journal::begin( array(
 				'ability'            => 'checkpoint-restore',
 				'action'             => 'restore',
@@ -616,7 +690,7 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				'object_id'          => (int) $row['object_id'],
 				'resource_key'       => $resource_key,
 				'fencing_token'      => $fencing_token,
-				'before_state'       => $current_state,
+				'before_state'       => $current_state_v2,
 				'user_id'            => $user_id,
 				'credential_uuid'    => $cred_uuid,
 				'rollback_supported' => true,
@@ -645,10 +719,10 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				'is_create'       => false,
 			) );
 
-			// 13. Execute persistent restore writes through Safe_Writes:
+			// 13. Execute persistent restore writes through Safe_Writes with payload schema dispatch:
 			$write_error = null;
 			try {
-				$write_res = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $state, $fencing_token, $owner_id );
+				$write_res = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $state, $fencing_token, $owner_id, $schema_version );
 				if ( is_wp_error( $write_res ) ) {
 					$write_error = $write_res;
 				}
@@ -657,11 +731,12 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			}
 
 			if ( null !== $write_error ) {
-				// Rollback to pre-restore current state and verify exact hash:
-				$rb_res          = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $current_state, $fencing_token, $owner_id );
+				// Rollback to pre-restore current state using modern v2 schema:
+				$rb_res          = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $current_state_v2, $fencing_token, $owner_id, 2 );
 				$recaptured      = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
 				$recaptured_hash = is_array( $recaptured ) ? Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $recaptured ) : '';
-				$rb_exact        = is_string( $recaptured_hash ) && hash_equals( (string) $current_hash, $recaptured_hash );
+				$current_v2_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_v2 );
+				$rb_exact        = is_string( $recaptured_hash ) && is_string( $current_v2_hash ) && hash_equals( $current_v2_hash, $recaptured_hash );
 
 				Full_Elementor_MCP_Journal::mark_failed( $journal_id, $write_error->get_error_code(), $fencing_token );
 
@@ -681,16 +756,21 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				return $write_error;
 			}
 
-			// 14. Exact Post-Restore Verification:
-			$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
-			$post_hash   = is_array( $post_verify ) ? Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $post_verify ) : '';
+			// 14. Exact Post-Restore Verification in the matching schema domain:
+			if ( 1 === $schema_version ) {
+				$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_schema_v1( $resource_key );
+			} else {
+				$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
+			}
+			$post_hash = is_array( $post_verify ) ? Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $post_verify ) : '';
 
 			if ( ! is_string( $post_hash ) || ! hash_equals( (string) $row['state_hash'], $post_hash ) ) {
-				// Verification failed! Rollback and assert exact equality:
-				$rb_res          = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $current_state, $fencing_token, $owner_id );
+				// Verification failed! Rollback using modern v2 schema and assert exact equality:
+				$rb_res          = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $current_state_v2, $fencing_token, $owner_id, 2 );
 				$recaptured      = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
 				$recaptured_hash = is_array( $recaptured ) ? Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $recaptured ) : '';
-				$rb_exact        = is_string( $recaptured_hash ) && hash_equals( (string) $current_hash, $recaptured_hash );
+				$current_v2_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_v2 );
+				$rb_exact        = is_string( $recaptured_hash ) && is_string( $current_v2_hash ) && hash_equals( $current_v2_hash, $recaptured_hash );
 
 				Full_Elementor_MCP_Journal::mark_failed( $journal_id, 'checkpoint_restore_verification_failed', $fencing_token );
 
@@ -716,8 +796,9 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				);
 			}
 
-			// 15. Commit actual restored state to WAL journal (NOT hash string):
-			$commit_res = Full_Elementor_MCP_Journal::commit( $journal_id, $post_verify, $fencing_token );
+			// 15. Commit authoritative modern restored state to WAL journal (always modern v2):
+			$commit_state = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
+			$commit_res   = Full_Elementor_MCP_Journal::commit( $journal_id, is_array( $commit_state ) ? $commit_state : $post_verify, $fencing_token );
 			if ( true !== $commit_res ) {
 				return new \WP_Error(
 					'checkpoint_restore_journal_commit_failed',

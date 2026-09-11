@@ -26,9 +26,9 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Current database schema version.
 	 *
-	 * 1.1.0: Phase 5 encrypted checkpoints and restore engine schema extensions.
+	 * 1.3.0: Unambiguous historical crypto envelope generations and payload schema v2.
 	 */
-	public const DB_VERSION = '1.2.0';
+	public const DB_VERSION = '1.3.0';
 
 	/**
 	 * Option key storing installed schema version.
@@ -125,8 +125,8 @@ class Full_Elementor_MCP_Database_Installer {
 				object_id bigint(20) unsigned NOT NULL default 0,
 				checkpoint_type varchar(30) NOT NULL default 'automatic',
 				restore_capability varchar(30) NOT NULL default 'exact',
-				payload_schema_version int(10) unsigned NOT NULL default 1,
-				crypto_envelope_version int(10) unsigned NOT NULL default 1,
+				payload_schema_version int(10) unsigned NOT NULL default 2,
+				crypto_envelope_version int(10) unsigned NOT NULL default 0,
 				encryption_algorithm varchar(30) NOT NULL default 'none',
 				key_version int(10) unsigned NOT NULL default 1,
 				key_id varchar(64) default NULL,
@@ -233,6 +233,9 @@ class Full_Elementor_MCP_Database_Installer {
 		// Migrate existing checkpoint records and enforce checkpoint_uuid single-column uniqueness:
 		self::migrate_checkpoint_uuids_and_unique_constraint();
 
+		// Migrate historical crypto envelope versions using bounded authenticated trial detection:
+		self::migrate_crypto_envelopes();
+
 		// Verify that all 4 required tables, columns, indexes, and unique constraints exist!
 		if ( ! self::verify_schema() ) {
 			return false;
@@ -260,8 +263,8 @@ class Full_Elementor_MCP_Database_Installer {
 			'object_id'               => "bigint(20) unsigned NOT NULL default 0",
 			'checkpoint_type'         => "varchar(30) NOT NULL default 'automatic'",
 			'restore_capability'      => "varchar(30) NOT NULL default 'exact'",
-			'payload_schema_version'  => "int(10) unsigned NOT NULL default 1",
-			'crypto_envelope_version' => "int(10) unsigned NOT NULL default 1",
+			'payload_schema_version'  => "int(10) unsigned NOT NULL default 2",
+			'crypto_envelope_version' => "int(10) unsigned NOT NULL default 0",
 			'nonce'                   => "varchar(64) NOT NULL default ''",
 			'auth_tag'                => "varchar(64) default NULL",
 			'encrypted_payload'       => "longtext default NULL",
@@ -364,6 +367,63 @@ class Full_Elementor_MCP_Database_Installer {
 			// Add single-column UNIQUE index:
 			@$wpdb->query( "ALTER TABLE {$chk_table} ADD UNIQUE KEY idx_checkpoint_uuid (checkpoint_uuid)" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			@$wpdb->query( "CREATE UNIQUE INDEX IF NOT EXISTS {$chk_table}_idx_checkpoint_uuid ON {$chk_table}(checkpoint_uuid)" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		}
+	}
+
+	/**
+	 * Migrates historical checkpoints by identifying actual crypto envelope versions.
+	 *
+	 * Detects between Historical Format A (envelope v1: 6-field AAD) and
+	 * Historical Format B / Modern (envelope v2: 8-field capability-bound AAD).
+	 *
+	 * Performs bounded trial AEAD authentication:
+	 * 1. Attempt authentication with envelope v2 AAD
+	 * 2. Attempt authentication with envelope v1 AAD
+	 * 3. Exactly one successful trial identifies the envelope format (2 or 1)
+	 * 4. If key material is missing or authentication fails, assigns 0 (unresolved legacy)
+	 *
+	 * Never rewrites ciphertext, never exposes plaintext, and never guesses.
+	 */
+	public static function migrate_crypto_envelopes(): void {
+		global $wpdb;
+
+		$chk_table = self::get_checkpoints_table();
+		$cols      = self::get_table_columns( $chk_table );
+		if ( empty( $cols ) || ! in_array( 'crypto_envelope_version', $cols, true ) ) {
+			return;
+		}
+
+		if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Crypto' ) ) {
+			return;
+		}
+
+		// Inspect historical rows whose envelope version is ambiguous (0, 1, or NULL):
+		$rows = $wpdb->get_results(
+			"SELECT id, checkpoint_uuid, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash FROM {$chk_table} WHERE crypto_envelope_version IS NULL OR crypto_envelope_version IN (0, 1)",
+			ARRAY_A
+		); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+
+		if ( empty( $rows ) || ! is_array( $rows ) ) {
+			return;
+		}
+
+		foreach ( $rows as $row ) {
+			$row_id   = (int) ( $row['id'] ?? 0 );
+			$detected = Full_Elementor_MCP_Checkpoint_Crypto::detect_envelope_version( $row );
+
+			// If key is unavailable or verification failed, leave in explicit unresolved state (0):
+			$new_envelope  = ( $detected > 0 ) ? $detected : 0;
+			$curr_envelope = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : null;
+
+			if ( $curr_envelope !== $new_envelope ) {
+				$wpdb->query(
+					$wpdb->prepare(
+						"UPDATE {$chk_table} SET crypto_envelope_version = %d WHERE id = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						$new_envelope,
+						$row_id
+					)
+				);
+			}
 		}
 	}
 

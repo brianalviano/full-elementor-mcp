@@ -1443,7 +1443,7 @@ run_test( 'Schema: exactly four safety tables remain after Phase 5 extensions', 
 	assert_equals( 4, count( $expected ), 'There must be exactly four expected schema table specs' );
 
 	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema(), 'Full schema verification must pass' );
-	assert_equals( '1.2.0', Full_Elementor_MCP_Database_Installer::DB_VERSION );
+	assert_equals( '1.3.0', Full_Elementor_MCP_Database_Installer::DB_VERSION );
 } );
 
 // -----------------------------------------------------------------------------
@@ -1855,16 +1855,16 @@ run_test( 'Corrective Pass: Strategy & Resource identity validation inside decry
 
 run_test( 'Corrective Pass: Unsupported payload schema version fails closed before writes', function () {
 	global $wpdb;
-	$post_id = wp_insert_post( array( 'post_title' => 'Schema v2 Post' ) );
+	$post_id = wp_insert_post( array( 'post_title' => 'Schema v99 Post' ) );
 	$saved   = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:' . $post_id );
 	assert_false( is_wp_error( $saved ) );
 
-	// Tamper schema version to 2:
+	// Tamper schema version to 99:
 	$table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
-	$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET payload_schema_version = 2 WHERE checkpoint_uuid = %s", $saved['checkpoint_uuid'] ) );
+	$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET payload_schema_version = 99 WHERE checkpoint_uuid = %s", $saved['checkpoint_uuid'] ) );
 
 	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $saved['id'] );
-	assert_error_code( 'checkpoint_schema_unsupported', $res, 'Must reject schema version 2' );
+	assert_error_code( 'checkpoint_schema_unsupported', $res, 'Must reject unsupported schema version 99' );
 } );
 
 run_test( 'Corrective Pass: WordPress salt rotation returns checkpoint_key_rotated and keyring restores access', function () {
@@ -1991,7 +1991,235 @@ run_test( 'Corrective Pass: Restore tree validation fails closed on invalid tree
 // 13. Phase 5 Final Corrective Pass Regression Tests
 // -----------------------------------------------------------------------------
 
-run_test( 'Final Corrective Pass: Upgrade from simulated 1.1.0 preserves rows, generates unique UUIDs, and enforces single-column uniqueness', function () {
+/**
+ * Fixture builder for Initial Phase 5 post checkpoints (commit lineage 51814479...).
+ *
+ * Authentic characteristics:
+ * - Envelope v1 AAD (6 fields: checkpoint_uuid, encryption_algorithm, key_id, key_version, payload_schema_version, resource_key).
+ * - Omitted: checkpoint_type and restore_capability.
+ * - Flat Elementor structure without modern data_exists, page_settings_exists, or meta map.
+ * - key_id: 'wp_salt_v1'.
+ */
+function create_authentic_51814479_post_fixture( int $post_id, string $uuid, string $algo, string $key_bytes ): array {
+	$state = array(
+		'strategy'       => 'post',
+		'post_id'        => $post_id,
+		'post_fields'    => array(
+			'ID'             => $post_id,
+			'post_type'      => 'post',
+			'post_status'    => 'publish',
+			'post_title'     => 'Initial 51814479 Post',
+			'post_name'      => 'initial-51814479-post',
+			'post_content'   => 'Initial 51814479 Content',
+			'post_excerpt'   => '',
+			'post_parent'    => 0,
+			'menu_order'     => 0,
+			'comment_status' => 'closed',
+			'ping_status'    => 'closed',
+			'post_password'  => '',
+		),
+		'elementor'      => array(
+			'data'          => array( array( 'id' => 'sec_5181', 'elType' => 'section', 'elements' => array() ) ),
+			'page_settings' => array( 'template' => 'default' ),
+			'edit_mode'     => 'builder',
+			'template_type' => 'post',
+			'page_template' => 'default',
+			'conditions'    => array(),
+			'popup_display' => array(),
+		),
+		'featured_image' => 0,
+		'terms'          => array(),
+	);
+
+	$json = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $state );
+	$hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $state );
+
+	$aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
+		'checkpoint_uuid'        => $uuid,
+		'encryption_algorithm'   => $algo,
+		'key_id'                 => 'wp_salt_v1',
+		'key_version'            => 1,
+		'payload_schema_version' => 1,
+		'resource_key'           => 'post:' . $post_id,
+	), 1 );
+
+	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
+		$nonce      = random_bytes( 24 );
+		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $json, $aad, $nonce, $key_bytes );
+		$tag        = null;
+	} else {
+		$nonce      = random_bytes( 12 );
+		$raw_tag    = '';
+		$ciphertext = openssl_encrypt( $json, 'aes-256-gcm', $key_bytes, OPENSSL_RAW_DATA, $nonce, $raw_tag, $aad, 16 );
+		$tag        = base64_encode( $raw_tag );
+	}
+
+	return array(
+		'state'          => $state,
+		'json'           => $json,
+		'hash'           => $hash,
+		'ciphertext_b64' => base64_encode( $ciphertext ),
+		'nonce_b64'      => base64_encode( $nonce ),
+		'auth_tag'       => $tag,
+		'uuid'           => $uuid,
+		'resource_key'   => 'post:' . $post_id,
+		'key_id'         => 'wp_salt_v1',
+	);
+}
+
+/**
+ * Fixture builder for Corrective Phase 5 post checkpoints (commit b16dc14e...).
+ *
+ * Authentic characteristics:
+ * - Envelope v2 AAD (8 fields including checkpoint_type and restore_capability).
+ * - payload_schema_version = 1.
+ * - Elementor structure contains data, page_settings, and meta map, but lacks data_exists and page_settings_exists flags.
+ */
+function create_authentic_b16_post_fixture( int $post_id, string $uuid, string $algo, array $key_info ): array {
+	$terms_map = array();
+	if ( function_exists( 'wp_get_object_terms' ) ) {
+		$taxonomies = array( 'elementor_library_type', 'elementor_library_category', 'category', 'post_tag' );
+		foreach ( $taxonomies as $tax ) {
+			if ( function_exists( 'taxonomy_exists' ) && ! taxonomy_exists( $tax ) ) {
+				continue;
+			}
+			$terms = wp_get_object_terms( $post_id, $tax, array( 'fields' => 'slugs' ) );
+			$terms_map[ $tax ] = ( ! is_wp_error( $terms ) && is_array( $terms ) ) ? array_values( (array) $terms ) : array();
+		}
+	}
+
+	$state = array(
+		'strategy'       => 'post',
+		'post_id'        => $post_id,
+		'post_fields'    => array(
+			'ID'             => $post_id,
+			'post_type'      => 'post',
+			'post_status'    => 'publish',
+			'post_title'     => 'b16dc14e Post',
+			'post_name'      => 'b16dc14e-post',
+			'post_content'   => 'b16dc14e Content',
+			'post_excerpt'   => '',
+			'post_parent'    => 0,
+			'menu_order'     => 0,
+			'comment_status' => 'closed',
+			'ping_status'    => 'closed',
+			'post_password'  => '',
+		),
+		'elementor'      => array(
+			'data'          => array( array( 'id' => 'sec_b16', 'elType' => 'section', 'elements' => array() ) ),
+			'page_settings' => array( 'template' => 'elementor_canvas' ),
+			'meta'          => array(
+				'_elementor_edit_mode'     => array( 'exists' => true, 'value' => 'builder' ),
+				'_elementor_template_type' => array( 'exists' => true, 'value' => 'post' ),
+				'_elementor_version'       => array( 'exists' => true, 'value' => '3.25.0' ),
+				'_elementor_pro_version'   => array( 'exists' => false, 'value' => null ),
+				'_elementor_conditions'    => array( 'exists' => false, 'value' => null ),
+				'_elementor_popup_display' => array( 'exists' => false, 'value' => null ),
+				'_wp_page_template'        => array( 'exists' => true, 'value' => 'elementor_canvas' ),
+			),
+		),
+		'featured_image' => 0,
+		'terms'          => $terms_map,
+	);
+
+	$json = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $state );
+	$hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $state );
+
+	$aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
+		'checkpoint_type'        => 'automatic',
+		'checkpoint_uuid'        => $uuid,
+		'encryption_algorithm'   => $algo,
+		'key_id'                 => $key_info['key_id'],
+		'key_version'            => $key_info['version'],
+		'payload_schema_version' => 1,
+		'resource_key'           => 'post:' . $post_id,
+		'restore_capability'     => 'exact',
+	), 2 );
+
+	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
+		$nonce      = random_bytes( 24 );
+		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $json, $aad, $nonce, $key_info['raw_key'] );
+		$tag        = null;
+	} else {
+		$nonce      = random_bytes( 12 );
+		$raw_tag    = '';
+		$ciphertext = openssl_encrypt( $json, 'aes-256-gcm', $key_info['raw_key'], OPENSSL_RAW_DATA, $nonce, $raw_tag, $aad, 16 );
+		$tag        = base64_encode( $raw_tag );
+	}
+
+	return array(
+		'state'          => $state,
+		'json'           => $json,
+		'hash'           => $hash,
+		'ciphertext_b64' => base64_encode( $ciphertext ),
+		'nonce_b64'      => base64_encode( $nonce ),
+		'auth_tag'       => $tag,
+		'uuid'           => $uuid,
+		'resource_key'   => 'post:' . $post_id,
+		'key_id'         => $key_info['key_id'],
+	);
+}
+
+/**
+ * Fixture builder for Corrective Phase 5 snippet checkpoints (commit b16dc14e...).
+ *
+ * Authentic characteristics:
+ * - Envelope v2 AAD (8 fields).
+ * - payload_schema_version = 1.
+ * - Lacks template_type, edit_mode, code_exists, location_exists, priority_exists.
+ */
+function create_authentic_b16_snippet_fixture( int $post_id, string $uuid, string $algo, array $key_info ): array {
+	$state = array(
+		'strategy'      => 'snippet',
+		'post_id'       => $post_id,
+		'post_title'    => 'b16dc14e Snippet',
+		'post_status'   => 'publish',
+		'code'          => 'console.log("b16 snippet");',
+		'location'      => 'elementor_head',
+		'priority'      => 10,
+		'conditions'    => array( 'exists' => true, 'value' => array( 'general' ) ),
+		'extra_options' => array( 'exists' => false, 'value' => null ),
+	);
+
+	$json = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $state );
+	$hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $state );
+
+	$aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
+		'checkpoint_type'        => 'automatic',
+		'checkpoint_uuid'        => $uuid,
+		'encryption_algorithm'   => $algo,
+		'key_id'                 => $key_info['key_id'],
+		'key_version'            => $key_info['version'],
+		'payload_schema_version' => 1,
+		'resource_key'           => 'post:' . $post_id,
+		'restore_capability'     => 'exact',
+	), 2 );
+
+	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
+		$nonce      = random_bytes( 24 );
+		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $json, $aad, $nonce, $key_info['raw_key'] );
+		$tag        = null;
+	} else {
+		$nonce      = random_bytes( 12 );
+		$raw_tag    = '';
+		$ciphertext = openssl_encrypt( $json, 'aes-256-gcm', $key_info['raw_key'], OPENSSL_RAW_DATA, $nonce, $raw_tag, $aad, 16 );
+		$tag        = base64_encode( $raw_tag );
+	}
+
+	return array(
+		'state'          => $state,
+		'json'           => $json,
+		'hash'           => $hash,
+		'ciphertext_b64' => base64_encode( $ciphertext ),
+		'nonce_b64'      => base64_encode( $nonce ),
+		'auth_tag'       => $tag,
+		'uuid'           => $uuid,
+		'resource_key'   => 'post:' . $post_id,
+		'key_id'         => $key_info['key_id'],
+	);
+}
+
+run_test( 'Final Corrective Pass: Upgrade from simulated 1.1.0 preserves rows, generates unique UUIDs, detects envelope formats, and enforces single-column uniqueness', function () {
 	global $wpdb;
 	$table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
 
@@ -2002,20 +2230,84 @@ run_test( 'Final Corrective Pass: Upgrade from simulated 1.1.0 preserves rows, g
 	$wpdb->query( "ALTER TABLE {$table} DROP INDEX idx_checkpoint_uuid" );
 	$wpdb->query( "CREATE INDEX IF NOT EXISTS {$table}_idx_checkpoint_uuid ON {$table}(checkpoint_uuid)" );
 
-	// Insert test rows with missing, blank, and duplicate UUIDs:
+	// Build authentic historical fixtures:
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+
+	$post_id_4 = wp_insert_post( array( 'post_title' => 'Migration Post 4' ) );
+	$post_id_5 = wp_insert_post( array( 'post_title' => 'Migration Post 5' ) );
+	$snip_id_6 = wp_insert_post( array( 'post_title' => 'Migration Snip 6', 'post_type' => 'elementor_snippet' ) );
+
+	$fix_5181 = create_authentic_51814479_post_fixture( $post_id_4, 'chk-fix-5181-004', $algo, $salt_info['raw_key'] );
+	$fix_b16p = create_authentic_b16_post_fixture( $post_id_5, 'chk-fix-b16p-005', $algo, $salt_info );
+	$fix_b16s = create_authentic_b16_snippet_fixture( $snip_id_6, 'chk-fix-b16s-006', $algo, $salt_info );
+
+	// Insert test rows: 3 legacy rows with blank/duplicate UUIDs + 3 authentic historical rows:
 	$wpdb->query( "DELETE FROM {$table}" );
 	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (1, '', '2026-09-10 00:00:00', 'post:1', 'post', 1, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p1', 'h1', 10, 'blank_uuid', 'manual', '', '', 0)" );
 	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (2, 'dup_uuid', '2026-09-10 00:01:00', 'post:2', 'post', 2, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p2', 'h2', 10, 'dup_1', 'manual', '', '', 0)" );
 	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (3, 'dup_uuid', '2026-09-10 00:02:00', 'post:3', 'post', 3, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p3', 'h3', 10, 'dup_2', 'manual', '', '', 0)" );
-	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (4, 'unique_orig_uuid', '2026-09-10 00:03:00', 'post:4', 'post', 4, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p4', 'h4', 10, 'orig', 'manual', '', '', 0)" );
+
+	// Row 4: Authentic Format A (commit 51814479...)
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (4, %s, '2026-09-10 00:03:00', %s, 'post', %d, 'automatic', 'exact', 1, %s, 1, 'wp_salt_v1', %s, %s, %s, %s, %d, 'hist_5181', 'manual', '', '', 0)",
+			$fix_5181['uuid'],
+			$fix_5181['resource_key'],
+			$post_id_4,
+			$algo,
+			$fix_5181['nonce_b64'],
+			$fix_5181['auth_tag'],
+			$fix_5181['ciphertext_b64'],
+			$fix_5181['hash'],
+			strlen( $fix_5181['json'] )
+		)
+	);
+
+	// Row 5: Authentic Format B (commit b16dc14e post)
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (5, %s, '2026-09-10 00:04:00', %s, 'post', %d, 'automatic', 'exact', 1, %s, 1, %s, %s, %s, %s, %s, %d, 'hist_b16p', 'manual', '', '', 0)",
+			$fix_b16p['uuid'],
+			$fix_b16p['resource_key'],
+			$post_id_5,
+			$algo,
+			$fix_b16p['key_id'],
+			$fix_b16p['nonce_b64'],
+			$fix_b16p['auth_tag'],
+			$fix_b16p['ciphertext_b64'],
+			$fix_b16p['hash'],
+			strlen( $fix_b16p['json'] )
+		)
+	);
+
+	// Row 6: Authentic Format B (commit b16dc14e snippet)
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (6, %s, '2026-09-10 00:05:00', %s, 'post', %d, 'automatic', 'exact', 1, %s, 1, %s, %s, %s, %s, %s, %d, 'hist_b16s', 'manual', '', '', 0)",
+			$fix_b16s['uuid'],
+			$fix_b16s['resource_key'],
+			$snip_id_6,
+			$algo,
+			$fix_b16s['key_id'],
+			$fix_b16s['nonce_b64'],
+			$fix_b16s['auth_tag'],
+			$fix_b16s['ciphertext_b64'],
+			$fix_b16s['hash'],
+			strlen( $fix_b16s['json'] )
+		)
+	);
 
 	// Execute actual upgrade from old 1.1.0 schema:
 	$upgraded = Full_Elementor_MCP_Database_Installer::upgrade( '1.1.0' );
 	assert_true( $upgraded, 'Database upgrade from 1.1.0 must succeed' );
 
-	// Verify DB version is updated to 1.2.0:
+	// Verify DB version is updated to 1.3.0:
 	$installed_version = get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION );
-	assert_equals( '1.2.0', $installed_version, 'DB version must be upgraded to 1.2.0' );
+	assert_equals( '1.3.0', $installed_version, 'DB version must be upgraded to 1.3.0' );
 
 	// Exactly four tables remain:
 	$schemas = Full_Elementor_MCP_Database_Installer::get_schema_definitions();
@@ -2023,29 +2315,124 @@ run_test( 'Final Corrective Pass: Upgrade from simulated 1.1.0 preserves rows, g
 
 	// All rows preserved (none deleted):
 	$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
-	assert_equals( 4, $count, 'All existing checkpoint rows must be preserved' );
+	assert_equals( 6, $count, 'All 6 checkpoint rows must be preserved' );
 
 	// Every row has non-empty and distinct UUID:
 	$uuids = $wpdb->get_col( "SELECT checkpoint_uuid FROM {$table} ORDER BY id ASC" );
 	foreach ( $uuids as $u ) {
 		assert_true( ! empty( $u ), 'Every checkpoint UUID must be non-empty' );
 	}
-	assert_equals( 4, count( array_unique( $uuids ) ), 'Every checkpoint UUID must be unique after migration' );
-	assert_equals( 'unique_orig_uuid', $uuids[3], 'Existing unique UUID must be preserved' );
+	assert_equals( 6, count( array_unique( $uuids ) ), 'Every checkpoint UUID must be unique after migration' );
+
+	// Verify authentic rows preserved their original ciphertext without rewriting:
+	$r4 = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 4", ARRAY_A );
+	$r5 = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 5", ARRAY_A );
+	$r6 = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 6", ARRAY_A );
+
+	assert_equals( $fix_5181['ciphertext_b64'], $r4['encrypted_payload'], 'Format A ciphertext must not be rewritten' );
+	assert_equals( $fix_b16p['ciphertext_b64'], $r5['encrypted_payload'], 'Format B post ciphertext must not be rewritten' );
+	assert_equals( $fix_b16s['ciphertext_b64'], $r6['encrypted_payload'], 'Format B snippet ciphertext must not be rewritten' );
+
+	// Verify envelope detection correctly identified generations:
+	assert_equals( 1, (int) $r4['crypto_envelope_version'], 'Format A row must be identified as envelope 1' );
+	assert_equals( 2, (int) $r5['crypto_envelope_version'], 'Format B post row must be identified as envelope 2' );
+	assert_equals( 2, (int) $r6['crypto_envelope_version'], 'Format B snippet row must be identified as envelope 2' );
+
+	// Verify all historical authentic rows authenticate and decrypt cleanly:
+	$dec_4 = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $r4 );
+	assert_not_wp_error( $dec_4 );
+	assert_equals( $post_id_4, $dec_4['post_id'] );
+
+	$dec_5 = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $r5 );
+	assert_not_wp_error( $dec_5 );
+	assert_equals( $post_id_5, $dec_5['post_id'] );
+
+	$dec_6 = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $r6 );
+	assert_not_wp_error( $dec_6 );
+	assert_equals( $snip_id_6, $dec_6['post_id'] );
 
 	// Schema verification confirms single-column uniqueness on checkpoint_uuid:
 	$is_unique = Full_Elementor_MCP_Database_Installer::verify_single_column_unique_constraint( $table, 'checkpoint_uuid' );
 	assert_true( $is_unique, 'checkpoint_uuid must possess single-column uniqueness guarantee' );
+} );
 
-	// Proven at DB level: duplicate insert must fail:
-	$dup_res = $wpdb->query(
+run_test( 'Final Corrective Pass: Upgrade from simulated 1.2.0 reclassifies mislabeled envelope 1 to envelope 2 via authenticated detection', function () {
+	global $wpdb;
+	$table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+
+	// Set version option to 1.2.0:
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '1.2.0' );
+
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+
+	$post_id_b16 = wp_insert_post( array( 'post_title' => 'Reclassify Post b16' ) );
+	$post_id_org = wp_insert_post( array( 'post_title' => 'Reclassify Post 5181' ) );
+
+	$fix_b16 = create_authentic_b16_post_fixture( $post_id_b16, 'chk-reclass-b16', $algo, $salt_info );
+	$fix_org = create_authentic_51814479_post_fixture( $post_id_org, 'chk-reclass-5181', $algo, $salt_info['raw_key'] );
+
+	$wpdb->query( "DELETE FROM {$table}" );
+
+	// Insert b16 row incorrectly stamped crypto_envelope_version = 1 (as commit 346b08a did):
+	$wpdb->query(
 		$wpdb->prepare(
-			"INSERT INTO {$table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
-			 VALUES (%s, UTC_TIMESTAMP(), 'post:999', 'post', 999, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p', 'h', 10, 'dup', 'manual', '', '', 0)",
-			$uuids[0]
+			"INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (10, %s, '2026-09-11 00:00:00', %s, 'post', %d, 'automatic', 'exact', 1, 1, %s, 1, %s, %s, %s, %s, %s, %d, 'mislabeled_b16', 'manual', '', '', 0)",
+			$fix_b16['uuid'],
+			$fix_b16['resource_key'],
+			$post_id_b16,
+			$algo,
+			$fix_b16['key_id'],
+			$fix_b16['nonce_b64'],
+			$fix_b16['auth_tag'],
+			$fix_b16['ciphertext_b64'],
+			$fix_b16['hash'],
+			strlen( $fix_b16['json'] )
 		)
 	);
-	assert_false( $dup_res, 'Inserting duplicate checkpoint_uuid must fail at DB level' );
+
+	// Insert authentic 51814479 row correctly stamped 1:
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (11, %s, '2026-09-11 00:01:00', %s, 'post', %d, 'automatic', 'exact', 1, 1, %s, 1, 'wp_salt_v1', %s, %s, %s, %s, %d, 'correct_5181', 'manual', '', '', 0)",
+			$fix_org['uuid'],
+			$fix_org['resource_key'],
+			$post_id_org,
+			$algo,
+			$fix_org['nonce_b64'],
+			$fix_org['auth_tag'],
+			$fix_org['ciphertext_b64'],
+			$fix_org['hash'],
+			strlen( $fix_org['json'] )
+		)
+	);
+
+	// Upgrade:
+	$upgraded = Full_Elementor_MCP_Database_Installer::upgrade( '1.2.0' );
+	assert_true( $upgraded, 'Database upgrade from 1.2.0 must succeed' );
+	assert_equals( '1.3.0', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ), 'DB version must be 1.3.0' );
+
+	$r_b16 = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 10", ARRAY_A );
+	$r_org = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 11", ARRAY_A );
+
+	// Ciphertext must remain strictly untouched:
+	assert_equals( $fix_b16['ciphertext_b64'], $r_b16['encrypted_payload'], 'b16 ciphertext must not be rewritten' );
+	assert_equals( $fix_org['ciphertext_b64'], $r_org['encrypted_payload'], '5181 ciphertext must not be rewritten' );
+
+	// b16 row must be safely reclassified to envelope 2:
+	assert_equals( 2, (int) $r_b16['crypto_envelope_version'], 'Mislabeled b16 row must be reclassified to envelope 2' );
+	assert_equals( 1, (int) $r_org['crypto_envelope_version'], 'Original 5181 row must remain envelope 1' );
+
+	// Decrypt succeeds for both:
+	$dec_b16 = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $r_b16 );
+	assert_not_wp_error( $dec_b16, 'Reclassified b16 row must decrypt successfully' );
+	assert_equals( $post_id_b16, $dec_b16['post_id'] );
+
+	$dec_org = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $r_org );
+	assert_not_wp_error( $dec_org, 'Original 5181 row must decrypt successfully' );
+	assert_equals( $post_id_org, $dec_org['post_id'] );
 } );
 
 run_test( 'Final Corrective Pass: Checkpoint-restore strategy survives process restart and recovery does not report unsupported', function () {
@@ -2165,52 +2552,161 @@ run_test( 'Final Corrective Pass: Checkpoint-restore strategy survives process r
 	assert_equals( 'manual_recovery_required', $found_div['reason'], 'Divergent state must report manual_recovery_required' );
 } );
 
+run_test( 'Final Corrective Pass: Security boundary - Envelope v1 restore_capability tampering is untrusted and fails closed with 0 writes', function () {
+	global $wpdb;
+	$post_id   = wp_insert_post( array( 'post_title' => 'Untrusted Capability Post' ) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	$uuid    = 'chk-untrusted-cap-001';
+	$fixture = create_authentic_51814479_post_fixture( $post_id, $uuid, $algo, $salt_info['raw_key'] );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'recovery', 'recovery_only', 1, 1, %s, 1, 'wp_salt_v1', %s, %s, %s, %s, %d, 'v1_rec', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$post_id,
+			$algo,
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Checkpoint decrypts cleanly (usable as recovery evidence):
+	$row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $chk_id );
+	$dec = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $row );
+	assert_not_wp_error( $dec, 'Envelope v1 must decrypt for internal inspection' );
+
+	// Malicious modification in DB: elevate recovery_only to exact!
+	$wpdb->query( $wpdb->prepare( "UPDATE {$chk_table} SET restore_capability = 'exact' WHERE id = %d", $chk_id ) );
+
+	// Record write count before restore attempt:
+	$writes_before = Full_Elementor_MCP_Mutation_Context::get_write_count();
+
+	// Direct exact restore MUST FAIL CLOSED because v1 did not authenticate capability:
+	$restore_res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_error_code( 'checkpoint_legacy_capability_untrusted', $restore_res, 'Envelope v1 must fail closed on exact restore' );
+
+	// Assert persistent write count is strictly 0:
+	$writes_after = Full_Elementor_MCP_Mutation_Context::get_write_count();
+	assert_equals( $writes_before, $writes_after, 'Zero persistent writes must occur when legacy capability is untrusted' );
+
+	// Post must be completely untouched:
+	$post = get_post( $post_id );
+	assert_equals( 'Untrusted Capability Post', $post->post_title );
+} );
+
+run_test( 'Final Corrective Pass: Legacy post v1 restores without deleting absent flags and state hash verifies in v1 domain', function () {
+	global $wpdb;
+	$post_id   = wp_insert_post( array( 'post_title' => 'b16 Legacy Post' ) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	$uuid    = 'chk-legacy-post-v1-001';
+	$fixture = create_authentic_b16_post_fixture( $post_id, $uuid, $algo, $salt_info );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 2, %s, 1, %s, %s, %s, %s, %s, %d, 'b16_post', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$post_id,
+			$algo,
+			$fixture['key_id'],
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Mutate live post to diverge:
+	update_post_meta( $post_id, '_elementor_data', wp_json_encode( array( array( 'id' => 'diverged_sec', 'elType' => 'section', 'elements' => array() ) ) ) );
+	wp_update_post( array( 'ID' => $post_id, 'post_title' => 'Mutated Title Before Restore' ) );
+
+	// Restore legacy post checkpoint:
+	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_not_wp_error( $res, 'Legacy post v1 checkpoint must restore cleanly' );
+	assert_true( ! empty( $res['restored'] ), 'Restore must report restored true' );
+
+	// Verify post fields and Elementor data restored:
+	$post = get_post( $post_id );
+	assert_equals( 'b16dc14e Post', $post->post_title, 'Post title must be restored' );
+
+	$raw_data = get_post_meta( $post_id, '_elementor_data', true );
+	$data     = json_decode( $raw_data, true );
+	assert_true( is_array( $data ) && ! empty( $data ), 'Elementor data must exist and not be deleted' );
+	assert_equals( 'sec_b16', $data[0]['id'], 'Captured Elementor elements tree must be restored' );
+
+	// Verify pre-restore checkpoint created during restore uses modern schema 2 and envelope 2:
+	$pre_row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $res['pre_restore_uuid'] );
+	assert_equals( 2, (int) $pre_row['payload_schema_version'], 'Pre-restore checkpoint must use schema version 2' );
+	assert_equals( 2, (int) $pre_row['crypto_envelope_version'], 'Pre-restore checkpoint must use envelope version 2' );
+} );
+
+run_test( 'Final Corrective Pass: Legacy snippet v1 rejects exact restoration and fails closed with 0 writes', function () {
+	global $wpdb;
+	$snip_id   = wp_insert_post( array( 'post_title' => 'b16 Legacy Snippet', 'post_type' => 'elementor_snippet' ) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	$uuid    = 'chk-legacy-snip-v1-001';
+	$fixture = create_authentic_b16_snippet_fixture( $snip_id, $uuid, $algo, $salt_info );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 2, %s, 1, %s, %s, %s, %s, %s, %d, 'b16_snip', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$snip_id,
+			$algo,
+			$fixture['key_id'],
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Checkpoint still decrypts cleanly for inspection:
+	$row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $chk_id );
+	$dec = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $row );
+	assert_not_wp_error( $dec, 'Legacy snippet must decrypt for recovery evidence' );
+
+	// Record write count:
+	$writes_before = Full_Elementor_MCP_Mutation_Context::get_write_count();
+
+	// Exact restore MUST FAIL CLOSED (snippet v1 lacked template_type/edit_mode):
+	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_error_code( 'checkpoint_legacy_snippet_not_exact', $res, 'Legacy snippet must reject exact restore' );
+
+	$writes_after = Full_Elementor_MCP_Mutation_Context::get_write_count();
+	assert_equals( $writes_before, $writes_after, 'Zero persistent writes must occur on legacy snippet restore rejection' );
+} );
+
 run_test( 'Final Corrective Pass: Crypto envelope v1/v2 compatibility, legacy wp_salt_v1 fallback, and rotation error handling', function () {
 	global $wpdb;
 	$compat_post_id = wp_insert_post( array( 'post_title' => 'Crypto Envelope Compat Post' ) );
-	$compat_res_key = 'post:' . $compat_post_id;
-	$compat_state   = Full_Elementor_MCP_Checkpoint_Strategies::capture( $compat_res_key );
-	$compat_json    = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $compat_state );
-	$compat_hash    = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $compat_state );
 	$salt_info      = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
 	$algo           = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
 
 	$legacy_uuid = 'legacy-phase5-chk-0001';
-
-	// Build exact envelope v1 AAD (omits checkpoint_type and restore_capability):
-	$legacy_aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
-		'checkpoint_uuid'        => $legacy_uuid,
-		'encryption_algorithm'   => $algo,
-		'key_id'                 => 'wp_salt_v1',
-		'key_version'            => 1,
-		'payload_schema_version' => 1,
-		'resource_key'           => $compat_res_key,
-	), 1 );
-
-	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
-		$legacy_nonce = random_bytes( 24 );
-		$legacy_cipher = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt(
-			$compat_json,
-			$legacy_aad,
-			$legacy_nonce,
-			$salt_info['raw_key']
-		);
-		$legacy_tag = null;
-	} else {
-		$legacy_nonce = random_bytes( 12 );
-		$raw_tag      = '';
-		$legacy_cipher = openssl_encrypt(
-			$compat_json,
-			'aes-256-gcm',
-			$salt_info['raw_key'],
-			OPENSSL_RAW_DATA,
-			$legacy_nonce,
-			$raw_tag,
-			$legacy_aad,
-			16
-		);
-		$legacy_tag = base64_encode( $raw_tag );
-	}
+	$fixture     = create_authentic_51814479_post_fixture( $compat_post_id, $legacy_uuid, $algo, $salt_info['raw_key'] );
 
 	// Insert into DB as an existing Phase 5 row (crypto_envelope_version = 1, key_id = 'wp_salt_v1'):
 	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
@@ -2219,14 +2715,14 @@ run_test( 'Final Corrective Pass: Crypto envelope v1/v2 compatibility, legacy wp
 			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
 			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 1, %s, 1, 'wp_salt_v1', %s, %s, %s, %s, %d, 'legacy_v1', 'auto', '', '', 0)",
 			$legacy_uuid,
-			$compat_res_key,
+			$fixture['resource_key'],
 			$compat_post_id,
 			$algo,
-			base64_encode( $legacy_nonce ),
-			$legacy_tag,
-			base64_encode( $legacy_cipher ),
-			$compat_hash,
-			strlen( $compat_json )
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
 		)
 	);
 	$legacy_row_id = (int) $wpdb->insert_id;
@@ -2237,9 +2733,9 @@ run_test( 'Final Corrective Pass: Crypto envelope v1/v2 compatibility, legacy wp
 	assert_false( is_wp_error( $decrypted_v1 ), 'Legacy v1 checkpoint must decrypt with unchanged salts' );
 	assert_equals( $compat_post_id, $decrypted_v1['post_id'], 'Decrypted post_id must match' );
 
-	// 2. Restore legacy checkpoint -> MUST SUCCEED
+	// 2. Direct exact restore on envelope v1 -> MUST FAIL CLOSED (untrusted capability):
 	$restore_v1 = Full_Elementor_MCP_Checkpoint_Manager::restore( $legacy_row_id );
-	assert_false( is_wp_error( $restore_v1 ), 'Legacy v1 checkpoint must restore cleanly' );
+	assert_error_code( 'checkpoint_legacy_capability_untrusted', $restore_v1, 'Envelope v1 must fail closed on exact restore' );
 
 	// 3. Rotate WordPress salts:
 	$original_raw_key = $salt_info['raw_key'];
@@ -2266,6 +2762,7 @@ run_test( 'Final Corrective Pass: Crypto envelope v1/v2 compatibility, legacy wp
 	assert_false( is_wp_error( $v2_saved ) );
 	$v2_row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $v2_saved['id'] );
 	assert_equals( 2, (int) $v2_row['crypto_envelope_version'], 'New checkpoint must use envelope version 2' );
+	assert_equals( 2, (int) $v2_row['payload_schema_version'], 'New checkpoint must use payload schema version 2' );
 	$v2_row['restore_capability'] = 'tampered';
 	$dec_v2_tampered = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $v2_row );
 	assert_error_code( 'checkpoint_integrity_failed', $dec_v2_tampered, 'Tampered restore_capability on envelope v2 must fail AEAD verification' );
