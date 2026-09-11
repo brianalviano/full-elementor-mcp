@@ -124,22 +124,20 @@ class Full_Elementor_MCP_Elementor_Features {
 			return false;
 		}
 
+		// 1. Check Elementor experiments for active 'container' feature.
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->experiments ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->experiments, 'is_feature_active' ) ) {
-					return (bool) \Elementor\Plugin::$instance->experiments->is_feature_active( 'container' );
+					if ( \Elementor\Plugin::$instance->experiments->is_feature_active( 'container' ) ) {
+						return true;
+					}
 				}
 			} catch ( \Throwable $e ) {
-				return false;
+				// Fall through.
 			}
 		}
 
-		// Check if container element class exists.
-		if ( class_exists( '\Elementor\Includes\Elements\Container' ) ) {
-			return true;
-		}
-
-		// Check elements_manager for container element type.
+		// 2. Check elements_manager for registered container element type.
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->elements_manager ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->elements_manager, 'get_element_types' ) ) {
@@ -149,16 +147,19 @@ class Full_Elementor_MCP_Elementor_Features {
 					}
 				}
 			} catch ( \Throwable $e ) {
-				return false;
+				// Fall through.
 			}
 		}
 
-		// Fail closed: unknown capability != enabled capability.
+		// Fail closed: class presence alone is NOT active runtime evidence.
 		return false;
 	}
 
 	/**
 	 * Checks if nested elements experiment is supported and active.
+	 *
+	 * Requires active 'nested-elements' experiment or a registered widget instance of Widget_Nested_Base.
+	 * Fails closed if unknown.
 	 *
 	 * @return bool True if nested elements are active.
 	 */
@@ -171,21 +172,41 @@ class Full_Elementor_MCP_Elementor_Features {
 			return false;
 		}
 
+		// 1. Check if 'nested-elements' experiment/feature is active.
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->experiments ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->experiments, 'is_feature_active' ) ) {
-					return (bool) \Elementor\Plugin::$instance->experiments->is_feature_active( 'nested-elements' );
+					if ( \Elementor\Plugin::$instance->experiments->is_feature_active( 'nested-elements' ) ) {
+						return true;
+					}
 				}
 			} catch ( \Throwable $e ) {
-				return false;
+				// Fall through.
 			}
 		}
 
-		// Check for NestedElements module class.
-		if ( class_exists( '\Elementor\Modules\NestedElements\Module' ) ) {
-			return true;
+		// 2. Or if a registered runtime widget is an instance of Widget_Nested_Base.
+		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->widgets_manager ) ) {
+			try {
+				if ( method_exists( \Elementor\Plugin::$instance->widgets_manager, 'get_widget_types' ) ) {
+					$widgets = \Elementor\Plugin::$instance->widgets_manager->get_widget_types();
+					if ( is_array( $widgets ) ) {
+						$nested_base_class = '\Elementor\Modules\NestedElements\Base\Widget_Nested_Base';
+						if ( class_exists( $nested_base_class ) ) {
+							foreach ( $widgets as $widget ) {
+								if ( $widget instanceof $nested_base_class ) {
+									return true;
+								}
+							}
+						}
+					}
+				}
+			} catch ( \Throwable $e ) {
+				// Fall through.
+			}
 		}
 
+		// Fail closed: class presence alone is not active runtime evidence.
 		return false;
 	}
 
@@ -223,8 +244,8 @@ class Full_Elementor_MCP_Elementor_Features {
 				if ( method_exists( \Elementor\Plugin::$instance->widgets_manager, 'get_widget_types' ) ) {
 					$widget = \Elementor\Plugin::$instance->widgets_manager->get_widget_types( $widget_type );
 					if ( is_object( $widget ) ) {
-						if ( class_exists( '\Elementor\Modules\NestedElements\Base\Widget_Nested_Base' ) &&
-							$widget instanceof \Elementor\Modules\NestedElements\Base\Widget_Nested_Base ) {
+						$nested_base = '\Elementor\Modules\NestedElements\Base\Widget_Nested_Base';
+						if ( class_exists( $nested_base ) && $widget instanceof $nested_base ) {
 							return true;
 						}
 					}
@@ -240,12 +261,11 @@ class Full_Elementor_MCP_Elementor_Features {
 	/**
 	 * Checks if Elementor 4.0+ Atomic elements / typed props system is supported.
 	 *
-	 * Evaluates runtime capabilities:
-	 * 1. Registered atomic widget types (e.g. 'e-div-block', 'e-flexbox').
-	 * 2. Atomic element experiment or module existence.
-	 * 3. Atomic props helper class presence.
-	 *
-	 * Does NOT rely solely on numeric version comparison.
+	 * Authoritative detection order:
+	 * 1. If runtime atomic element types are actually REGISTERED in elements_manager, return true;
+	 * 2. If Elementor\Modules\AtomicWidgets\Module exists and has is_active(), call that method;
+	 * 3. If module exposes EXPERIMENT_NAME, query Elementor experiments using that constant;
+	 * 4. Otherwise fail closed. Class existence alone MUST NOT imply activation.
 	 *
 	 * @return bool True if atomic elements are available.
 	 */
@@ -258,7 +278,7 @@ class Full_Elementor_MCP_Elementor_Features {
 			return false;
 		}
 
-		// Check if atomic container types or modules are registered in Elementor runtime.
+		// 1. If runtime atomic element types are actually REGISTERED in elements_manager, return true.
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->elements_manager ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->elements_manager, 'get_element_types' ) ) {
@@ -268,29 +288,50 @@ class Full_Elementor_MCP_Elementor_Features {
 					}
 				}
 			} catch ( \Throwable $e ) {
-				return false;
+				// Fall through.
 			}
 		}
 
-		// Check experiments manager for atomic/v4 experiment if available.
+		// 2. If Elementor\Modules\AtomicWidgets\Module exists and has is_active(), call that method.
+		$atomic_module_class = '\Elementor\Modules\AtomicWidgets\Module';
+		if ( class_exists( $atomic_module_class ) ) {
+			try {
+				if ( method_exists( $atomic_module_class, 'is_active' ) ) {
+					return (bool) $atomic_module_class::is_active();
+				}
+			} catch ( \Throwable $e ) {
+				// Fall through.
+			}
+
+			// 3. If module exposes EXPERIMENT_NAME, query Elementor experiments using that constant.
+			try {
+				if ( defined( $atomic_module_class . '::EXPERIMENT_NAME' ) ) {
+					$exp_name = constant( $atomic_module_class . '::EXPERIMENT_NAME' );
+					if ( is_string( $exp_name ) && '' !== $exp_name &&
+						class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->experiments ) &&
+						method_exists( \Elementor\Plugin::$instance->experiments, 'is_feature_active' ) ) {
+						return (bool) \Elementor\Plugin::$instance->experiments->is_feature_active( $exp_name );
+					}
+				}
+			} catch ( \Throwable $e ) {
+				// Fall through.
+			}
+		}
+
+		// Query Elementor experiments directly for 'e_atomic_elements' if experiments manager exists.
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->experiments ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->experiments, 'is_feature_active' ) ) {
-					if ( \Elementor\Plugin::$instance->experiments->is_feature_active( 'atomic_widgets' ) ||
-						\Elementor\Plugin::$instance->experiments->is_feature_active( 'editor_v4' ) ) {
+					if ( \Elementor\Plugin::$instance->experiments->is_feature_active( 'e_atomic_elements' ) ) {
 						return true;
 					}
 				}
 			} catch ( \Throwable $e ) {
-				return false;
+				// Fall through.
 			}
 		}
 
-		// Check for atomic module namespace or class existence.
-		if ( class_exists( '\Elementor\Modules\AtomicWidgets\Module' ) || class_exists( '\Elementor\Core\Editor\Editor_V4' ) ) {
-			return true;
-		}
-
+		// 4. Otherwise fail closed: class existence alone MUST NOT imply activation.
 		return false;
 	}
 

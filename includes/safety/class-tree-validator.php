@@ -115,6 +115,13 @@ class Full_Elementor_MCP_Tree_Validator {
 			return true;
 		}
 
+		// Preflight type-safety check: reject unsafe runtime objects/resources/closures anywhere in tree
+		// BEFORE invoking wp_json_encode() to avoid calling arbitrary JsonSerializable methods.
+		$type_preflight = self::validate_json_safe_values( $elements, 'elements' );
+		if ( is_wp_error( $type_preflight ) ) {
+			return $type_preflight;
+		}
+
 		// 1. Serialization & byte size limit check.
 		$json = wp_json_encode( $elements );
 		if ( false === $json ) {
@@ -509,7 +516,56 @@ class Full_Elementor_MCP_Tree_Validator {
 			}
 		}
 
-		// 9. Settings value safety.
+		// 9. Atomic and top-level field shape validation:
+		if ( isset( $node['styles'] ) && ! is_array( $node['styles'] ) ) {
+			return new \WP_Error(
+				'invalid_atomic_structure',
+				sprintf(
+					/* translators: %s: path */
+					__( 'Element styles at path "%s.styles" must be an array/map.', 'full-elementor-mcp' ),
+					$path
+				),
+				array( 'path' => $path . '.styles', 'element_id' => $element_id )
+			);
+		}
+
+		if ( isset( $node['interactions'] ) && ! is_array( $node['interactions'] ) ) {
+			return new \WP_Error(
+				'invalid_atomic_structure',
+				sprintf(
+					/* translators: %s: path */
+					__( 'Element interactions at path "%s.interactions" must be an array/map.', 'full-elementor-mcp' ),
+					$path
+				),
+				array( 'path' => $path . '.interactions', 'element_id' => $element_id )
+			);
+		}
+
+		if ( isset( $node['editor_settings'] ) && ! is_array( $node['editor_settings'] ) ) {
+			return new \WP_Error(
+				'invalid_field_structure',
+				sprintf(
+					/* translators: %s: path */
+					__( 'Element editor_settings at path "%s.editor_settings" must be an array.', 'full-elementor-mcp' ),
+					$path
+				),
+				array( 'path' => $path . '.editor_settings', 'element_id' => $element_id )
+			);
+		}
+
+		if ( isset( $node['version'] ) && ( ! is_string( $node['version'] ) && ! is_numeric( $node['version'] ) ) ) {
+			return new \WP_Error(
+				'invalid_field_structure',
+				sprintf(
+					/* translators: %s: path */
+					__( 'Element version at path "%s.version" must be a scalar string.', 'full-elementor-mcp' ),
+					$path
+				),
+				array( 'path' => $path . '.version', 'element_id' => $element_id )
+			);
+		}
+
+		// 10. Settings value safety.
 		if ( isset( $node['settings'] ) ) {
 			if ( ! is_array( $node['settings'] ) ) {
 				return new \WP_Error(
@@ -529,7 +585,7 @@ class Full_Elementor_MCP_Tree_Validator {
 			}
 		}
 
-		// 10. Recursive child elements validation.
+		// 11. Recursive child elements validation.
 		if ( isset( $node['elements'] ) ) {
 			if ( ! is_array( $node['elements'] ) || ! self::is_list_array( $node['elements'] ) ) {
 				return new \WP_Error(
@@ -578,61 +634,75 @@ class Full_Elementor_MCP_Tree_Validator {
 	 * @return true|\WP_Error
 	 */
 	private static function validate_settings_values( array $settings, string $path ) {
-		foreach ( $settings as $key => $val ) {
-			$val_path = $path . '.' . $key;
+		return self::validate_json_safe_values( $settings, $path );
+	}
 
-			if ( is_null( $val ) || is_bool( $val ) || is_int( $val ) || is_float( $val ) || is_string( $val ) ) {
-				continue;
-			}
+	/**
+	 * Recursively validates data across the entire element tree for JSON-safety.
+	 *
+	 * Allowed types: null, bool, int, float, string, array.
+	 * Rejects all PHP objects (including stdClass and JsonSerializable), closures, and resources.
+	 *
+	 * @param mixed  $val  Value to inspect.
+	 * @param string $path Current path.
+	 * @return true|\WP_Error
+	 */
+	public static function validate_json_safe_values( mixed $val, string $path ) {
+		if ( is_null( $val ) || is_bool( $val ) || is_int( $val ) || is_float( $val ) || is_string( $val ) ) {
+			return true;
+		}
 
-			if ( is_array( $val ) ) {
-				$sub = self::validate_settings_values( $val, $val_path );
-				if ( is_wp_error( $sub ) ) {
-					return $sub;
+		if ( is_array( $val ) ) {
+			foreach ( $val as $k => $sub_val ) {
+				$sub_path = $path . '.' . $k;
+				$res      = self::validate_json_safe_values( $sub_val, $sub_path );
+				if ( is_wp_error( $res ) ) {
+					return $res;
 				}
-				continue;
 			}
+			return true;
+		}
 
-			// Reject PHP resources or closures.
-			if ( is_resource( $val ) || $val instanceof \Closure ) {
-				return new \WP_Error(
-					'unsafe_setting_value',
-					sprintf(
-						/* translators: 1: path, 2: type */
-						__( 'Unsafe PHP runtime value (%2$s) detected in settings at "%1$s". Only JSON-serializable values are permitted.', 'full-elementor-mcp' ),
-						$val_path,
-						is_resource( $val ) ? 'resource' : 'closure'
-					),
-					array( 'path' => $val_path, 'key' => $key )
-				);
-			}
+		$is_settings = str_contains( $path, '.settings' ) || str_contains( $path, "['settings']" );
+		$err_code    = $is_settings ? 'unsafe_setting_value' : 'unsafe_node_value';
 
-			// Reject all PHP objects (including stdClass and JsonSerializable) in settings.
-			if ( is_object( $val ) ) {
-				return new \WP_Error(
-					'unsafe_setting_value',
-					sprintf(
-						/* translators: 1: path, 2: class */
-						__( 'PHP object (%2$s) detected in settings at "%1$s". Settings must contain only JSON scalar and array values.', 'full-elementor-mcp' ),
-						$val_path,
-						get_class( $val )
-					),
-					array( 'path' => $val_path, 'key' => $key, 'class' => get_class( $val ) )
-				);
-			}
-
+		// Reject PHP resources or closures.
+		if ( is_resource( $val ) || $val instanceof \Closure ) {
 			return new \WP_Error(
-				'unsafe_setting_value',
+				$err_code,
 				sprintf(
 					/* translators: 1: path, 2: type */
-					__( 'Unrecognized value type (%2$s) in settings at "%1$s".', 'full-elementor-mcp' ),
-					$val_path,
-					gettype( $val )
+					__( 'Unsafe PHP runtime value (%2$s) detected at "%1$s". Only JSON-serializable values are permitted.', 'full-elementor-mcp' ),
+					$path,
+					is_resource( $val ) ? 'resource' : 'closure'
 				),
-				array( 'path' => $val_path, 'key' => $key )
+				array( 'path' => $path )
 			);
 		}
 
-		return true;
+		// Reject all PHP objects (including stdClass and JsonSerializable) anywhere in tree.
+		if ( is_object( $val ) ) {
+			return new \WP_Error(
+				$err_code,
+				sprintf(
+					/* translators: 1: path, 2: class */
+					__( 'PHP object (%2$s) detected at "%1$s". Elementor trees must contain only JSON scalar and array values.', 'full-elementor-mcp' ),
+					$path,
+					get_class( $val )
+				),
+				array( 'path' => $path, 'class' => get_class( $val ) )
+			);
+		}
+
+		return new \WP_Error(
+			$err_code,
+			sprintf(
+				/* translators: 1: path, 2: type */
+				__( 'Unrecognized value type (%2$s) at "%1$s".', 'full-elementor-mcp' ),
+				$path,
+				gettype( $val )
+			),
+			array( 'path' => $path )
+		);
 	}
 }

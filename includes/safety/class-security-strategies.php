@@ -60,6 +60,13 @@ class Full_Elementor_MCP_Security_Strategies {
 	private static ?array $mock_dns = null;
 
 	/**
+	 * Mock DOM availability override for testing.
+	 *
+	 * @var bool|null
+	 */
+	private static ?bool $mock_dom_available = null;
+
+	/**
 	 * Sets mock DNS records for testing.
 	 *
 	 * @param array<string, string[]>|null $records Hostname to IP list map.
@@ -73,6 +80,28 @@ class Full_Elementor_MCP_Security_Strategies {
 	 */
 	public static function reset_mock_dns(): void {
 		self::$mock_dns = null;
+	}
+
+	/**
+	 * Sets mock DOMDocument availability for testing.
+	 *
+	 * @param bool|null $available True/false to override, or null to clear.
+	 */
+	public static function set_mock_dom_available( ?bool $available ): void {
+		self::$mock_dom_available = $available;
+	}
+
+	/**
+	 * Checks if secure DOM XML parsing is available.
+	 *
+	 * @return bool
+	 */
+	public static function is_dom_available(): bool {
+		if ( null !== self::$mock_dom_available ) {
+			return (bool) self::$mock_dom_available;
+		}
+
+		return class_exists( '\DOMDocument' );
 	}
 
 	// =========================================================================
@@ -568,20 +597,25 @@ class Full_Elementor_MCP_Security_Strategies {
 			// In test mocks or non-streaming transports where body is returned in memory:
 			$body = wp_remote_retrieve_body( $response );
 			if ( '' !== $body && ( ! file_exists( $tmp_file ) || 0 === filesize( $tmp_file ) ) ) {
-				if ( strlen( $body ) > $max_bytes ) {
+				$expected_bytes = strlen( $body );
+				if ( $expected_bytes > $max_bytes ) {
 					self::cleanup_file( $tmp_file );
 					return new \WP_Error(
 						'remote_file_too_large',
 						sprintf(
 							/* translators: 1: size, 2: max */
 							__( 'Downloaded body size (%1$d bytes) exceeds maximum limit (%2$d bytes).', 'full-elementor-mcp' ),
-							strlen( $body ),
+							$expected_bytes,
 							$max_bytes
 						),
-						array( 'size' => strlen( $body ), 'max_bytes' => $max_bytes )
+						array( 'size' => $expected_bytes, 'max_bytes' => $max_bytes )
 					);
 				}
-				file_put_contents( $tmp_file, $body );
+				$written = file_put_contents( $tmp_file, $body );
+				if ( false === $written || $written !== $expected_bytes ) {
+					self::cleanup_file( $tmp_file );
+					return new \WP_Error( 'temp_file_write_failed', __( 'Failed to write complete downloaded content to temporary file.', 'full-elementor-mcp' ) );
+				}
 			}
 
 			if ( ! file_exists( $tmp_file ) ) {
@@ -694,9 +728,15 @@ class Full_Elementor_MCP_Security_Strategies {
 		}
 
 		// 2. Strict XML Parser validation using DOMDocument with libxml security flags.
-		if ( class_exists( '\DOMDocument' ) ) {
-			$prev_libxml = libxml_use_internal_errors( true );
-			$dom         = new \DOMDocument();
+		if ( ! self::is_dom_available() ) {
+			return new \WP_Error(
+				'svg_parser_unavailable',
+				__( 'Secure DOM/XML parser support is unavailable on this server. SVG upload is rejected.', 'full-elementor-mcp' )
+			);
+		}
+
+		$prev_libxml = libxml_use_internal_errors( true );
+		$dom         = new \DOMDocument();
 
 			// Flags: LIBXML_NONET (disable network access).
 			$options = LIBXML_NONET;
@@ -792,21 +832,31 @@ class Full_Elementor_MCP_Security_Strategies {
 						if ( preg_match( '/@import\b/i', $attr_val ) ) {
 							return new \WP_Error( 'svg_external_resource_forbidden', __( 'SVG style attribute contains forbidden @import rule.', 'full-elementor-mcp' ) );
 						}
-						if ( preg_match_all( '/url\s*\(\s*[\'"]?\s*(.*?)\s*[\'"]?\s*\)/i', $attr_val, $matches ) ) {
-							foreach ( $matches[1] as $target ) {
-								$target = trim( $target );
-								if ( '' === $target || str_starts_with( $target, '#' ) || str_starts_with( strtolower( $target ), 'data:image/' ) ) {
-									continue;
-								}
-								return new \WP_Error(
-									'svg_external_resource_forbidden',
-									sprintf(
-										/* translators: %s: target URL */
-										__( 'SVG style attribute contains forbidden external CSS url(): "%s".', 'full-elementor-mcp' ),
-										$target
-									)
-								);
+					}
+
+					// Inspect ANY attribute containing url(...):
+					if ( preg_match_all( '/url\s*\(\s*[\'"]?\s*(.*?)\s*[\'"]?\s*\)/i', $attr_val, $matches ) ) {
+						foreach ( $matches[1] as $target ) {
+							$target = trim( $target );
+							if ( '' === $target ) {
+								continue;
 							}
+							if ( str_starts_with( $target, '#' ) ) {
+								continue;
+							}
+							if ( preg_match( '/^data\s*:\s*image\/(?:png|jpeg|jpg|webp|gif)/i', $target ) ) {
+								continue;
+							}
+							return new \WP_Error(
+								'svg_external_resource_forbidden',
+								sprintf(
+									/* translators: 1: attribute name, 2: target */
+									__( 'SVG contains forbidden external resource reference in attribute "%1$s": "%2$s".', 'full-elementor-mcp' ),
+									$attr_name,
+									$target
+								),
+								array( 'attribute' => $attr_name, 'target' => $target )
+							);
 						}
 					}
 
@@ -839,14 +889,257 @@ class Full_Elementor_MCP_Security_Strategies {
 					}
 				}
 			}
-		}
 
-		return true;
+			return true;
 	}
 
 	// =========================================================================
 	// 3. Custom Code & Mutation Classification
 	// =========================================================================
+
+	/**
+	 * Helper to find an element in an Elementor document tree by its ID.
+	 *
+	 * @param array  $elements Document elements tree.
+	 * @param string $element_id Target element ID.
+	 * @return array|null The element array or null if not found.
+	 */
+	private static function find_element_in_tree( array $elements, string $element_id ): ?array {
+		foreach ( $elements as $element ) {
+			if ( ! is_array( $element ) ) {
+				continue;
+			}
+			if ( isset( $element['id'] ) && (string) $element['id'] === $element_id ) {
+				return $element;
+			}
+			if ( ! empty( $element['elements'] ) && is_array( $element['elements'] ) ) {
+				$found = self::find_element_in_tree( $element['elements'], $element_id );
+				if ( null !== $found ) {
+					return $found;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Checks if a string contains executable script tags, inline event handlers, javascript URIs, or embedded objects.
+	 *
+	 * @param string $str String to check.
+	 * @return bool True if executable or active embedded content.
+	 */
+	private static function is_executable_string( string $str ): bool {
+		if ( preg_match( '/<script\b/i', $str ) ) {
+			return true;
+		}
+		if ( preg_match( '/\bon[a-zA-Z0-9_\-]+\s*=/i', $str ) ) {
+			return true;
+		}
+		if ( preg_match( '/(javascript|vbscript)\s*:/i', $str ) ) {
+			return true;
+		}
+		if ( preg_match( '/<(?:iframe|object|embed|applet)\b/i', $str ) ) {
+			return true;
+		}
+		if ( preg_match( '/<svg[\s\S]*?(?:<script|\bon[a-zA-Z0-9_\-]+=|foreignObject)/i', $str ) ) {
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Inspects an Elementor mutation payload or subtree for security-sensitive content.
+	 *
+	 * Reusable inspector for generic mutation abilities (add-widget, update-widget, update-element,
+	 * batch-update, replace-element, etc.).
+	 *
+	 * Detects:
+	 * - Executable JavaScript, active event handlers, javascript: URIs, iframes, objects, embeds.
+	 * - HTML widget contents requiring unfiltered_html capability.
+	 * - Custom CSS requiring unfiltered_html without falsely classifying ordinary CSS as JavaScript execution.
+	 * - Recursively inspects subtrees for replace-element and nested elements.
+	 * - Inspects each operation in batch-update.
+	 *
+	 * @param array<string, mixed> $payload The argument map or element node/subtree.
+	 * @param array<string, mixed> $context Optional execution context (post_id, element_id, ability).
+	 * @return array{
+	 *     is_executable: bool,
+	 *     is_high_risk: bool,
+	 *     requires_unfiltered_html: bool,
+	 *     reasons: string[]
+	 * }
+	 */
+	public static function inspect_elementor_payload( array $payload, array $context = array() ): array {
+		$is_executable            = false;
+		$is_high_risk             = false;
+		$requires_unfiltered_html = false;
+		$reasons                  = array();
+
+		// 1. Batch update handling: evaluate each operation in 'updates'.
+		if ( isset( $payload['updates'] ) && is_array( $payload['updates'] ) ) {
+			foreach ( $payload['updates'] as $op ) {
+				if ( is_array( $op ) ) {
+					$op_ctx = array_merge( $context, array(
+						'post_id'    => $payload['post_id'] ?? ( $context['post_id'] ?? 0 ),
+						'element_id' => $op['element_id'] ?? '',
+					) );
+					$op_res = self::inspect_elementor_payload( $op, $op_ctx );
+					if ( $op_res['is_executable'] ) {
+						$is_executable = true;
+						$is_high_risk  = true;
+					}
+					if ( $op_res['is_high_risk'] ) {
+						$is_high_risk = true;
+					}
+					if ( $op_res['requires_unfiltered_html'] ) {
+						$requires_unfiltered_html = true;
+					}
+					foreach ( $op_res['reasons'] as $r ) {
+						if ( ! in_array( $r, $reasons, true ) ) {
+							$reasons[] = $r;
+						}
+					}
+				}
+			}
+		}
+
+		// 2. Subtree replacement handling: evaluate 'element' node.
+		if ( isset( $payload['element'] ) && is_array( $payload['element'] ) ) {
+			$sub_res = self::inspect_elementor_payload( $payload['element'], $context );
+			if ( $sub_res['is_executable'] ) {
+				$is_executable = true;
+				$is_high_risk  = true;
+			}
+			if ( $sub_res['is_high_risk'] ) {
+				$is_high_risk = true;
+			}
+			if ( $sub_res['requires_unfiltered_html'] ) {
+				$requires_unfiltered_html = true;
+			}
+			foreach ( $sub_res['reasons'] as $r ) {
+				if ( ! in_array( $r, $reasons, true ) ) {
+					$reasons[] = $r;
+				}
+			}
+		}
+
+		// 3. Recursive child elements in subtrees:
+		if ( isset( $payload['elements'] ) && is_array( $payload['elements'] ) ) {
+			foreach ( $payload['elements'] as $child ) {
+				if ( is_array( $child ) ) {
+					$child_res = self::inspect_elementor_payload( $child, $context );
+					if ( $child_res['is_executable'] ) {
+						$is_executable = true;
+						$is_high_risk  = true;
+					}
+					if ( $child_res['is_high_risk'] ) {
+						$is_high_risk = true;
+					}
+					if ( $child_res['requires_unfiltered_html'] ) {
+						$requires_unfiltered_html = true;
+					}
+					foreach ( $child_res['reasons'] as $r ) {
+						if ( ! in_array( $r, $reasons, true ) ) {
+							$reasons[] = $r;
+						}
+					}
+				}
+			}
+		}
+
+		// 4. Identify widget type and target identity:
+		$widget_type = (string) ( $payload['widget_type'] ?? ( $payload['widgetType'] ?? '' ) );
+		$element_id  = (string) ( $payload['element_id'] ?? ( $payload['id'] ?? ( $context['element_id'] ?? '' ) ) );
+		$post_id     = (int) ( $payload['post_id'] ?? ( $context['post_id'] ?? 0 ) );
+
+		// Read-only tree inspection to resolve widgetType if not provided in args:
+		if ( '' === $widget_type && $post_id > 0 && '' !== $element_id && function_exists( 'get_post_meta' ) ) {
+			$raw_data = get_post_meta( $post_id, '_elementor_data', true );
+			if ( is_string( $raw_data ) && '' !== $raw_data ) {
+				$tree = json_decode( $raw_data, true );
+				if ( is_array( $tree ) ) {
+					$found_el = self::find_element_in_tree( $tree, $element_id );
+					if ( is_array( $found_el ) ) {
+						$widget_type = (string) ( $found_el['widgetType'] ?? ( $found_el['elType'] ?? '' ) );
+					}
+				}
+			} elseif ( is_array( $raw_data ) ) {
+				$found_el = self::find_element_in_tree( $raw_data, $element_id );
+				if ( is_array( $found_el ) ) {
+					$widget_type = (string) ( $found_el['widgetType'] ?? ( $found_el['elType'] ?? '' ) );
+				}
+			}
+		}
+
+		// 5. Inspect settings map (or payload itself):
+		$settings = isset( $payload['settings'] ) && is_array( $payload['settings'] )
+			? $payload['settings']
+			: $payload;
+
+		// Check HTML widget content:
+		$is_html_widget = ( 'html' === $widget_type || 'full-elementor-mcp/add-html' === ( $context['ability'] ?? '' ) );
+		$raw_html_val   = null;
+
+		if ( isset( $settings['html'] ) && is_string( $settings['html'] ) ) {
+			$raw_html_val = $settings['html'];
+		} elseif ( isset( $payload['html'] ) && is_string( $payload['html'] ) ) {
+			$raw_html_val = $payload['html'];
+		}
+
+		if ( null !== $raw_html_val ) {
+			if ( self::is_executable_string( $raw_html_val ) ) {
+				$is_executable            = true;
+				$is_high_risk             = true;
+				$requires_unfiltered_html = true;
+				$reasons[]                = 'HTML payload contains executable script tags, active event handlers, or embedded objects.';
+			} else {
+				// Safe raw HTML: requires unfiltered_html capability in WordPress.
+				$requires_unfiltered_html = true;
+				$reasons[]                = 'Payload contains raw HTML content requiring unfiltered_html capability.';
+			}
+		} elseif ( $is_html_widget ) {
+			$requires_unfiltered_html = true;
+			$reasons[]                = 'HTML widget configuration requires unfiltered_html capability.';
+		}
+
+		// Conservative fallback: if target widget type could not be resolved, but payload contains
+		// raw HTML/code keys, classify conservatively:
+		if ( '' === $widget_type && null === $raw_html_val ) {
+			foreach ( array( 'code', 'raw_html', 'content', 'text' ) as $k ) {
+				if ( isset( $settings[ $k ] ) && is_string( $settings[ $k ] ) ) {
+					if ( self::is_executable_string( $settings[ $k ] ) ) {
+						$is_executable            = true;
+						$is_high_risk             = true;
+						$requires_unfiltered_html = true;
+						$reasons[]                = sprintf( 'Field "%s" contains executable script or active embedded content.', $k );
+					} elseif ( preg_match( '/<[a-zA-Z][^>]*>/', $settings[ $k ] ) && in_array( $k, array( 'code', 'raw_html' ), true ) ) {
+						$requires_unfiltered_html = true;
+						$reasons[]                = sprintf( 'Unresolved target field "%s" contains raw HTML markup.', $k );
+					}
+				}
+			}
+		}
+
+		// Check Custom CSS (settings or top-level):
+		$custom_css = $settings['custom_css'] ?? ( $payload['custom_css'] ?? ( $settings['css'] ?? ( $payload['css'] ?? null ) ) );
+		if ( is_string( $custom_css ) && '' !== trim( $custom_css ) ) {
+			$requires_unfiltered_html = true;
+			if ( self::is_executable_string( $custom_css ) ) {
+				$is_executable = true;
+				$is_high_risk  = true;
+				$reasons[]     = 'Custom CSS contains embedded executable script constructs.';
+			} else {
+				$reasons[] = 'Payload contains custom CSS stylesheet rules.';
+			}
+		}
+
+		return array(
+			'is_executable'            => $is_executable,
+			'is_high_risk'             => $is_high_risk,
+			'requires_unfiltered_html' => $requires_unfiltered_html,
+			'reasons'                  => $reasons,
+		);
+	}
 
 	/**
 	 * Classifies an ability and its payload for security risks, executable code, and confirmation gating.
@@ -899,12 +1192,37 @@ class Full_Elementor_MCP_Security_Strategies {
 
 		// HTML widget content:
 		if ( 'full-elementor-mcp/add-html' === $ability ) {
-			$html = (string) ( $args['html'] ?? '' );
-			if ( preg_match( '/<script\b/i', $html ) || preg_match( '/\bon[a-zA-Z]+\s*=/i', $html ) ) {
+			$html = (string) ( $args['html'] ?? ( $args['settings']['html'] ?? '' ) );
+			if ( self::is_executable_string( $html ) ) {
 				$is_executable            = true;
 				$is_high_risk             = true;
 				$requires_unfiltered_html = true;
-				$reasons[]                = 'HTML payload contains executable script tags or inline event handlers.';
+				$reasons[]                = 'HTML payload contains executable script tags, active event handlers, or embedded objects.';
+			} else {
+				$requires_unfiltered_html = true;
+				$reasons[]                = 'HTML payload contains raw HTML markup.';
+			}
+		}
+
+		// Universal payload inspector for generic and subtree mutations:
+		$inspected = self::inspect_elementor_payload( $args, array( 'ability' => $ability ) );
+		if ( $inspected['is_executable'] ) {
+			$is_executable            = true;
+			$is_high_risk             = true;
+			$requires_unfiltered_html = true;
+			if ( 'standard' === $category ) {
+				$category = 'executable_payload';
+			}
+		}
+		if ( $inspected['is_high_risk'] ) {
+			$is_high_risk = true;
+		}
+		if ( $inspected['requires_unfiltered_html'] ) {
+			$requires_unfiltered_html = true;
+		}
+		foreach ( $inspected['reasons'] as $r ) {
+			if ( ! in_array( $r, $reasons, true ) ) {
+				$reasons[] = $r;
 			}
 		}
 
@@ -914,7 +1232,7 @@ class Full_Elementor_MCP_Security_Strategies {
 			'full-elementor-mcp/delete-template',
 			'full-elementor-mcp/delete-code-snippet',
 		), true ) ) {
-			$force = ! empty( $args['force'] ) || ! empty( $args['force_delete'] );
+			$force = ( true === ( $args['force'] ?? false ) ) || ( true === ( $args['force_delete'] ?? false ) );
 			if ( $force ) {
 				$is_irreversible = true;
 				$is_high_risk    = true;
@@ -1003,6 +1321,13 @@ class Full_Elementor_MCP_Security_Strategies {
 				$high_risk          = true;
 			}
 
+			if ( ! empty( $strategy['high_risk'] ) ) {
+				$high_risk = true;
+				if ( ! in_array( 'Ability strategy is registered as high_risk.', $reasons, true ) ) {
+					$reasons[] = 'Ability strategy is registered as high_risk.';
+				}
+			}
+
 			if ( ! empty( $strategy['requires_unfiltered_html'] ) ) {
 				$requires_unfiltered_html = true;
 			}
@@ -1020,9 +1345,39 @@ class Full_Elementor_MCP_Security_Strategies {
 			$reasons[] = 'Ability profile is unknown or unregistered; failing closed.';
 		}
 
-		// 3. Protected resource check:
+		// 3. Protected resource & global kit checks:
 		$protected_resource_possible = false;
-		$target_id                   = (int) ( $args['post_id'] ?? $args['page_id'] ?? $args['template_id'] ?? 0 );
+		$target_id                   = 0;
+
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) && Full_Elementor_MCP_Mutation_Registry::has( $ability ) ) {
+			$resolved_id = Full_Elementor_MCP_Mutation_Registry::resolve_object_id( $ability, $args );
+			if ( is_int( $resolved_id ) && $resolved_id > 0 ) {
+				$target_id = $resolved_id;
+			}
+		}
+
+		if ( $target_id <= 0 ) {
+			$target_id = (int) ( $args['post_id'] ?? ( $args['page_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['snippet_id'] ?? 0 ) ) ) ) );
+		}
+
+		// Site-wide Elementor global kit operations:
+		$is_global_kit_ability = in_array( $ability, array(
+			'full-elementor-mcp/update-global-colors',
+			'full-elementor-mcp/update-global-typography',
+			'full-elementor-mcp/set-active-kit',
+		), true );
+
+		if ( $is_global_kit_ability ) {
+			$high_risk                   = true;
+			$protected_resource_possible = true;
+			if ( ! in_array( 'Global Elementor kit mutation affects site-wide design configuration.', $reasons, true ) ) {
+				$reasons[] = 'Global Elementor kit mutation affects site-wide design configuration.';
+			}
+			if ( $target_id <= 0 && function_exists( 'get_option' ) ) {
+				$target_id = (int) get_option( 'elementor_active_kit', 0 );
+			}
+		}
+
 		if ( $target_id > 0 ) {
 			$prot_check = self::is_protected_asset( $target_id );
 			if ( $prot_check['protected'] ) {

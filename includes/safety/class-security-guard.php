@@ -409,17 +409,7 @@ class Full_Elementor_MCP_Security_Guard {
 			return Full_Elementor_MCP_Security_Strategies::is_forbidden_ip( $ip );
 		}
 
-		// Fallback check if security strategies not loaded.
-		$flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
-		if ( false === filter_var( $ip, FILTER_VALIDATE_IP, $flags ) ) {
-			return true;
-		}
-
-		if ( '169.254.169.254' === $ip || str_starts_with( $ip, '127.' ) || str_starts_with( $ip, '169.254.' ) ||
-			str_starts_with( $ip, '0.' ) || '255.255.255.255' === $ip || '::1' === $ip || '::' === $ip ) {
-			return true;
-		}
-
-		return false;
+		// Fail closed: if security strategies cannot load, treat IP as forbidden.
+		return true;
 	}
 }

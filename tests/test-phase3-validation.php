@@ -542,6 +542,15 @@ function assert_is_wp_error( mixed $thing, string $message = 'Expected WP_Error 
 	}
 }
 
+function assert_wp_error( mixed $thing, string $message = 'Expected WP_Error instance.' ): void {
+	assert_is_wp_error( $thing, $message );
+}
+
+function assert_error_code( string $code, mixed $thing, string $message = '' ): void {
+	assert_is_wp_error( $thing, $message );
+	assert_equals( $code, $thing->get_error_code(), $message );
+}
+
 function run_test( string $name, callable $test ): void {
 	global $tests_passed, $tests_failed;
 	try {
@@ -1923,6 +1932,516 @@ run_test( 'Protected Assets: identifies front page, posts page, and active kit',
 
 	$res_normal = Full_Elementor_MCP_Security_Strategies::is_protected_asset( 999 );
 	assert_false( $res_normal['protected'] );
+} );
+
+// =========================================================================
+// 5. Phase 3 Corrective Pass Regression Tests
+// =========================================================================
+
+// --- Group A: SVG Security (Fail closed & Presentation attributes) ---
+
+run_test( 'SVG: fails closed with svg_parser_unavailable when secure XML parser is unavailable', function () {
+	Full_Elementor_MCP_Security_Strategies::set_mock_dom_available( false );
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( '<svg><rect width="10" height="10"/></svg>' );
+	Full_Elementor_MCP_Security_Strategies::set_mock_dom_available( null );
+
+	assert_wp_error( $res );
+	assert_error_code( 'svg_parser_unavailable', $res );
+} );
+
+run_test( 'SVG: rejects fill attribute containing remote url()', function () {
+	$svg = '<svg><rect fill="url(https://evil.example/pattern.svg#x)" width="10" height="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_wp_error( $res );
+	assert_error_code( 'svg_external_resource_forbidden', $res );
+} );
+
+run_test( 'SVG: rejects filter attribute containing remote url()', function () {
+	$svg = '<svg><rect filter="url(https://evil.example/filter.svg#x)" width="10" height="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_wp_error( $res );
+	assert_error_code( 'svg_external_resource_forbidden', $res );
+} );
+
+run_test( 'SVG: rejects mask attribute containing protocol-relative url()', function () {
+	$svg = '<svg><rect mask="url(//evil.example/mask.svg)" width="10" height="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_wp_error( $res );
+	assert_error_code( 'svg_external_resource_forbidden', $res );
+} );
+
+run_test( 'SVG: rejects clip-path attribute containing file url()', function () {
+	$svg = '<svg><rect clip-path="url(file:///etc/passwd)" width="10" height="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_wp_error( $res );
+	assert_error_code( 'svg_external_resource_forbidden', $res );
+} );
+
+run_test( 'SVG: rejects marker-start attribute containing relative url()', function () {
+	$svg = '<svg><path marker-start="url(evil.svg#arrow)" d="M0,0 L10,10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_wp_error( $res );
+	assert_error_code( 'svg_external_resource_forbidden', $res );
+} );
+
+run_test( 'SVG: accepts local fragment and raster data URI in presentation attributes', function () {
+	$svg_local = '<svg><defs><linearGradient id="grad1"/></defs><rect fill="url(#grad1)" width="10" height="10"/></svg>';
+	$res_local = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg_local );
+	assert_true( $res_local );
+
+	$svg_data = '<svg><rect fill="url(data:image/png;base64,iVBORw0KGgo=)" width="10" height="10"/></svg>';
+	$res_data = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg_data );
+	assert_true( $res_data );
+} );
+
+// --- Group B: Universal Mutation & Subtree Security Classification ---
+
+run_test( 'Security Profile: add-widget with HTML and script tag is classified as executable and high-risk', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/add-widget',
+		array(
+			'widget_type' => 'html',
+			'settings'    => array( 'html' => '<script>alert("pwned")</script>' ),
+		)
+	);
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: add-widget with safe HTML requires unfiltered_html but is not executable', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/add-widget',
+		array(
+			'widget_type' => 'html',
+			'settings'    => array( 'html' => '<p>Hello World</p>' ),
+		)
+	);
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: update-widget HTML payload identifies target widget from tree', function () {
+	$post_id    = 555;
+	$element_id = 'html_widget_target';
+	$tree       = array(
+		array(
+			'id'         => $element_id,
+			'elType'     => 'widget',
+			'widgetType' => 'html',
+			'settings'   => array( 'html' => '<p>Original</p>' ),
+		),
+	);
+	update_post_meta( $post_id, '_elementor_data', json_encode( $tree ) );
+
+	$prof_exec = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/update-widget',
+		array(
+			'post_id'    => $post_id,
+			'element_id' => $element_id,
+			'settings'   => array( 'html' => '<script>stealCookies()</script>' ),
+		)
+	);
+	assert_true( $prof_exec['executable_content'] );
+	assert_true( $prof_exec['high_risk'] );
+	assert_true( $prof_exec['requires_unfiltered_html'] );
+
+	$prof_safe = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/update-widget',
+		array(
+			'post_id'    => $post_id,
+			'element_id' => $element_id,
+			'settings'   => array( 'html' => '<p>Updated Safe Text</p>' ),
+		)
+	);
+	assert_false( $prof_safe['executable_content'] );
+	assert_false( $prof_safe['high_risk'] );
+	assert_true( $prof_safe['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: update-element fails conservatively when target cannot be resolved but payload contains script', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/update-element',
+		array(
+			'post_id'    => 99999, // Unresolvable post
+			'element_id' => 'nonexistent',
+			'settings'   => array( 'code' => '<script>dangerous()</script>' ),
+		)
+	);
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: batch-update with one executable operation marks whole mutation high-risk', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/batch-update',
+		array(
+			'post_id' => 10,
+			'updates' => array(
+				array(
+					'element_id' => 'safe_heading',
+					'settings'   => array( 'title' => 'Plain Heading' ),
+				),
+				array(
+					'element_id' => 'dangerous_html',
+					'settings'   => array( 'html' => '<iframe src="javascript:evil()"/>' ),
+				),
+			),
+		)
+	);
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: replace-element recursively inspects subtree and detects executable descendants', function () {
+	$subtree_exec = array(
+		'id'       => 'parent_cont',
+		'elType'   => 'container',
+		'elements' => array(
+			array(
+				'id'         => 'child_html',
+				'elType'     => 'widget',
+				'widgetType' => 'html',
+				'settings'   => array( 'html' => '<img src=x onerror=alert(1)>' ),
+			),
+		),
+	);
+
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/replace-element',
+		array(
+			'post_id'    => 10,
+			'element_id' => 'target_el',
+			'element'    => $subtree_exec,
+		)
+	);
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: replace-element with safe HTML widget subtree requires unfiltered_html without executable risk', function () {
+	$subtree_safe = array(
+		'id'       => 'parent_cont_2',
+		'elType'   => 'container',
+		'elements' => array(
+			array(
+				'id'         => 'child_html_2',
+				'elType'     => 'widget',
+				'widgetType' => 'html',
+				'settings'   => array( 'html' => '<div>Clean and harmless</div>' ),
+			),
+		),
+	);
+
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/replace-element',
+		array(
+			'post_id'    => 10,
+			'element_id' => 'target_el',
+			'element'    => $subtree_safe,
+		)
+	);
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: generic custom_css payload requires unfiltered_html but is not executable', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/update-widget',
+		array(
+			'post_id'    => 10,
+			'element_id' => 'el_css',
+			'settings'   => array( 'custom_css' => 'selector { font-size: 16px; border: 1px solid #000; }' ),
+		)
+	);
+	assert_false( $prof['executable_content'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+// --- Group C: Protected Resources (popup_id, snippet_id, template_id, kit) ---
+
+run_test( 'Protected Resources: recognizes protected popup ID and snippet ID via Mutation Registry', function () {
+	update_option( 'page_on_front', 201 );
+
+	// Protected popup:
+	$prof_popup = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/set-popup-settings',
+		array( 'popup_id' => 201 )
+	);
+	assert_true( $prof_popup['protected_resource_possible'] );
+	assert_true( $prof_popup['high_risk'] );
+
+	// Protected snippet:
+	$prof_snippet = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-code-snippet',
+		array( 'snippet_id' => 201 )
+	);
+	assert_true( $prof_snippet['protected_resource_possible'] );
+	assert_true( $prof_snippet['high_risk'] );
+
+	// Protected template:
+	$prof_template = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-template',
+		array( 'template_id' => 201 )
+	);
+	assert_true( $prof_template['protected_resource_possible'] );
+	assert_true( $prof_template['high_risk'] );
+} );
+
+run_test( 'Protected Resources: global kit mutations affect active kit and site-wide state', function () {
+	update_option( 'elementor_active_kit', 301 );
+
+	// update-global-colors mutates active kit even without kit_id:
+	$prof_colors = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/update-global-colors',
+		array()
+	);
+	assert_true( $prof_colors['protected_resource_possible'] );
+	assert_true( $prof_colors['high_risk'] );
+
+	// update-global-typography mutates active kit:
+	$prof_typo = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/update-global-typography',
+		array()
+	);
+	assert_true( $prof_typo['protected_resource_possible'] );
+	assert_true( $prof_typo['high_risk'] );
+
+	// set-active-kit switches design kit site-wide:
+	$prof_set = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/set-active-kit',
+		array( 'kit_id' => 302 )
+	);
+	assert_true( $prof_set['protected_resource_possible'] );
+	assert_true( $prof_set['high_risk'] );
+} );
+
+// --- Group D: Irreversible Permanent Deletion Strict Booleans ---
+
+run_test( 'Security Profile: irreversible deletion strictly enforces boolean true for force', function () {
+	// Literal boolean true triggers irreversible:
+	$prof_true = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => true )
+	);
+	assert_true( $prof_true['irreversible'] );
+	assert_equals( 'permanent_deletion', $prof_true['security_category'] );
+
+	// String "true" does NOT trigger irreversible:
+	$prof_str_true = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => 'true' )
+	);
+	assert_false( $prof_str_true['irreversible'] );
+
+	// String "false" does NOT trigger irreversible:
+	$prof_str_false = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => 'false' )
+	);
+	assert_false( $prof_str_false['irreversible'] );
+
+	// String "1" does NOT trigger irreversible:
+	$prof_str_one = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => '1' )
+	);
+	assert_false( $prof_str_one['irreversible'] );
+} );
+
+// --- Group E: Tree Value and Shape Validations ---
+
+run_test( 'Tree: arbitrary PHP object outside settings is rejected before serialization', function () {
+	$doc = array(
+		array(
+			'id'         => 'node_obj_top',
+			'elType'     => 'section',
+			'elements'   => array(),
+			'custom_obj' => new \stdClass(),
+		),
+	);
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $doc );
+	assert_wp_error( $res );
+	assert_error_code( 'unsafe_node_value', $res );
+} );
+
+run_test( 'Tree: PHP resource outside settings is rejected before serialization', function () {
+	$fp  = tmpfile();
+	$doc = array(
+		array(
+			'id'         => 'node_res_top',
+			'elType'     => 'section',
+			'elements'   => array(),
+			'custom_res' => $fp,
+		),
+	);
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $doc );
+	fclose( $fp );
+	assert_wp_error( $res );
+	assert_error_code( 'unsafe_node_value', $res );
+} );
+
+run_test( 'Tree: invalid atomic styles shape is rejected', function () {
+	$doc = array(
+		array(
+			'id'       => 'node_bad_styles',
+			'elType'   => 'section',
+			'elements' => array(),
+			'styles'   => 'corrupt_string_not_array',
+		),
+	);
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $doc );
+	assert_wp_error( $res );
+	assert_error_code( 'invalid_atomic_structure', $res );
+} );
+
+run_test( 'Tree: invalid interactions shape is rejected', function () {
+	$doc = array(
+		array(
+			'id'           => 'node_bad_interact',
+			'elType'       => 'section',
+			'elements'     => array(),
+			'interactions' => 12345,
+		),
+	);
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $doc );
+	assert_wp_error( $res );
+	assert_error_code( 'invalid_atomic_structure', $res );
+} );
+
+run_test( 'Tree: legitimate atomic element node with valid structures passes', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'atomic_elements' => true ) );
+
+	$doc = array(
+		array(
+			'id'              => 'valid_atomic_node',
+			'elType'          => 'e-div-block',
+			'elements'        => array(),
+			'styles'          => array( 'desktop' => array( 'display' => 'flex' ) ),
+			'interactions'    => array(),
+			'editor_settings' => array( 'title' => 'Div Block' ),
+			'version'         => '4.0.0',
+		),
+	);
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $doc );
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+
+	assert_true( $res );
+} );
+
+// --- Group F: Runtime Capability Detection without Mocks ---
+
+run_test( 'Features: runtime capability detection against real Elementor mock classes', function () {
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+
+	// Define runtime mock classes conditionally:
+	if ( ! class_exists( 'Elementor\Modules\AtomicWidgets\Module' ) ) {
+		eval('
+			namespace Elementor\Modules\AtomicWidgets;
+			class Module {
+				const EXPERIMENT_NAME = "e_atomic_elements";
+				public static bool $active_flag = false;
+				public static function is_active(): bool {
+					return self::$active_flag;
+				}
+			}
+		');
+	}
+
+	if ( ! class_exists( 'Elementor\Plugin' ) ) {
+		eval('
+			namespace Elementor;
+			class MockExperiments {
+				public array $features = [];
+				public function is_feature_active( string $name ): bool {
+					return ! empty( $this->features[ $name ] );
+				}
+			}
+			class MockElementsManager {
+				public array $element_types = [];
+				public function get_element_types(): array {
+					return $this->element_types;
+				}
+			}
+			class MockWidgetsManager {
+				public array $widget_types = [];
+				public function get_widget_types( string $name = "" ): mixed {
+					if ( "" !== $name ) {
+						return $this->widget_types[ $name ] ?? null;
+					}
+					return $this->widget_types;
+				}
+			}
+			class Plugin {
+				public static ?Plugin $instance = null;
+				public MockExperiments $experiments;
+				public MockElementsManager $elements_manager;
+				public MockWidgetsManager $widgets_manager;
+
+				public function __construct() {
+					$this->experiments = new MockExperiments();
+					$this->elements_manager = new MockElementsManager();
+					$this->widgets_manager = new MockWidgetsManager();
+				}
+			}
+		');
+	}
+
+	if ( ! class_exists( 'Elementor\Modules\NestedElements\Base\Widget_Nested_Base' ) ) {
+		eval('
+			namespace Elementor\Modules\NestedElements\Base;
+			class Widget_Nested_Base {}
+		');
+	}
+
+	// Instantiate Plugin singleton:
+	\Elementor\Plugin::$instance = new \Elementor\Plugin();
+
+	// 1. Module class available + is_active() === false -> false:
+	\Elementor\Modules\AtomicWidgets\Module::$active_flag = false;
+	assert_false( Full_Elementor_MCP_Elementor_Features::supports_atomic_elements() );
+
+	// 2. Module class available + is_active() === true -> true:
+	\Elementor\Modules\AtomicWidgets\Module::$active_flag = true;
+	assert_true( Full_Elementor_MCP_Elementor_Features::supports_atomic_elements() );
+
+	// Reset module is_active back to false:
+	\Elementor\Modules\AtomicWidgets\Module::$active_flag = false;
+
+	// 3. Registered atomic element types in elements_manager -> true:
+	\Elementor\Plugin::$instance->elements_manager->element_types = array( 'e-div-block' => new \stdClass() );
+	assert_true( Full_Elementor_MCP_Elementor_Features::supports_atomic_elements() );
+	\Elementor\Plugin::$instance->elements_manager->element_types = array();
+
+	// 4. Containers: experiment inactive -> false; active -> true; registered -> true:
+	\Elementor\Plugin::$instance->experiments->features['container'] = false;
+	assert_false( Full_Elementor_MCP_Elementor_Features::supports_containers() );
+
+	\Elementor\Plugin::$instance->experiments->features['container'] = true;
+	assert_true( Full_Elementor_MCP_Elementor_Features::supports_containers() );
+	\Elementor\Plugin::$instance->experiments->features['container'] = false;
+
+	\Elementor\Plugin::$instance->elements_manager->element_types = array( 'container' => new \stdClass() );
+	assert_true( Full_Elementor_MCP_Elementor_Features::supports_containers() );
+	\Elementor\Plugin::$instance->elements_manager->element_types = array();
+
+	// 5. Nested elements: experiment active -> true; widget instance -> true:
+	\Elementor\Plugin::$instance->experiments->features['nested-elements'] = true;
+	assert_true( Full_Elementor_MCP_Elementor_Features::supports_nested_elements() );
+	\Elementor\Plugin::$instance->experiments->features['nested-elements'] = false;
+
+	$nested_instance = new \Elementor\Modules\NestedElements\Base\Widget_Nested_Base();
+	\Elementor\Plugin::$instance->widgets_manager->widget_types = array( 'custom-nested' => $nested_instance );
+	assert_true( Full_Elementor_MCP_Elementor_Features::supports_nested_elements() );
+	\Elementor\Plugin::$instance->widgets_manager->widget_types = array();
+
+	// Clear Plugin instance:
+	\Elementor\Plugin::$instance = null;
 } );
 
 echo "\n=======================================================\n";

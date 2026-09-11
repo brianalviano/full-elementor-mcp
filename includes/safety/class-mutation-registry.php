@@ -176,6 +176,9 @@ class Full_Elementor_MCP_Mutation_Registry {
 			? (bool) $descriptor['requires_tree_validation']
 			: ( self::CATEGORY_ELEMENTOR_DATA === $descriptor['category'] );
 		$descriptor['security_profile']         = (string) ( $descriptor['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $descriptor['category'] ? 'high_risk' : 'standard' ) );
+		$descriptor['high_risk']                = isset( $descriptor['high_risk'] )
+			? (bool) $descriptor['high_risk']
+			: ( 'high_risk' === ( $descriptor['security_profile'] ?? '' ) || ! empty( $descriptor['executable_content'] ) );
 		$descriptor['external_network_access']  = isset( $descriptor['external_network_access'] )
 			? (bool) $descriptor['external_network_access']
 			: ( self::CATEGORY_UNSUPPORTED === $descriptor['category'] && str_contains( $ability, 'image' ) );
@@ -428,7 +431,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 		return array(
 			'ability'                     => $ability,
 			'executable_content'          => ! empty( $strategy['executable_content'] ),
-			'high_risk'                   => 'high_risk' === ( $strategy['security_profile'] ?? '' ),
+			'high_risk'                   => ! empty( $strategy['high_risk'] ) || 'high_risk' === ( $strategy['security_profile'] ?? '' ),
 			'requires_unfiltered_html'    => ! empty( $strategy['requires_unfiltered_html'] ),
 			'external_network_access'     => ! empty( $strategy['external_network_access'] ),
 			'irreversible'                => ! empty( $strategy['is_destructive'] ),
@@ -812,7 +815,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 						return absint( $args['post_id'] ?? ( $args['template_id'] ?? ( $args['object_id'] ?? 0 ) ) );
 					},
 					'capture_before'             => static function ( int $object_id, array $args = array() ) {
-						$force = ! empty( $args['force'] ) || ! empty( $args['force_delete'] );
+						$force = ( true === ( $args['force'] ?? false ) ) || ( true === ( $args['force_delete'] ?? false ) );
 						if ( $force ) {
 							return array(
 								'id'    => $object_id,
@@ -834,11 +837,12 @@ class Full_Elementor_MCP_Mutation_Registry {
 					},
 					'supports_rollback'          => true,
 					'supports_rollback_for_args' => static function ( array $args = array() ): bool {
-						$force = ! empty( $args['force'] ) || ! empty( $args['force_delete'] );
+						$force = ( true === ( $args['force'] ?? false ) ) || ( true === ( $args['force_delete'] ?? false ) );
 						return ! $force;
 					},
 					'created_object_tracking'    => false,
 					'is_destructive'             => true,
+					'high_risk'                  => true,
 				)
 			);
 		}
@@ -864,11 +868,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'action'                  => $meta['action'],
 					'object_type'             => $meta['object_type'],
 					'category'                => self::CATEGORY_GLOBAL_SETTINGS,
+					'security_profile'        => 'global_settings',
+					'high_risk'               => true,
 					'resource_key_resolver'   => static function ( array $args = array() ): string {
 						return 'global:elementor-kit-state';
 					},
 					'object_id_resolver'      => static function ( array $args = array() ): int {
-						return absint( $args['kit_id'] ?? 0 );
+						$kit_id = absint( $args['kit_id'] ?? 0 );
+						if ( $kit_id <= 0 && function_exists( 'get_option' ) ) {
+							$kit_id = absint( get_option( 'elementor_active_kit', 0 ) );
+						}
+						return $kit_id;
 					},
 					'capture_before'          => static function ( int $object_id, array $args = array() ) {
 						return null;
