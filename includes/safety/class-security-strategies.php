@@ -975,9 +975,9 @@ class Full_Elementor_MCP_Security_Strategies {
 		$requires_unfiltered_html = false;
 		$reasons                  = array();
 
-		// 1. Batch update handling: evaluate each operation in 'updates'.
-		if ( isset( $payload['updates'] ) && is_array( $payload['updates'] ) ) {
-			foreach ( $payload['updates'] as $op ) {
+		// 1. Batch update handling: evaluate each operation in 'operations'.
+		if ( isset( $payload['operations'] ) && is_array( $payload['operations'] ) ) {
+			foreach ( $payload['operations'] as $op ) {
 				if ( is_array( $op ) ) {
 					$op_ctx = array_merge( $context, array(
 						'post_id'    => $payload['post_id'] ?? ( $context['post_id'] ?? 0 ),
@@ -1003,9 +1003,9 @@ class Full_Elementor_MCP_Security_Strategies {
 			}
 		}
 
-		// 2. Subtree replacement handling: evaluate 'element' node.
-		if ( isset( $payload['element'] ) && is_array( $payload['element'] ) ) {
-			$sub_res = self::inspect_elementor_payload( $payload['element'], $context );
+		// 2. Subtree replacement handling: evaluate 'replacement' node.
+		if ( isset( $payload['replacement'] ) && is_array( $payload['replacement'] ) ) {
+			$sub_res = self::inspect_elementor_payload( $payload['replacement'], $context );
 			if ( $sub_res['is_executable'] ) {
 				$is_executable = true;
 				$is_high_risk  = true;

@@ -2074,12 +2074,34 @@ run_test( 'Security Profile: update-element fails conservatively when target can
 	assert_true( $prof['requires_unfiltered_html'] );
 } );
 
+run_test( 'Security Profile: batch-update with safe operations only is not executable or high-risk', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/batch-update',
+		array(
+			'post_id'    => 10,
+			'operations' => array(
+				array(
+					'element_id' => 'safe_heading_1',
+					'settings'   => array( 'title' => 'Heading One' ),
+				),
+				array(
+					'element_id' => 'safe_button_1',
+					'settings'   => array( 'text' => 'Click Me', 'size' => 'md' ),
+				),
+			),
+		)
+	);
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_false( $prof['requires_unfiltered_html'] );
+} );
+
 run_test( 'Security Profile: batch-update with one executable operation marks whole mutation high-risk', function () {
 	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
 		'full-elementor-mcp/batch-update',
 		array(
-			'post_id' => 10,
-			'updates' => array(
+			'post_id'    => 10,
+			'operations' => array(
 				array(
 					'element_id' => 'safe_heading',
 					'settings'   => array( 'title' => 'Plain Heading' ),
@@ -2096,16 +2118,44 @@ run_test( 'Security Profile: batch-update with one executable operation marks wh
 	assert_true( $prof['requires_unfiltered_html'] );
 } );
 
-run_test( 'Security Profile: replace-element recursively inspects subtree and detects executable descendants', function () {
-	$subtree_exec = array(
-		'id'       => 'parent_cont',
+run_test( 'Security Profile: batch-update with safe raw HTML requires unfiltered_html without executable risk', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/batch-update',
+		array(
+			'post_id'    => 10,
+			'operations' => array(
+				array(
+					'element_id' => 'safe_heading',
+					'settings'   => array( 'title' => 'Plain Heading' ),
+				),
+				array(
+					'element_id' => 'safe_html_widget',
+					'settings'   => array( 'html' => '<div class="alert">Safe Static Notice</div>' ),
+				),
+			),
+		)
+	);
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: replace-element with safe ordinary subtree is not high-risk or unfiltered_html', function () {
+	$subtree_plain = array(
+		'id'       => 'parent_cont_plain',
 		'elType'   => 'container',
 		'elements' => array(
 			array(
-				'id'         => 'child_html',
+				'id'         => 'child_heading',
 				'elType'     => 'widget',
-				'widgetType' => 'html',
-				'settings'   => array( 'html' => '<img src=x onerror=alert(1)>' ),
+				'widgetType' => 'heading',
+				'settings'   => array( 'title' => 'Harmless Title' ),
+			),
+			array(
+				'id'         => 'child_button',
+				'elType'     => 'widget',
+				'widgetType' => 'button',
+				'settings'   => array( 'text' => 'Click Here' ),
 			),
 		),
 	);
@@ -2113,14 +2163,14 @@ run_test( 'Security Profile: replace-element recursively inspects subtree and de
 	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
 		'full-elementor-mcp/replace-element',
 		array(
-			'post_id'    => 10,
-			'element_id' => 'target_el',
-			'element'    => $subtree_exec,
+			'post_id'     => 10,
+			'element_id'  => 'target_el',
+			'replacement' => $subtree_plain,
 		)
 	);
-	assert_true( $prof['executable_content'] );
-	assert_true( $prof['high_risk'] );
-	assert_true( $prof['requires_unfiltered_html'] );
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_false( $prof['requires_unfiltered_html'] );
 } );
 
 run_test( 'Security Profile: replace-element with safe HTML widget subtree requires unfiltered_html without executable risk', function () {
@@ -2140,14 +2190,162 @@ run_test( 'Security Profile: replace-element with safe HTML widget subtree requi
 	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
 		'full-elementor-mcp/replace-element',
 		array(
-			'post_id'    => 10,
-			'element_id' => 'target_el',
-			'element'    => $subtree_safe,
+			'post_id'     => 10,
+			'element_id'  => 'target_el',
+			'replacement' => $subtree_safe,
 		)
 	);
 	assert_false( $prof['executable_content'] );
 	assert_false( $prof['high_risk'] );
 	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: replace-element with HTML widget subtree containing script is executable and high-risk', function () {
+	$subtree_exec = array(
+		'id'       => 'parent_cont',
+		'elType'   => 'container',
+		'elements' => array(
+			array(
+				'id'         => 'child_html',
+				'elType'     => 'widget',
+				'widgetType' => 'html',
+				'settings'   => array( 'html' => '<img src=x onerror=alert(1)>' ),
+			),
+		),
+	);
+
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/replace-element',
+		array(
+			'post_id'     => 10,
+			'element_id'  => 'target_el',
+			'replacement' => $subtree_exec,
+		)
+	);
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: replace-element with deeply nested executable HTML descendant propagates to entire profile', function () {
+	$subtree_deep = array(
+		'id'       => 'root_section',
+		'elType'   => 'section',
+		'elements' => array(
+			array(
+				'id'       => 'col_1',
+				'elType'   => 'column',
+				'elements' => array(
+					array(
+						'id'       => 'inner_cont',
+						'elType'   => 'container',
+						'elements' => array(
+							array(
+								'id'         => 'deep_html_widget',
+								'elType'     => 'widget',
+								'widgetType' => 'html',
+								'settings'   => array( 'html' => '<script>window.pwned=true;</script>' ),
+							),
+						),
+					),
+				),
+			),
+		),
+	);
+
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/replace-element',
+		array(
+			'post_id'     => 10,
+			'element_id'  => 'target_el',
+			'replacement' => $subtree_deep,
+		)
+	);
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Profile: replace-element with custom_css descendant requires unfiltered_html but not executable', function () {
+	$subtree_css = array(
+		'id'       => 'parent_cont_css',
+		'elType'   => 'container',
+		'elements' => array(
+			array(
+				'id'         => 'child_widget_css',
+				'elType'     => 'widget',
+				'widgetType' => 'heading',
+				'settings'   => array(
+					'title'      => 'Styled Heading',
+					'custom_css' => '.styled-heading { color: red; }',
+				),
+			),
+		),
+	);
+
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/replace-element',
+		array(
+			'post_id'     => 10,
+			'element_id'  => 'target_el',
+			'replacement' => $subtree_css,
+		)
+	);
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+} );
+
+run_test( 'Security Contract Guard: verified against production ability input schemas', function () {
+	// 1. add-widget contract: post_id, parent_id, widget_type, settings
+	$add_widget_args = array(
+		'post_id'     => 10,
+		'parent_id'   => 'cont_1',
+		'widget_type' => 'html',
+		'settings'    => array( 'html' => '<script>alert(1)</script>' ),
+	);
+	$prof_add = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-widget', $add_widget_args );
+	assert_true( $prof_add['executable_content'], 'add-widget contract mismatch' );
+
+	// 2. update-widget contract: post_id, element_id, settings
+	$update_widget_args = array(
+		'post_id'    => 10,
+		'element_id' => 'w_1',
+		'settings'   => array( 'custom_css' => 'body { background: #000; }' ),
+	);
+	$prof_upd = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/update-widget', $update_widget_args );
+	assert_true( $prof_upd['requires_unfiltered_html'], 'update-widget contract mismatch' );
+
+	// 3. update-element contract: post_id, element_id, settings
+	$update_element_args = array(
+		'post_id'    => 10,
+		'element_id' => 'el_1',
+		'settings'   => array( 'code' => '<script>console.log(1)</script>' ),
+	);
+	$prof_el = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/update-element', $update_element_args );
+	assert_true( $prof_el['executable_content'], 'update-element contract mismatch' );
+
+	// 4. batch-update contract: post_id, operations -> array of [element_id, settings]
+	$batch_args = array(
+		'post_id'    => 10,
+		'operations' => array(
+			array( 'element_id' => 'e1', 'settings' => array( 'html' => '<embed src="malware.swf"/>' ) ),
+		),
+	);
+	$prof_batch = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/batch-update', $batch_args );
+	assert_true( $prof_batch['executable_content'], 'batch-update contract mismatch' );
+
+	// 5. replace-element contract: post_id, element_id, replacement -> full node
+	$replace_args = array(
+		'post_id'     => 10,
+		'element_id'  => 'e1',
+		'replacement' => array(
+			'elType'   => 'widget',
+			'settings' => array( 'html' => '<iframe src="evil.com"/>' ),
+		),
+	);
+	$prof_replace = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/replace-element', $replace_args );
+	assert_true( $prof_replace['executable_content'], 'replace-element contract mismatch' );
 } );
 
 run_test( 'Security Profile: generic custom_css payload requires unfiltered_html but is not executable', function () {
