@@ -38,6 +38,111 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 	public const STRATEGY_GLOBAL  = 'global';
 
 	/**
+	 * Payload semantic profiles.
+	 */
+	public const PROFILE_LEGACY_518_V1         = 'legacy_518_v1';
+	public const PROFILE_LEGACY_B16_POST_V1    = 'legacy_b16_post_v1';
+	public const PROFILE_LEGACY_B16_SNIPPET_V1 = 'legacy_b16_snippet_v1';
+	public const PROFILE_TRANSITIONAL_346_POST = 'transitional_346_post_v1';
+	public const PROFILE_TRANSITIONAL_346_SNIP = 'transitional_346_snippet_v1';
+	public const PROFILE_LEGACY_GLOBAL_V1      = 'legacy_global_v1';
+	public const PROFILE_MODERN_V2             = 'modern_v2';
+
+	/**
+	 * Resolves internal semantic payload profile from authenticated checkpoint metadata and decrypted state.
+	 *
+	 * Envelope and payload semantics are strictly separated:
+	 * - Envelope v1 is always legacy_518_v1 (untrusted restore capability).
+	 * - Envelope v2 + schema v2 is modern_v2.
+	 * - Envelope v2 + schema v1 inspects decrypted plaintext markers:
+	 *   - post with data_exists & page_settings_exists => transitional_346_post_v1
+	 *   - post without => legacy_b16_post_v1
+	 *   - snippet with complete modern exact fields => transitional_346_snippet_v1
+	 *   - snippet without => legacy_b16_snippet_v1
+	 *   - global => legacy_global_v1
+	 *
+	 * @param array<string, mixed> $row   Checkpoint DB row (authenticated).
+	 * @param array<string, mixed> $state Decrypted, AEAD-verified plaintext state.
+	 * @return string One of self::PROFILE_* constants or WP_Error on unsupported.
+	 */
+	public static function resolve_payload_profile( array $row, array $state ): string|\WP_Error {
+		$envelope_version = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : 2;
+		if ( 1 === $envelope_version ) {
+			return self::PROFILE_LEGACY_518_V1;
+		}
+
+		if ( 2 !== $envelope_version ) {
+			return new \WP_Error(
+				'checkpoint_envelope_unsupported',
+				sprintf(
+					/* translators: %d: envelope version */
+					__( 'Unsupported checkpoint crypto envelope version: %d.', 'full-elementor-mcp' ),
+					$envelope_version
+				),
+				array( 'crypto_envelope_version' => $envelope_version )
+			);
+		}
+
+		$schema_version = (int) ( $row['payload_schema_version'] ?? 1 );
+		if ( 2 === $schema_version ) {
+			return self::PROFILE_MODERN_V2;
+		}
+
+		if ( 1 !== $schema_version ) {
+			return new \WP_Error(
+				'checkpoint_schema_unsupported',
+				sprintf(
+					/* translators: %d: schema version */
+					__( 'Unsupported checkpoint payload schema version: %d.', 'full-elementor-mcp' ),
+					$schema_version
+				),
+				array( 'payload_schema_version' => $schema_version )
+			);
+		}
+
+		// Envelope 2 + schema 1: inspect authenticated decrypted plaintext state:
+		$strategy = $state['strategy'] ?? self::resolve_strategy( (string) ( $row['resource_key'] ?? '' ) );
+
+		if ( self::STRATEGY_GLOBAL === $strategy ) {
+			return self::PROFILE_LEGACY_GLOBAL_V1;
+		}
+
+		if ( self::STRATEGY_POST === $strategy ) {
+			$el_meta             = $state['elementor'] ?? array();
+			$has_data_exists     = is_array( $el_meta ) && array_key_exists( 'data_exists', $el_meta );
+			$has_settings_exists = is_array( $el_meta ) && array_key_exists( 'page_settings_exists', $el_meta );
+
+			if ( $has_data_exists && $has_settings_exists ) {
+				return self::PROFILE_TRANSITIONAL_346_POST;
+			}
+
+			return self::PROFILE_LEGACY_B16_POST_V1;
+		}
+
+		if ( self::STRATEGY_SNIPPET === $strategy ) {
+			$has_code_exists     = array_key_exists( 'code_exists', $state );
+			$has_location_exists = array_key_exists( 'location_exists', $state );
+			$has_priority_exists = array_key_exists( 'priority_exists', $state );
+			$has_template_type   = isset( $state['template_type'] ) && is_array( $state['template_type'] );
+			$has_edit_mode       = isset( $state['edit_mode'] ) && is_array( $state['edit_mode'] );
+			$has_conditions      = isset( $state['conditions'] ) && is_array( $state['conditions'] );
+			$has_extra_options   = isset( $state['extra_options'] ) && is_array( $state['extra_options'] );
+
+			if ( $has_code_exists && $has_location_exists && $has_priority_exists && $has_template_type && $has_edit_mode && $has_conditions && $has_extra_options ) {
+				return self::PROFILE_TRANSITIONAL_346_SNIP;
+			}
+
+			return self::PROFILE_LEGACY_B16_SNIPPET_V1;
+		}
+
+		return new \WP_Error(
+			'checkpoint_schema_unsupported',
+			__( 'Unrecognized strategy payload in schema version 1 checkpoint.', 'full-elementor-mcp' ),
+			array( 'strategy' => $strategy )
+		);
+	}
+
+	/**
 	 * Resolves strategy family for a given canonical resource key.
 	 *
 	 * @param string $resource_key Canonical resource key.
@@ -89,14 +194,14 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 	}
 
 	/**
-	 * Validates state array against the resolved strategy schema.
+	 * Validates state array against the resolved strategy schema and payload profile.
 	 *
-	 * @param string               $resource_key           Target canonical resource key.
-	 * @param array<string, mixed> $state                  Captured state to validate.
-	 * @param int                  $payload_schema_version Checkpoint payload schema version (1 or 2).
+	 * @param string               $resource_key                 Target canonical resource key.
+	 * @param array<string, mixed> $state                        Captured state to validate.
+	 * @param int|string           $payload_profile_or_version   Semantic payload profile or schema version.
 	 * @return true|\WP_Error
 	 */
-	public static function validate_state_schema( string $resource_key, array $state, int $payload_schema_version = 2 ) {
+	public static function validate_state_schema( string $resource_key, array $state, int|string $payload_profile_or_version = 2 ) {
 		$strategy = self::resolve_strategy( $resource_key );
 		if ( empty( $strategy ) ) {
 			return new \WP_Error(
@@ -133,6 +238,11 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			);
 		}
 
+		$is_modern = ( self::PROFILE_MODERN_V2 === $payload_profile_or_version
+			|| self::PROFILE_TRANSITIONAL_346_POST === $payload_profile_or_version
+			|| self::PROFILE_TRANSITIONAL_346_SNIP === $payload_profile_or_version
+			|| 2 === $payload_profile_or_version );
+
 		if ( self::STRATEGY_POST === $strategy ) {
 			$expected_post_id = (int) substr( $resource_key, 5 );
 			if ( (int) ( $state['post_id'] ?? 0 ) !== $expected_post_id ) {
@@ -159,9 +269,9 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Post checkpoint missing elementor.data list.', 'full-elementor-mcp' ) );
 			}
 
-			if ( 2 === $payload_schema_version ) {
+			if ( $is_modern ) {
 				if ( ! array_key_exists( 'data_exists', $state['elementor'] ) || ! array_key_exists( 'page_settings_exists', $state['elementor'] ) ) {
-					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Schema v2 post checkpoint missing data_exists or page_settings_exists flag.', 'full-elementor-mcp' ) );
+					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Modern/transitional post checkpoint missing data_exists or page_settings_exists flag.', 'full-elementor-mcp' ) );
 				}
 			}
 
@@ -190,13 +300,25 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing required snippet fields.', 'full-elementor-mcp' ) );
 			}
 
-			if ( 2 === $payload_schema_version ) {
+			if ( $is_modern ) {
 				if ( ! isset( $state['template_type'] ) || ! is_array( $state['template_type'] ) ) {
 					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing template_type structure.', 'full-elementor-mcp' ) );
 				}
 
 				if ( ! isset( $state['edit_mode'] ) || ! is_array( $state['edit_mode'] ) ) {
 					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing edit_mode structure.', 'full-elementor-mcp' ) );
+				}
+
+				if ( ! array_key_exists( 'code_exists', $state ) || ! array_key_exists( 'location_exists', $state ) || ! array_key_exists( 'priority_exists', $state ) ) {
+					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing code_exists, location_exists, or priority_exists flag.', 'full-elementor-mcp' ) );
+				}
+
+				if ( ! isset( $state['conditions'] ) || ! is_array( $state['conditions'] ) ) {
+					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing conditions structure.', 'full-elementor-mcp' ) );
+				}
+
+				if ( ! isset( $state['extra_options'] ) || ! is_array( $state['extra_options'] ) ) {
+					return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing extra_options structure.', 'full-elementor-mcp' ) );
 				}
 			}
 		} elseif ( self::STRATEGY_GLOBAL === $strategy ) {
@@ -284,19 +406,43 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 	}
 
 	/**
+	 * Captures post state projected into transitional 346 format.
+	 *
+	 * Matches the exact plaintext shape generated by commit 346b08a.
+	 *
+	 * @param string $resource_key Canonical resource key.
+	 * @return array<string, mixed>|\WP_Error
+	 */
+	public static function capture_as_transitional_346_post_v1( string $resource_key ): array|\WP_Error {
+		return self::capture( $resource_key );
+	}
+
+	/**
+	 * Captures snippet state projected into transitional 346 format.
+	 *
+	 * Matches the exact plaintext shape generated by commit 346b08a.
+	 *
+	 * @param string $resource_key Canonical resource key.
+	 * @return array<string, mixed>|\WP_Error
+	 */
+	public static function capture_as_transitional_346_snippet_v1( string $resource_key ): array|\WP_Error {
+		return self::capture( $resource_key );
+	}
+
+	/**
 	 * Restores persistent resource state from a validated checkpoint state array.
 	 *
 	 * All physical writes MUST be routed through guarded persistent write sinks
 	 * with active mutation fencing asserting current fencing token.
 	 *
-	 * @param string               $resource_key           Canonical resource key.
-	 * @param array<string, mixed> $state                  Decrypted, validated state dictionary.
-	 * @param int                  $fencing_token          Active fencing token.
-	 * @param string               $owner_id               Active lock owner ID.
-	 * @param int                  $payload_schema_version Payload schema version (1 or 2).
+	 * @param string               $resource_key                 Canonical resource key.
+	 * @param array<string, mixed> $state                        Decrypted, validated state dictionary.
+	 * @param int                  $fencing_token                Active fencing token.
+	 * @param string               $owner_id                     Active lock owner ID.
+	 * @param int|string           $payload_profile_or_version   Payload profile or schema version (1 or 2).
 	 * @return true|\WP_Error True on successful restoration or WP_Error on failure.
 	 */
-	public static function restore( string $resource_key, array $state, int $fencing_token, string $owner_id, int $payload_schema_version = 2 ) {
+	public static function restore( string $resource_key, array $state, int $fencing_token, string $owner_id, int|string $payload_profile_or_version = 2 ) {
 		$strategy = self::resolve_strategy( $resource_key );
 
 		if ( self::STRATEGY_GLOBAL === $strategy ) {
@@ -304,7 +450,7 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 		}
 
 		if ( self::STRATEGY_SNIPPET === $strategy ) {
-			if ( 1 === $payload_schema_version ) {
+			if ( self::PROFILE_LEGACY_B16_SNIPPET_V1 === $payload_profile_or_version || self::PROFILE_LEGACY_518_V1 === $payload_profile_or_version || ( 1 === $payload_profile_or_version && ! array_key_exists( 'code_exists', $state ) ) ) {
 				return new \WP_Error(
 					'checkpoint_legacy_snippet_not_exact',
 					__( 'Historical snippet checkpoint (schema v1) lacks required exact fields and cannot be restored. Classified as recovery-only.', 'full-elementor-mcp' )
@@ -316,7 +462,7 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 
 		if ( self::STRATEGY_POST === $strategy ) {
 			$post_id = (int) substr( $resource_key, 5 );
-			if ( 1 === $payload_schema_version ) {
+			if ( self::PROFILE_LEGACY_B16_POST_V1 === $payload_profile_or_version || self::PROFILE_LEGACY_518_V1 === $payload_profile_or_version || ( 1 === $payload_profile_or_version && ! isset( $state['elementor']['data_exists'] ) ) ) {
 				return self::restore_post_state_v1( $post_id, $state, $fencing_token, $owner_id );
 			}
 			return self::restore_post_state( $post_id, $state, $fencing_token, $owner_id );
@@ -523,15 +669,51 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 		);
 
 		$raw_data = get_post_meta( $post_id, '_elementor_data', true );
-		$elements = array();
 		if ( is_string( $raw_data ) && '' !== trim( $raw_data ) ) {
 			try {
 				$elements = json_decode( $raw_data, true, 512, JSON_THROW_ON_ERROR );
 			} catch ( \Throwable $e ) {
-				$elements = array();
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					sprintf(
+						/* translators: %s: error message */
+						__( 'Malformed JSON in _elementor_data storage: %s', 'full-elementor-mcp' ),
+						$e->getMessage()
+					),
+					array( 'post_id' => $post_id )
+				);
+			}
+			if ( ! is_array( $elements ) ) {
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					__( '_elementor_data JSON must decode to an array list.', 'full-elementor-mcp' ),
+					array( 'post_id' => $post_id )
+				);
+			}
+			if ( ! empty( $elements ) && array_keys( $elements ) !== range( 0, count( $elements ) - 1 ) ) {
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					__( '_elementor_data elements root must be a list of elements, not an associative object.', 'full-elementor-mcp' ),
+					array( 'post_id' => $post_id )
+				);
 			}
 		} elseif ( is_array( $raw_data ) ) {
+			if ( ! empty( $raw_data ) && array_keys( $raw_data ) !== range( 0, count( $raw_data ) - 1 ) ) {
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					__( '_elementor_data elements root must be a list of elements, not an associative object.', 'full-elementor-mcp' ),
+					array( 'post_id' => $post_id )
+				);
+			}
 			$elements = $raw_data;
+		} elseif ( empty( $raw_data ) ) {
+			$elements = array();
+		} else {
+			return new \WP_Error(
+				'checkpoint_capture_failed',
+				__( 'Invalid type for _elementor_data storage.', 'full-elementor-mcp' ),
+				array( 'post_id' => $post_id )
+			);
 		}
 
 		$raw_settings  = get_post_meta( $post_id, '_elementor_page_settings', true );

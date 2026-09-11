@@ -2075,7 +2075,7 @@ function create_authentic_51814479_post_fixture( int $post_id, string $uuid, str
  * - payload_schema_version = 1.
  * - Elementor structure contains data, page_settings, and meta map, but lacks data_exists and page_settings_exists flags.
  */
-function create_authentic_b16_post_fixture( int $post_id, string $uuid, string $algo, array $key_info ): array {
+function create_authentic_b16_post_fixture( int $post_id, string $uuid, string $algo, array $key_info, ?array $elementor_data = null ): array {
 	$terms_map = array();
 	if ( function_exists( 'wp_get_object_terms' ) ) {
 		$taxonomies = array( 'elementor_library_type', 'elementor_library_category', 'category', 'post_tag' );
@@ -2106,7 +2106,7 @@ function create_authentic_b16_post_fixture( int $post_id, string $uuid, string $
 			'post_password'  => '',
 		),
 		'elementor'      => array(
-			'data'          => array( array( 'id' => 'sec_b16', 'elType' => 'section', 'elements' => array() ) ),
+			'data'          => null !== $elementor_data ? $elementor_data : array( array( 'id' => 'sec_b16', 'elType' => 'section', 'elements' => array() ) ),
 			'page_settings' => array( 'template' => 'elementor_canvas' ),
 			'meta'          => array(
 				'_elementor_edit_mode'     => array( 'exists' => true, 'value' => 'builder' ),
@@ -2179,6 +2179,167 @@ function create_authentic_b16_snippet_fixture( int $post_id, string $uuid, strin
 		'priority'      => 10,
 		'conditions'    => array( 'exists' => true, 'value' => array( 'general' ) ),
 		'extra_options' => array( 'exists' => false, 'value' => null ),
+	);
+
+	$json = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $state );
+	$hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $state );
+
+	$aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
+		'checkpoint_type'        => 'automatic',
+		'checkpoint_uuid'        => $uuid,
+		'encryption_algorithm'   => $algo,
+		'key_id'                 => $key_info['key_id'],
+		'key_version'            => $key_info['version'],
+		'payload_schema_version' => 1,
+		'resource_key'           => 'post:' . $post_id,
+		'restore_capability'     => 'exact',
+	), 2 );
+
+	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
+		$nonce      = random_bytes( 24 );
+		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $json, $aad, $nonce, $key_info['raw_key'] );
+		$tag        = null;
+	} else {
+		$nonce      = random_bytes( 12 );
+		$raw_tag    = '';
+		$ciphertext = openssl_encrypt( $json, 'aes-256-gcm', $key_info['raw_key'], OPENSSL_RAW_DATA, $nonce, $raw_tag, $aad, 16 );
+		$tag        = base64_encode( $raw_tag );
+	}
+
+	return array(
+		'state'          => $state,
+		'json'           => $json,
+		'hash'           => $hash,
+		'ciphertext_b64' => base64_encode( $ciphertext ),
+		'nonce_b64'      => base64_encode( $nonce ),
+		'auth_tag'       => $tag,
+		'uuid'           => $uuid,
+		'resource_key'   => 'post:' . $post_id,
+		'key_id'         => $key_info['key_id'],
+	);
+}
+
+/**
+ * Fixture builder for Transitional Phase 5 post checkpoints (commit 346b08a...).
+ *
+ * Authentic characteristics:
+ * - Envelope v2 AAD (8 fields).
+ * - payload_schema_version = 1.
+ * - Elementor structure ALREADY contains data_exists and page_settings_exists flags.
+ * - Stored state_hash was calculated over this exact shape.
+ */
+function create_authentic_346_post_fixture( int $post_id, string $uuid, string $algo, array $key_info, bool $data_exists = true, bool $settings_exists = true ): array {
+	$terms_map = array();
+	if ( function_exists( 'wp_get_object_terms' ) ) {
+		$taxonomies = array( 'elementor_library_type', 'elementor_library_category', 'category', 'post_tag' );
+		foreach ( $taxonomies as $tax ) {
+			if ( function_exists( 'taxonomy_exists' ) && ! taxonomy_exists( $tax ) ) {
+				continue;
+			}
+			$terms = wp_get_object_terms( $post_id, $tax, array( 'fields' => 'slugs' ) );
+			$terms_map[ $tax ] = ( ! is_wp_error( $terms ) && is_array( $terms ) ) ? array_values( (array) $terms ) : array();
+		}
+	}
+
+	$state = array(
+		'strategy'       => 'post',
+		'post_id'        => $post_id,
+		'post_fields'    => array(
+			'ID'             => $post_id,
+			'post_type'      => 'post',
+			'post_status'    => 'publish',
+			'post_title'     => '346b08a Post',
+			'post_name'      => '346b08a-post',
+			'post_content'   => '346b08a Content',
+			'post_excerpt'   => '',
+			'post_parent'    => 0,
+			'menu_order'     => 0,
+			'comment_status' => 'closed',
+			'ping_status'    => 'closed',
+			'post_password'  => '',
+		),
+		'elementor'      => array(
+			'data_exists'          => $data_exists,
+			'data'                 => $data_exists ? array( array( 'id' => 'sec_346', 'elType' => 'section', 'elements' => array() ) ) : array(),
+			'page_settings_exists' => $settings_exists,
+			'page_settings'        => $settings_exists ? array( 'template' => 'elementor_canvas' ) : array(),
+			'meta'                 => array(
+				'_elementor_edit_mode'     => array( 'exists' => true, 'value' => 'builder' ),
+				'_elementor_template_type' => array( 'exists' => true, 'value' => 'post' ),
+				'_elementor_version'       => array( 'exists' => true, 'value' => '3.25.0' ),
+				'_elementor_pro_version'   => array( 'exists' => false, 'value' => null ),
+				'_elementor_conditions'    => array( 'exists' => false, 'value' => null ),
+				'_elementor_popup_display' => array( 'exists' => false, 'value' => null ),
+				'_wp_page_template'        => array( 'exists' => true, 'value' => 'elementor_canvas' ),
+			),
+		),
+		'featured_image' => 0,
+		'terms'          => $terms_map,
+	);
+
+	$json = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $state );
+	$hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $state );
+
+	$aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
+		'checkpoint_type'        => 'automatic',
+		'checkpoint_uuid'        => $uuid,
+		'encryption_algorithm'   => $algo,
+		'key_id'                 => $key_info['key_id'],
+		'key_version'            => $key_info['version'],
+		'payload_schema_version' => 1,
+		'resource_key'           => 'post:' . $post_id,
+		'restore_capability'     => 'exact',
+	), 2 );
+
+	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
+		$nonce      = random_bytes( 24 );
+		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $json, $aad, $nonce, $key_info['raw_key'] );
+		$tag        = null;
+	} else {
+		$nonce      = random_bytes( 12 );
+		$raw_tag    = '';
+		$ciphertext = openssl_encrypt( $json, 'aes-256-gcm', $key_info['raw_key'], OPENSSL_RAW_DATA, $nonce, $raw_tag, $aad, 16 );
+		$tag        = base64_encode( $raw_tag );
+	}
+
+	return array(
+		'state'          => $state,
+		'json'           => $json,
+		'hash'           => $hash,
+		'ciphertext_b64' => base64_encode( $ciphertext ),
+		'nonce_b64'      => base64_encode( $nonce ),
+		'auth_tag'       => $tag,
+		'uuid'           => $uuid,
+		'resource_key'   => 'post:' . $post_id,
+		'key_id'         => $key_info['key_id'],
+	);
+}
+
+/**
+ * Fixture builder for Transitional Phase 5 snippet checkpoints (commit 346b08a...).
+ *
+ * Authentic characteristics:
+ * - Envelope v2 AAD (8 fields).
+ * - payload_schema_version = 1.
+ * - Snippet state ALREADY contains all modern exact fields (code_exists, template_type, edit_mode, priority_exists, etc.).
+ * - Stored state_hash was calculated over this exact shape.
+ */
+function create_authentic_346_snippet_fixture( int $post_id, string $uuid, string $algo, array $key_info ): array {
+	$state = array(
+		'strategy'        => 'snippet',
+		'post_id'         => $post_id,
+		'post_title'      => '346 Snippet Post',
+		'post_status'     => 'publish',
+		'code'            => 'console.log("346-authentic");',
+		'code_exists'     => true,
+		'location'        => 'elementor_head',
+		'location_exists' => true,
+		'priority'        => 0,
+		'priority_exists' => true,
+		'template_type'   => array( 'exists' => true, 'value' => 'custom_code' ),
+		'edit_mode'       => array( 'exists' => true, 'value' => 'builder' ),
+		'conditions'      => array( 'exists' => true, 'value' => array( 'include' => array( 'general' ) ) ),
+		'extra_options'   => array( 'exists' => false, 'value' => null ),
 	);
 
 	$json = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $state );
@@ -2858,6 +3019,207 @@ run_test( 'Final Corrective Pass: Exact post & snippet strategies preserve stric
 	assert_equals( 'custom_code', get_post_meta( $snip_id, '_elementor_template_type', true ), 'template_type must be restored' );
 	assert_equals( 'builder', get_post_meta( $snip_id, '_elementor_edit_mode', true ), 'edit_mode must be restored' );
 	assert_false( metadata_exists( 'post', $snip_id, '_elementor_extra_options' ), 'Absent extra_options must be deleted on restore' );
+} );
+
+run_test( 'Profile Pass: Transitional 346 post checkpoint with existing data restores exactly and verifies historical hash', function () {
+	global $wpdb;
+	$post_id   = wp_insert_post( array( 'post_title' => '346 Post Existing Data' ) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	$uuid    = 'chk-346-post-exist-001';
+	$fixture = create_authentic_346_post_fixture( $post_id, $uuid, $algo, $salt_info, true, true );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 2, %s, 1, %s, %s, %s, %s, %s, %d, '346_post', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$post_id,
+			$algo,
+			$fixture['key_id'],
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Verify internal profile resolution classifies as transitional_346_post_v1:
+	$row     = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $chk_id );
+	$dec     = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $row );
+	$profile = Full_Elementor_MCP_Checkpoint_Strategies::resolve_payload_profile( $row, $dec );
+	assert_equals( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_TRANSITIONAL_346_POST, $profile, 'Must classify as transitional_346_post_v1' );
+
+	// Mutate live post:
+	update_post_meta( $post_id, '_elementor_data', wp_json_encode( array( array( 'id' => 'mutated_346', 'elType' => 'section', 'elements' => array() ) ) ) );
+	wp_update_post( array( 'ID' => $post_id, 'post_title' => 'Mutated Before 346 Restore' ) );
+
+	// Restore:
+	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_not_wp_error( $res, 'Transitional 346 post checkpoint must restore successfully' );
+	assert_true( ! empty( $res['restored'] ), 'Restore must report restored true' );
+
+	// Verify post fields and Elementor data restored:
+	$post = get_post( $post_id );
+	assert_equals( '346b08a Post', $post->post_title, 'Post title must be restored' );
+	$raw_data = get_post_meta( $post_id, '_elementor_data', true );
+	$data     = json_decode( $raw_data, true );
+	assert_true( is_array( $data ) && ! empty( $data ), 'Elementor data must exist and not be empty' );
+	assert_equals( 'sec_346', $data[0]['id'], 'Elementor tree from 346 checkpoint must be restored' );
+} );
+
+run_test( 'Profile Pass: Transitional 346 post checkpoint with absent data/settings deletes mutated meta and verifies historical hash', function () {
+	global $wpdb;
+	$post_id   = wp_insert_post( array( 'post_title' => '346 Post Absent Data' ) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	// Fixture where data_exists=false and page_settings_exists=false:
+	$uuid    = 'chk-346-post-absent-001';
+	$fixture = create_authentic_346_post_fixture( $post_id, $uuid, $algo, $salt_info, false, false );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 2, %s, 1, %s, %s, %s, %s, %s, %d, '346_absent', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$post_id,
+			$algo,
+			$fixture['key_id'],
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Mutate live resource: add both _elementor_data and _elementor_page_settings:
+	update_post_meta( $post_id, '_elementor_data', wp_json_encode( array( array( 'id' => 'mutated_sec', 'elType' => 'section', 'elements' => array() ) ) ) );
+	update_post_meta( $post_id, '_elementor_page_settings', array( 'custom_option' => 'present' ) );
+	assert_true( metadata_exists( 'post', $post_id, '_elementor_data' ), 'Meta must exist before restore' );
+	assert_true( metadata_exists( 'post', $post_id, '_elementor_page_settings' ), 'Meta must exist before restore' );
+
+	// Restore:
+	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_not_wp_error( $res, 'Transitional 346 absent post restore must succeed' );
+	assert_true( ! empty( $res['restored'] ) );
+
+	// Expected: absence semantics preserved! Both keys deleted:
+	assert_false( metadata_exists( 'post', $post_id, '_elementor_data' ), 'Restored absent _elementor_data must be deleted' );
+	assert_false( metadata_exists( 'post', $post_id, '_elementor_page_settings' ), 'Restored absent _elementor_page_settings must be deleted' );
+} );
+
+run_test( 'Profile Pass: Transitional 346 snippet checkpoint restores exact fields and verifies historical hash without being downgraded', function () {
+	global $wpdb;
+	$snip_id   = wp_insert_post( array(
+		'post_title'  => '346 Snippet Initial',
+		'post_status' => 'publish',
+		'post_type'   => 'elementor_snippet',
+	) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	$uuid    = 'chk-346-snip-001';
+	$fixture = create_authentic_346_snippet_fixture( $snip_id, $uuid, $algo, $salt_info );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 2, %s, 1, %s, %s, %s, %s, %s, %d, '346_snip', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$snip_id,
+			$algo,
+			$fixture['key_id'],
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Verify profile resolution classifies as transitional_346_snippet_v1:
+	$row     = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $chk_id );
+	$dec     = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $row );
+	$profile = Full_Elementor_MCP_Checkpoint_Strategies::resolve_payload_profile( $row, $dec );
+	assert_equals( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_TRANSITIONAL_346_SNIP, $profile, 'Must classify as transitional_346_snippet_v1' );
+
+	// Mutate live snippet: code, location, priority, template_type, edit_mode, conditions, extra_options:
+	update_post_meta( $snip_id, '_elementor_code', 'console.log("mutated");' );
+	update_post_meta( $snip_id, '_elementor_location', 'elementor_footer' );
+	update_post_meta( $snip_id, '_elementor_priority', 99 );
+	update_post_meta( $snip_id, '_elementor_template_type', 'mutated_template' );
+	update_post_meta( $snip_id, '_elementor_edit_mode', 'standard' );
+	update_post_meta( $snip_id, '_elementor_conditions', array( 'exclude' => array( 'single' ) ) );
+	update_post_meta( $snip_id, '_elementor_extra_options', array( 'load_type' => 'defer' ) );
+
+	// Restore: MUST NOT be downgraded to recovery-only:
+	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_not_wp_error( $res, 'Transitional 346 snippet must restore exactly and not fail' );
+	assert_true( ! empty( $res['restored'] ), 'Restore must report restored true' );
+
+	// Verify exact fields returned:
+	assert_equals( 'console.log("346-authentic");', get_post_meta( $snip_id, '_elementor_code', true ), 'Code must be restored' );
+	assert_equals( 'elementor_head', get_post_meta( $snip_id, '_elementor_location', true ), 'Location must be restored' );
+	assert_equals( 0, (int) get_post_meta( $snip_id, '_elementor_priority', true ), 'Exact priority 0 must NOT be converted to 1' );
+	assert_equals( 'custom_code', get_post_meta( $snip_id, '_elementor_template_type', true ), 'template_type must be restored' );
+	assert_equals( 'builder', get_post_meta( $snip_id, '_elementor_edit_mode', true ), 'edit_mode must be restored' );
+	assert_equals( array( 'include' => array( 'general' ) ), get_post_meta( $snip_id, '_elementor_conditions', true ), 'conditions must be restored' );
+	assert_false( metadata_exists( 'post', $snip_id, '_elementor_extra_options' ), 'Absent extra_options must be deleted on restore' );
+} );
+
+run_test( 'Profile Pass: Malformed live _elementor_data fails closed in b16 projection and never causes false no-op', function () {
+	global $wpdb;
+	$post_id   = wp_insert_post( array( 'post_title' => 'b16 Post Empty Tree' ) );
+	$salt_info = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo      = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	// Checkpoint has valid empty Elementor tree:
+	$uuid    = 'chk-b16-post-empty-001';
+	$fixture = create_authentic_b16_post_fixture( $post_id, $uuid, $algo, $salt_info, array() );
+
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 2, %s, 1, %s, %s, %s, %s, %s, %d, 'b16_empty', 'manual', '', '', 0)",
+			$uuid,
+			$fixture['resource_key'],
+			$post_id,
+			$algo,
+			$fixture['key_id'],
+			$fixture['nonce_b64'],
+			$fixture['auth_tag'],
+			$fixture['ciphertext_b64'],
+			$fixture['hash'],
+			strlen( $fixture['json'] )
+		)
+	);
+	$chk_id = (int) $wpdb->insert_id;
+
+	// Set current live _elementor_data to malformed JSON:
+	update_post_meta( $post_id, '_elementor_data', '{malformed json[' );
+
+	// 1. Direct b16 projection MUST FAIL CLOSED with checkpoint_capture_failed:
+	$proj = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_schema_v1( 'post:' . $post_id );
+	assert_error_code( 'checkpoint_capture_failed', $proj, 'b16 projection must fail closed on malformed JSON instead of collapsing to empty array' );
+
+	// 2. Restore attempt must NOT decide noop=true:
+	$res = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_id );
+	assert_true( is_wp_error( $res ), 'Restore must not succeed or decide noop on malformed live state' );
+	assert_false( is_array( $res ) && ! empty( $res['noop'] ), 'Must never return noop=true for malformed live state' );
 } );
 
 echo "\n=======================================================\n";

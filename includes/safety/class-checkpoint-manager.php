@@ -546,6 +546,12 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			return $state;
 		}
 
+		// 3.1. Resolve internal semantic payload profile:
+		$payload_profile = Full_Elementor_MCP_Checkpoint_Strategies::resolve_payload_profile( $row, $state );
+		if ( is_wp_error( $payload_profile ) ) {
+			return $payload_profile;
+		}
+
 		// 4. Validate capability only after authenticated metadata is trustworthy:
 		if ( self::CAPABILITY_EXACT !== $row['restore_capability'] ) {
 			return new \WP_Error(
@@ -559,9 +565,8 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			);
 		}
 
-		// 4.1. Reject legacy schema v1 snippet restore (cannot claim modern exactness):
-		$strategy_name = Full_Elementor_MCP_Checkpoint_Strategies::resolve_strategy( $resource_key );
-		if ( 1 === $schema_version && Full_Elementor_MCP_Checkpoint_Strategies::STRATEGY_SNIPPET === $strategy_name ) {
+		// 4.1. Reject legacy schema v1 snippet restore only when lacking modern exact fields:
+		if ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_LEGACY_B16_SNIPPET_V1 === $payload_profile ) {
 			return new \WP_Error(
 				'checkpoint_legacy_snippet_not_exact',
 				__( 'Historical snippet checkpoints lack required exact fields (template_type, edit_mode) and cannot perform exact restoration. Classified as recovery-only.', 'full-elementor-mcp' ),
@@ -585,7 +590,7 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			);
 		}
 
-		$strategy_check = Full_Elementor_MCP_Checkpoint_Strategies::validate_state_schema( $resource_key, $state, $schema_version );
+		$strategy_check = Full_Elementor_MCP_Checkpoint_Strategies::validate_state_schema( $resource_key, $state, $payload_profile );
 		if ( is_wp_error( $strategy_check ) ) {
 			return $strategy_check;
 		}
@@ -634,13 +639,28 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				return $current_state_v2;
 			}
 
-			// For no-op comparison: compare state hash in the checkpoint's schema domain:
-			if ( 1 === $schema_version ) {
-				$current_state_v1 = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_schema_v1( $resource_key );
-				if ( is_wp_error( $current_state_v1 ) ) {
-					return $current_state_v1;
+			// For no-op comparison: compare state hash in the checkpoint's profile domain:
+			if ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_LEGACY_B16_POST_V1 === $payload_profile ) {
+				$current_state_compat = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_schema_v1( $resource_key );
+				if ( is_wp_error( $current_state_compat ) ) {
+					$current_hash = '';
+				} else {
+					$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_compat );
 				}
-				$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_v1 );
+			} elseif ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_TRANSITIONAL_346_POST === $payload_profile ) {
+				$current_state_compat = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_transitional_346_post_v1( $resource_key );
+				if ( is_wp_error( $current_state_compat ) ) {
+					$current_hash = '';
+				} else {
+					$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_compat );
+				}
+			} elseif ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_TRANSITIONAL_346_SNIP === $payload_profile ) {
+				$current_state_compat = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_transitional_346_snippet_v1( $resource_key );
+				if ( is_wp_error( $current_state_compat ) ) {
+					$current_hash = '';
+				} else {
+					$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_compat );
+				}
 			} else {
 				$current_hash = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $current_state_v2 );
 			}
@@ -719,10 +739,10 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				'is_create'       => false,
 			) );
 
-			// 13. Execute persistent restore writes through Safe_Writes with payload schema dispatch:
+			// 13. Execute persistent restore writes through Safe_Writes with payload profile dispatch:
 			$write_error = null;
 			try {
-				$write_res = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $state, $fencing_token, $owner_id, $schema_version );
+				$write_res = Full_Elementor_MCP_Checkpoint_Strategies::restore( $resource_key, $state, $fencing_token, $owner_id, $payload_profile );
 				if ( is_wp_error( $write_res ) ) {
 					$write_error = $write_res;
 				}
@@ -756,9 +776,13 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				return $write_error;
 			}
 
-			// 14. Exact Post-Restore Verification in the matching schema domain:
-			if ( 1 === $schema_version ) {
+			// 14. Exact Post-Restore Verification in the matching profile domain:
+			if ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_LEGACY_B16_POST_V1 === $payload_profile ) {
 				$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_schema_v1( $resource_key );
+			} elseif ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_TRANSITIONAL_346_POST === $payload_profile ) {
+				$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_transitional_346_post_v1( $resource_key );
+			} elseif ( Full_Elementor_MCP_Checkpoint_Strategies::PROFILE_TRANSITIONAL_346_SNIP === $payload_profile ) {
+				$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture_as_transitional_346_snippet_v1( $resource_key );
 			} else {
 				$post_verify = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key );
 			}
