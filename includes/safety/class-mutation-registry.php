@@ -221,6 +221,26 @@ class Full_Elementor_MCP_Mutation_Registry {
 	}
 
 	/**
+	 * Checks if an ability supports rollback, optionally taking arguments into account.
+	 *
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Optional call arguments.
+	 * @return bool True if rollback is supported.
+	 */
+	public static function supports_rollback( string $ability, array $args = array() ): bool {
+		$strategy = self::get( $ability );
+		if ( ! $strategy ) {
+			return false;
+		}
+
+		if ( ! empty( $strategy['supports_rollback_for_args'] ) && is_callable( $strategy['supports_rollback_for_args'] ) ) {
+			return (bool) call_user_func( $strategy['supports_rollback_for_args'], $args );
+		}
+
+		return ! empty( $strategy['supports_rollback'] );
+	}
+
+	/**
 	 * Returns all registered mutation strategies.
 	 *
 	 * @return array<string, array<string, mixed>> All strategies keyed by ability name.
@@ -1144,10 +1164,29 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		if ( class_exists( 'Full_Elementor_MCP_Data' ) ) {
-			$data_layer = new \Full_Elementor_MCP_Data();
-			$save_res   = $data_layer->save_page_data( $post_id, $before_state );
-			if ( is_wp_error( $save_res ) ) {
-				return $save_res;
+			$context_token = null;
+			if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+				$context_token = Full_Elementor_MCP_Mutation_Context::enter(
+					array(
+						'ability'       => 'rollback',
+						'resource_key'  => $resource_key,
+						'object_id'     => $post_id,
+						'owner_id'      => $owner_id,
+						'fencing_token' => $token,
+						'is_rollback'   => true,
+					)
+				);
+			}
+			try {
+				$data_layer = new \Full_Elementor_MCP_Data();
+				$save_res   = $data_layer->save_page_data( $post_id, $before_state );
+				if ( is_wp_error( $save_res ) ) {
+					return $save_res;
+				}
+			} finally {
+				if ( $context_token && class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+					Full_Elementor_MCP_Mutation_Context::leave( $context_token );
+				}
 			}
 		} else {
 			// Fallback: direct meta restore.

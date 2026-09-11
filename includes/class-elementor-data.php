@@ -194,6 +194,28 @@ class Full_Elementor_MCP_Data {
 	 * @return bool|\WP_Error True on success, WP_Error on failure.
 	 */
 	public function save_page_data( int $post_id, array $data ) {
+		// Low-level write guard: assert active mutation context & fencing immediately before write:
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
+			if ( is_wp_error( $context_guard ) ) {
+				return $context_guard;
+			}
+		}
+
+		// Tree validation immediately before write:
+		if ( class_exists( 'Full_Elementor_MCP_Tree_Validator' ) ) {
+			$tree_validation = Full_Elementor_MCP_Tree_Validator::validate_document(
+				$data,
+				array(
+					'post_id'   => $post_id,
+					'operation' => 'save_page_data',
+				)
+			);
+			if ( is_wp_error( $tree_validation ) ) {
+				return $tree_validation;
+			}
+		}
+
 		$document = $this->get_document( $post_id );
 
 		if ( is_wp_error( $document ) ) {
@@ -265,6 +287,14 @@ class Full_Elementor_MCP_Data {
 	 * @return bool|\WP_Error True on success, WP_Error on failure.
 	 */
 	public function save_page_settings( int $post_id, array $settings ) {
+		// Low-level write guard: assert active mutation context & fencing immediately before write:
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
+			if ( is_wp_error( $context_guard ) ) {
+				return $context_guard;
+			}
+		}
+
 		$document = $this->get_document( $post_id );
 
 		if ( is_wp_error( $document ) ) {

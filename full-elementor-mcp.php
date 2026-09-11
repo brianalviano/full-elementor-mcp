@@ -103,6 +103,10 @@ function full_elementor_mcp_register_ability( string $name, array $args ) {
 	if ( isset( $args['output_schema'] ) && is_array( $args['output_schema'] ) ) {
 		$args['output_schema'] = full_elementor_mcp_sanitize_schema( $args['output_schema'] );
 	}
+	// Phase 4: Route ability execution through central safety middleware:
+	if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
+		$args = Full_Elementor_MCP_Mutation_Middleware::wrap_ability( $name, $args );
+	}
 	return wp_register_ability( $name, $args );
 }
 
@@ -196,7 +200,7 @@ function full_elementor_mcp_init(): void {
 		require_once FULL_ELEMENTOR_MCP_DIR . 'includes/admin/class-admin.php';
 	}
 
-	// Safety subsystem foundation.
+	// Safety subsystem foundation (Phases 1-4).
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-database-installer.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-safety-settings.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-lock-manager.php';
@@ -206,6 +210,13 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-security-strategies.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-registry.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-journal.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-context.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-confirmation-manager.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-idempotency-manager.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-middleware.php';
+
+	// Initialize mutation strategies:
+	Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
 
 	// Execute runtime schema upgrade check to support in-place updates.
 	// Fail-closed policy: block MCP initialization if safety database cannot be verified.
@@ -219,6 +230,35 @@ function full_elementor_mcp_init(): void {
 		} );
 		return;
 	}
+
+	// Runtime conservative recovery hooks (throttled):
+	$maybe_recover = static function () {
+		if ( ! class_exists( 'Full_Elementor_MCP_Journal' ) ) {
+			return;
+		}
+		$last_recovery = (int) get_option( 'full_elementor_mcp_last_recovery_time', 0 );
+		if ( ( time() - $last_recovery ) > 60 ) {
+			update_option( 'full_elementor_mcp_last_recovery_time', time() );
+			Full_Elementor_MCP_Journal::recover_pending();
+		}
+	};
+	add_action( 'admin_init', $maybe_recover );
+	add_action( 'mcp_adapter_init', $maybe_recover );
+
+	// Best-effort shutdown recovery handler for active mutation context:
+	register_shutdown_function( static function () {
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) && Full_Elementor_MCP_Mutation_Context::has_active_context() ) {
+			$ctx = Full_Elementor_MCP_Mutation_Context::current();
+			if ( ! empty( $ctx['journal_id'] ) && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
+				Full_Elementor_MCP_Journal::mark_failed(
+					(int) $ctx['journal_id'],
+					'unexpected_script_shutdown',
+					(int) ( $ctx['fencing_token'] ?? 0 )
+				);
+			}
+			Full_Elementor_MCP_Mutation_Context::reset();
+		}
+	} );
 
 	// Boot the plugin.
 	Full_Elementor_MCP_Plugin::instance();
