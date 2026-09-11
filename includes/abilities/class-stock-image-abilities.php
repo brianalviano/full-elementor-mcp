@@ -361,8 +361,16 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 			require_once ABSPATH . 'wp-admin/includes/image.php';
 		}
 
-		// Download the file to a temp location.
-		$tmp_file = download_url( $url, 30 );
+		// Validate and safely download the file to a temp location (SSRF defense).
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$val = Full_Elementor_MCP_Security_Strategies::validate_url( $url );
+			if ( is_wp_error( $val ) ) {
+				return $val;
+			}
+			$tmp_file = Full_Elementor_MCP_Security_Strategies::safe_download_url( $url, 30 );
+		} else {
+			$tmp_file = download_url( $url, 30 );
+		}
 
 		if ( is_wp_error( $tmp_file ) ) {
 			return new \WP_Error(

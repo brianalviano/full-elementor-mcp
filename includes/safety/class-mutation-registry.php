@@ -171,6 +171,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$descriptor['is_destructive']                 = ! empty( $descriptor['is_destructive'] );
 		$descriptor['supports_rollback']              = (bool) $descriptor['supports_rollback'];
 
+		// Phase 3 security and validation metadata:
+		$descriptor['requires_tree_validation'] = ! empty( $descriptor['requires_tree_validation'] )
+			|| self::CATEGORY_ELEMENTOR_DATA === $descriptor['category'];
+		$descriptor['security_profile']         = (string) ( $descriptor['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $descriptor['category'] ? 'high_risk' : 'standard' ) );
+		$descriptor['external_network_access']  = ! empty( $descriptor['external_network_access'] )
+			|| self::CATEGORY_UNSUPPORTED === $descriptor['category'] && str_contains( $ability, 'image' );
+		$descriptor['executable_content']       = ! empty( $descriptor['executable_content'] )
+			|| self::CATEGORY_CUSTOM_CODE === $descriptor['category'];
+		$descriptor['requires_unfiltered_html'] = ! empty( $descriptor['requires_unfiltered_html'] )
+			|| self::CATEGORY_CUSTOM_CODE === $descriptor['category'];
+
 		self::$strategies[ $ability ] = $descriptor;
 
 		return true;
@@ -382,6 +393,28 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Checks if an ability modifies Elementor document trees and requires tree validation.
+	 *
+	 * @param string $ability Ability name.
+	 * @return bool True if tree validation is required.
+	 */
+	public static function requires_tree_validation( string $ability ): bool {
+		$strategy = self::get( $ability );
+		return ! empty( $strategy['requires_tree_validation'] );
+	}
+
+	/**
+	 * Gets the security profile classification for an ability.
+	 *
+	 * @param string $ability Ability name.
+	 * @return string Security profile ('standard', 'high_risk', 'custom_code', etc.).
+	 */
+	public static function get_security_profile( string $ability ): string {
+		$strategy = self::get( $ability );
+		return (string) ( $strategy['security_profile'] ?? 'standard' );
 	}
 
 	/**
@@ -1050,6 +1083,21 @@ class Full_Elementor_MCP_Mutation_Registry {
 
 		if ( ! is_array( $before_state ) ) {
 			return new \WP_Error( 'invalid_before_state', __( 'Before-state must be an array of Elementor elements.', 'full-elementor-mcp' ) );
+		}
+
+		// Phase 3: Validate tree structure before restoring to persistent storage.
+		// Malformed or corrupted journal state must NOT be written back into Elementor.
+		if ( class_exists( 'Full_Elementor_MCP_Tree_Validator' ) ) {
+			$tree_validation = Full_Elementor_MCP_Tree_Validator::validate_document(
+				$before_state,
+				array(
+					'post_id'   => $post_id,
+					'operation' => 'rollback_restore',
+				)
+			);
+			if ( is_wp_error( $tree_validation ) ) {
+				return $tree_validation;
+			}
 		}
 
 		if ( class_exists( 'Full_Elementor_MCP_Data' ) ) {

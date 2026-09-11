@@ -266,7 +266,15 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 	 * @return array|\WP_Error Array with attachment_id and url on success.
 	 */
 	private function upload_from_url( string $url, string $title ): array|\WP_Error {
-		$tmp_file = download_url( $url, 30 );
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$val = Full_Elementor_MCP_Security_Strategies::validate_url( $url );
+			if ( is_wp_error( $val ) ) {
+				return $val;
+			}
+			$tmp_file = Full_Elementor_MCP_Security_Strategies::safe_download_url( $url, 30 );
+		} else {
+			$tmp_file = download_url( $url, 30 );
+		}
 
 		if ( is_wp_error( $tmp_file ) ) {
 			return new \WP_Error(
@@ -328,6 +336,14 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 				'invalid_svg',
 				__( 'The svg_content does not contain valid SVG markup. Must include an <svg> element.', 'full-elementor-mcp' )
 			);
+		}
+
+		// Security Strategies SVG validation (XXE, scripts, event handlers, forbidden tags).
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$val = Full_Elementor_MCP_Security_Strategies::validate_svg( $content );
+			if ( is_wp_error( $val ) ) {
+				return $val;
+			}
 		}
 
 		// Sanitize the SVG content.
@@ -419,7 +435,14 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 			);
 		}
 
-		// Check for potentially dangerous content.
+		// Check for potentially dangerous content using Security Strategies.
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$val = Full_Elementor_MCP_Security_Strategies::validate_svg( $content );
+			if ( is_wp_error( $val ) ) {
+				return $val;
+			}
+		}
+
 		if ( preg_match( '/<script/i', $content ) ) {
 			return new \WP_Error(
 				'svg_has_script',
@@ -459,6 +482,14 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 	 * @return string|\WP_Error Sanitized SVG content or WP_Error.
 	 */
 	private function sanitize_svg_content( string $content ) {
+		// Strict validation check first.
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$val = Full_Elementor_MCP_Security_Strategies::validate_svg( $content );
+			if ( is_wp_error( $val ) ) {
+				return $val;
+			}
+		}
+
 		// Strip PHP tags.
 		$content = preg_replace( '/<\?(=|php)(.+?)\?>/i', '', $content );
 

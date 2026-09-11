@@ -201,6 +201,9 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-safety-settings.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-lock-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-security-guard.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-elementor-features.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-tree-validator.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-security-strategies.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-registry.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-journal.php';
 

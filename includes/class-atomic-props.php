@@ -239,9 +239,15 @@ class Full_Elementor_MCP_Atomic_Props {
 	/**
 	 * Checks whether Elementor 4.0+ atomic elements are available.
 	 *
+	 * Uses centralized capability detection rather than raw version comparison.
+	 *
 	 * @return bool True if atomic elements are supported.
 	 */
 	public static function is_atomic_supported(): bool {
+		if ( class_exists( 'Full_Elementor_MCP_Elementor_Features' ) ) {
+			return Full_Elementor_MCP_Elementor_Features::supports_atomic_elements();
+		}
+
 		return defined( 'ELEMENTOR_VERSION' ) && version_compare( ELEMENTOR_VERSION, '4.0.0', '>=' );
 	}
 }
