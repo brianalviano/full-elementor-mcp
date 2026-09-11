@@ -42,34 +42,36 @@ final class Full_Elementor_MCP_Confirmation_Manager {
 	/**
 	 * Computes a deterministic canonical SHA-256 hash of mutation arguments.
 	 *
-	 * Strips only middleware control envelope/fields and canonicalizes map keys.
+	 * Strips only middleware control envelope/fields at the top level and canonicalizes map keys.
 	 *
 	 * @param array<string, mixed> $args
-	 * @return string 64-character hex hash.
+	 * @return string|\WP_Error 64-character hex hash or WP_Error on JSON encode failure.
 	 */
-	public static function canonical_args_hash( array $args ): string {
-		$clean = self::strip_control_fields( $args );
+	public static function canonical_args_hash( array $args ): string|\WP_Error {
+		$clean = self::strip_top_level_control_fields( $args );
 		$canon = self::canonicalize_value( $clean );
-		return hash( 'sha256', (string) wp_json_encode( $canon ) );
+		$json  = wp_json_encode( $canon );
+		if ( false === $json ) {
+			return new \WP_Error( 'json_encode_failed', __( 'Failed to encode arguments for canonical hash.', 'full-elementor-mcp' ) );
+		}
+		return hash( 'sha256', $json );
 	}
 
 	/**
-	 * Recursively strips middleware control fields.
+	 * Strips top-level middleware control fields only.
+	 *
+	 * Preserves nested element parameters (e.g. settings.dry_run).
 	 *
 	 * @param array<string, mixed> $args
 	 * @return array<string, mixed>
 	 */
-	private static function strip_control_fields( array $args ): array {
+	private static function strip_top_level_control_fields( array $args ): array {
 		$result = array();
 		foreach ( $args as $k => $v ) {
 			if ( in_array( $k, self::CONTROL_ARGUMENTS, true ) ) {
 				continue;
 			}
-			if ( is_array( $v ) ) {
-				$result[ $k ] = self::strip_control_fields( $v );
-			} else {
-				$result[ $k ] = $v;
-			}
+			$result[ $k ] = $v;
 		}
 		return $result;
 	}
@@ -130,6 +132,10 @@ final class Full_Elementor_MCP_Confirmation_Manager {
 		$token_key = 'conf:' . hash( 'sha256', $raw_token );
 		$args_hash = self::canonical_args_hash( $args );
 
+		if ( is_wp_error( $args_hash ) ) {
+			return $args_hash;
+		}
+
 		$payload = array(
 			'ability'         => $ability,
 			'user_id'         => $user_id,
@@ -174,6 +180,50 @@ final class Full_Elementor_MCP_Confirmation_Manager {
 	}
 
 	/**
+	 * Validates a confirmation token without consuming it.
+	 *
+	 * @param string      $raw_token       Caller-supplied token plaintext.
+	 * @param string      $ability         Ability being executed.
+	 * @param array       $args            Incoming mutation arguments.
+	 * @param int         $user_id         Current user ID.
+	 * @param string|null $credential_uuid Current credential UUID.
+	 * @param string      $resource_key    Target canonical resource key.
+	 * @return true|\WP_Error True if valid; WP_Error on mismatch/expiry.
+	 */
+	public static function validate(
+		string $raw_token,
+		string $ability,
+		array $args,
+		int $user_id,
+		?string $credential_uuid,
+		string $resource_key
+	): bool|\WP_Error {
+		return self::validate_internal( $raw_token, $ability, $args, $user_id, $credential_uuid, $resource_key, false );
+	}
+
+	/**
+	 * Atomically consumes a validated confirmation token via CAS.
+	 *
+	 * @param string      $raw_token       Caller-supplied token plaintext.
+	 * @param string      $ability         Ability being executed.
+	 * @param array       $args            Incoming mutation arguments.
+	 * @param int         $user_id         Current user ID.
+	 * @param string|null $credential_uuid Current credential UUID.
+	 * @param string      $resource_key    Target canonical resource key.
+	 * @return true|\WP_Error True if successfully consumed; WP_Error otherwise.
+	 */
+	public static function consume(
+		string $raw_token,
+		string $ability,
+		array $args,
+		int $user_id,
+		?string $credential_uuid,
+		string $resource_key
+	): bool|\WP_Error {
+		return self::validate_internal( $raw_token, $ability, $args, $user_id, $credential_uuid, $resource_key, true );
+	}
+
+	/**
 	 * Validates a confirmation token and optionally consumes it atomically via CAS.
 	 *
 	 * @param string      $raw_token       Caller-supplied token plaintext.
@@ -193,6 +243,30 @@ final class Full_Elementor_MCP_Confirmation_Manager {
 		?string $credential_uuid,
 		string $resource_key,
 		bool $consume = true
+	): bool|\WP_Error {
+		return self::validate_internal( $raw_token, $ability, $args, $user_id, $credential_uuid, $resource_key, $consume );
+	}
+
+	/**
+	 * Internal helper to validate and optionally consume a confirmation token.
+	 *
+	 * @param string      $raw_token
+	 * @param string      $ability
+	 * @param array       $args
+	 * @param int         $user_id
+	 * @param string|null $credential_uuid
+	 * @param string      $resource_key
+	 * @param bool        $consume
+	 * @return bool|\WP_Error
+	 */
+	private static function validate_internal(
+		string $raw_token,
+		string $ability,
+		array $args,
+		int $user_id,
+		?string $credential_uuid,
+		string $resource_key,
+		bool $consume
 	): bool|\WP_Error {
 		global $wpdb;
 
@@ -242,8 +316,11 @@ final class Full_Elementor_MCP_Confirmation_Manager {
 			return new \WP_Error( 'confirmation_user_mismatch', __( 'Confirmation token was issued for a different user identity.', 'full-elementor-mcp' ) );
 		}
 
-		if ( isset( $payload['credential_uuid'] ) && $payload['credential_uuid'] !== $credential_uuid ) {
-			return new \WP_Error( 'confirmation_credential_mismatch', __( 'Confirmation token was issued for a different credential UUID.', 'full-elementor-mcp' ) );
+		// Exact credential UUID equality: null matches null, non-null matches exact string.
+		if ( array_key_exists( 'credential_uuid', $payload ) ) {
+			if ( $payload['credential_uuid'] !== $credential_uuid ) {
+				return new \WP_Error( 'confirmation_credential_mismatch', __( 'Confirmation token was issued for a different credential UUID.', 'full-elementor-mcp' ) );
+			}
 		}
 
 		if ( (string) ( $payload['resource_key'] ?? '' ) !== $resource_key ) {
@@ -251,12 +328,15 @@ final class Full_Elementor_MCP_Confirmation_Manager {
 		}
 
 		$current_args_hash = self::canonical_args_hash( $args );
+		if ( is_wp_error( $current_args_hash ) ) {
+			return $current_args_hash;
+		}
 		if ( (string) ( $payload['args_hash'] ?? '' ) !== $current_args_hash ) {
 			return new \WP_Error( 'confirmation_args_mismatch', __( 'Confirmation token does not match modified mutation arguments.', 'full-elementor-mcp' ) );
 		}
 
 		if ( ! $consume ) {
-			// Dry-run verification only.
+			// Read-only validation passed.
 			return true;
 		}
 

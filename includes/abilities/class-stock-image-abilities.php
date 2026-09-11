@@ -431,7 +431,7 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		);
 
 		// Sideload into the media library.
-		$attachment_id = media_handle_sideload( $file_array, 0 );
+		$attachment_id = Full_Elementor_MCP_Safe_Writes::media_handle_sideload( $file_array, 0 );
 
 		if ( is_wp_error( $attachment_id ) ) {
 			// Clean up temp file on failure.
@@ -452,7 +452,7 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		// Set title if provided.
 		$title = sanitize_text_field( $input['title'] ?? '' );
 		if ( ! empty( $title ) ) {
-			wp_update_post( array(
+			Full_Elementor_MCP_Safe_Writes::update_post( array(
 				'ID'         => $attachment_id,
 				'post_title' => $title,
 			) );
@@ -463,7 +463,7 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		// Set alt text if provided.
 		$alt_text = sanitize_text_field( $input['alt_text'] ?? '' );
 		if ( ! empty( $alt_text ) ) {
-			update_post_meta( $attachment_id, '_wp_attachment_image_alt', $alt_text );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $attachment_id, '_wp_attachment_image_alt', $alt_text );
 		}
 
 		// Set caption or attribution as post excerpt.
@@ -472,7 +472,7 @@ class Full_Elementor_MCP_Stock_Image_Abilities {
 		$excerpt     = ! empty( $caption ) ? $caption : $attribution;
 
 		if ( ! empty( $excerpt ) ) {
-			wp_update_post( array(
+			Full_Elementor_MCP_Safe_Writes::update_post( array(
 				'ID'           => $attachment_id,
 				'post_excerpt' => $excerpt,
 			) );

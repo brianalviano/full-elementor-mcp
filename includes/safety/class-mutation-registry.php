@@ -157,7 +157,24 @@ class Full_Elementor_MCP_Mutation_Registry {
 			);
 		}
 
+		$is_create = ! empty( $descriptor['created_object_tracking'] ) || ( self::CATEGORY_WP_OBJECT_CREATE === ( $descriptor['category'] ?? '' ) );
+		if ( $is_create ) {
+			if ( empty( $descriptor['created_object_id_resolver'] ) || ! is_callable( $descriptor['created_object_id_resolver'] ) ) {
+				return new \WP_Error(
+					'missing_created_object_id_resolver',
+					sprintf(
+						/* translators: %s: ability name */
+						__( 'Creation mutation strategy for "%s" must declare a callable created_object_id_resolver.', 'full-elementor-mcp' ),
+						esc_html( $ability )
+					)
+				);
+			}
+		}
+
 		// Normalize defaults for optional properties.
+		$descriptor['created_object_id_resolver']     = isset( $descriptor['created_object_id_resolver'] ) && is_callable( $descriptor['created_object_id_resolver'] )
+			? $descriptor['created_object_id_resolver']
+			: null;
 		$descriptor['capture_after']                  = isset( $descriptor['capture_after'] ) && is_callable( $descriptor['capture_after'] )
 			? $descriptor['capture_after']
 			: null;
@@ -431,6 +448,46 @@ class Full_Elementor_MCP_Mutation_Registry {
 	public static function requires_tree_validation( string $ability ): bool {
 		$strategy = self::get( $ability );
 		return ! empty( $strategy['requires_tree_validation'] );
+	}
+
+	/**
+	 * Checks if an ability is destructive.
+	 *
+	 * @param string $ability Ability name.
+	 * @return bool True if destructive.
+	 */
+	public static function is_destructive( string $ability ): bool {
+		$strategy = self::get( $ability );
+		return ! empty( $strategy['is_destructive'] );
+	}
+
+	/**
+	 * Checks if an ability is an entity-creation mutation.
+	 *
+	 * @param string $ability Ability name.
+	 * @return bool True if creation mutation.
+	 */
+	public static function is_create( string $ability ): bool {
+		$strategy = self::get( $ability );
+		return ! empty( $strategy['created_object_tracking'] ) || ( self::CATEGORY_WP_OBJECT_CREATE === ( $strategy['category'] ?? '' ) );
+	}
+
+	/**
+	 * Resolves the created object ID from execution result.
+	 *
+	 * @param string $ability Ability name.
+	 * @param mixed  $result  Ability execution result.
+	 * @return int Created object ID or 0.
+	 */
+	public static function resolve_created_object_id( string $ability, mixed $result ): int {
+		$strategy = self::get( $ability );
+		if ( ! empty( $strategy['created_object_id_resolver'] ) && is_callable( $strategy['created_object_id_resolver'] ) ) {
+			return absint( ( $strategy['created_object_id_resolver'] )( $result ) );
+		}
+		if ( is_array( $result ) ) {
+			return absint( $result['id'] ?? ( $result['post_id'] ?? ( $result['template_id'] ?? ( $result['attachment_id'] ?? ( $result['snippet_id'] ?? ( $result['page_id'] ?? 0 ) ) ) ) ) );
+		}
+		return 0;
 	}
 
 	/**
@@ -766,13 +823,13 @@ class Full_Elementor_MCP_Mutation_Registry {
 		// 4. WordPress Object Creation (7 abilities)
 		// ---------------------------------------------------------------------
 		$create_abilities = array(
-			'full-elementor-mcp/create-page'           => array( 'action' => 'create_page', 'object_type' => 'page' ),
-			'full-elementor-mcp/duplicate-page'        => array( 'action' => 'duplicate_page', 'object_type' => 'page' ),
-			'full-elementor-mcp/import-template'       => array( 'action' => 'import_template', 'object_type' => 'template' ),
-			'full-elementor-mcp/create-theme-template' => array( 'action' => 'create_theme_template', 'object_type' => 'template' ),
-			'full-elementor-mcp/create-popup'          => array( 'action' => 'create_popup', 'object_type' => 'popup' ),
-			'full-elementor-mcp/build-page'            => array( 'action' => 'build_page', 'object_type' => 'page' ),
-			'full-elementor-mcp/save-as-template'      => array( 'action' => 'save_as_template', 'object_type' => 'template' ),
+			'full-elementor-mcp/create-page'           => array( 'action' => 'create_page', 'object_type' => 'page', 'key' => 'id' ),
+			'full-elementor-mcp/duplicate-page'        => array( 'action' => 'duplicate_page', 'object_type' => 'page', 'key' => 'id' ),
+			'full-elementor-mcp/import-template'       => array( 'action' => 'import_template', 'object_type' => 'template', 'key' => 'template_id' ),
+			'full-elementor-mcp/create-theme-template' => array( 'action' => 'create_theme_template', 'object_type' => 'template', 'key' => 'template_id' ),
+			'full-elementor-mcp/create-popup'          => array( 'action' => 'create_popup', 'object_type' => 'popup', 'key' => 'template_id' ),
+			'full-elementor-mcp/build-page'            => array( 'action' => 'build_page', 'object_type' => 'page', 'key' => 'id' ),
+			'full-elementor-mcp/save-as-template'      => array( 'action' => 'save_as_template', 'object_type' => 'template', 'key' => 'template_id' ),
 		);
 
 		foreach ( $create_abilities as $ability => $meta ) {
@@ -795,14 +852,22 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'object_id_resolver'             => static function ( array $args = array() ): int {
 						return 0; // Object does not exist yet.
 					},
+					'created_object_id_resolver'     => static function ( mixed $result ) use ( $meta ): int {
+						if ( ! is_array( $result ) ) {
+							return 0;
+						}
+						$primary = $meta['key'] ?? 'id';
+						return absint( $result[ $primary ] ?? ( $result['id'] ?? ( $result['page_id'] ?? ( $result['post_id'] ?? ( $result['template_id'] ?? 0 ) ) ) ) );
+					},
 					'capture_before'                 => static function ( int $object_id, array $args = array() ) {
 						return array( 'exists' => false );
 					},
 					'restore_before'                 => static function ( mixed $before_state, array $context = array() ) {
 						return self::restore_created_object_callback( $before_state, $context );
 					},
-					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) {
-						$target_id = $object_id > 0 ? $object_id : absint( is_array( $result ) ? ( $result['id'] ?? ( $result['page_id'] ?? ( $result['post_id'] ?? 0 ) ) ) : 0 );
+					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) use ( $meta ) {
+						$primary   = $meta['key'] ?? 'id';
+						$target_id = $object_id > 0 ? $object_id : absint( is_array( $result ) ? ( $result[ $primary ] ?? ( $result['id'] ?? ( $result['page_id'] ?? ( $result['post_id'] ?? ( $result['template_id'] ?? 0 ) ) ) ) ) : 0 );
 						return self::capture_created_object_callback( $target_id );
 					},
 					'supports_rollback'              => true,
@@ -921,41 +986,59 @@ class Full_Elementor_MCP_Mutation_Registry {
 		// 7. Newly Created Custom Code & Media Entities (3 abilities)
 		// ---------------------------------------------------------------------
 		$new_entity_abilities = array(
-			'full-elementor-mcp/add-code-snippet' => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false, 'executable_content' => true, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code' ),
-			'full-elementor-mcp/sideload-image'   => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false, 'external_network_access' => true ),
-			'full-elementor-mcp/upload-svg-icon'  => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false, 'external_network_access' => true ),
+			'full-elementor-mcp/add-code-snippet' => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false, 'executable_content' => true, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code', 'key' => 'snippet_id' ),
+			'full-elementor-mcp/sideload-image'   => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false, 'external_network_access' => true, 'key' => 'attachment_id' ),
+			'full-elementor-mcp/upload-svg-icon'  => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false, 'external_network_access' => true, 'key' => 'attachment_id' ),
 		);
 
 		foreach ( $new_entity_abilities as $ability => $meta ) {
 			self::register(
 				array(
-					'ability'                  => $ability,
-					'action'                   => $meta['action'],
-					'object_type'              => $meta['object_type'],
-					'category'                 => $meta['category'],
-					'resource_key_resolver'    => static function ( array $args = array() ) use ( $ability ): string {
+					'ability'                        => $ability,
+					'action'                         => $meta['action'],
+					'object_type'                    => $meta['object_type'],
+					'category'                       => $meta['category'],
+					'resource_key_resolver'          => static function ( array $args = array() ) use ( $ability ): string {
 						return self::build_create_resource_key( $ability, $args );
 					},
-					'object_id_resolver'       => static function ( array $args = array() ): int {
+					'rollback_resource_key_resolver' => static function ( array $entry, array $args = array() ): string {
+						$created_id = absint( $entry['created_object_id'] ?? ( $args['created_object_id'] ?? 0 ) );
+						if ( $created_id > 0 ) {
+							return self::build_resource_key( 'post', $created_id );
+						}
+						return (string) ( $entry['resource_key'] ?? '' );
+					},
+					'object_id_resolver'             => static function ( array $args = array() ): int {
 						return 0; // Newly created entity ID unknown before execution.
 					},
-					'capture_before'           => static function ( int $object_id, array $args = array() ) {
+					'created_object_id_resolver'     => static function ( mixed $result ) use ( $meta ): int {
+						if ( ! is_array( $result ) ) {
+							return 0;
+						}
+						$primary = $meta['key'] ?? 'id';
+						return absint( $result[ $primary ] ?? ( $result['id'] ?? ( $result['post_id'] ?? ( $result['attachment_id'] ?? ( $result['snippet_id'] ?? 0 ) ) ) ) );
+					},
+					'capture_before'                 => static function ( int $object_id, array $args = array() ) {
 						return null;
 					},
-					'restore_before'           => static function ( mixed $before_state, array $context = array() ) {
+					'restore_before'                 => static function ( mixed $before_state, array $context = array() ) {
 						return new \WP_Error(
 							'mutation_not_rollbackable',
 							__( 'This mutation category does not support automated rollback.', 'full-elementor-mcp' )
 						);
 					},
-					'capture_after'            => null,
-					'supports_rollback'        => false,
-					'created_object_tracking'  => false,
-					'is_destructive'           => $meta['destructive'],
-					'executable_content'       => $meta['executable_content'] ?? false,
-					'requires_unfiltered_html' => $meta['requires_unfiltered_html'] ?? false,
-					'external_network_access'  => $meta['external_network_access'] ?? false,
-					'security_profile'         => $meta['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $meta['category'] ? 'high_risk' : 'standard' ),
+					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) use ( $meta ) {
+						$primary   = $meta['key'] ?? 'id';
+						$target_id = $object_id > 0 ? $object_id : absint( is_array( $result ) ? ( $result[ $primary ] ?? ( $result['id'] ?? ( $result['post_id'] ?? ( $result['attachment_id'] ?? ( $result['snippet_id'] ?? 0 ) ) ) ) ) : 0 );
+						return self::capture_created_object_callback( $target_id );
+					},
+					'supports_rollback'              => false,
+					'created_object_tracking'        => true,
+					'is_destructive'                 => $meta['destructive'],
+					'executable_content'             => $meta['executable_content'] ?? false,
+					'requires_unfiltered_html'       => $meta['requires_unfiltered_html'] ?? false,
+					'external_network_access'        => $meta['external_network_access'] ?? false,
+					'security_profile'               => $meta['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $meta['category'] ? 'high_risk' : 'standard' ),
 				)
 			);
 		}

@@ -203,6 +203,86 @@ if ( ! function_exists( 'wp_strip_all_tags' ) ) {
 		return strip_tags( $text );
 	}
 }
+if ( ! function_exists( 'wp_insert_post' ) ) {
+	function wp_insert_post( array $postarr, bool $wp_error = false, bool $fire_after_hooks = true ): int|WP_Error {
+		static $next_id = 2000;
+		$id = ! empty( $postarr['ID'] ) ? (int) $postarr['ID'] : ++$next_id;
+		$GLOBALS['mock_posts'][ $id ] = (object) array_merge(
+			array( 'ID' => $id, 'post_title' => '', 'post_name' => '', 'post_type' => 'post', 'post_status' => 'draft' ),
+			$postarr,
+			array( 'ID' => $id )
+		);
+		return $id;
+	}
+}
+if ( ! function_exists( 'wp_update_post' ) ) {
+	function wp_update_post( array|object $postarr, bool $wp_error = false, bool $fire_after_hooks = true ): int|WP_Error {
+		$arr = (array) $postarr;
+		$id  = (int) ( $arr['ID'] ?? 0 );
+		if ( $id <= 0 ) {
+			return $wp_error ? new WP_Error( 'invalid_id', 'Invalid ID' ) : 0;
+		}
+		$existing = isset( $GLOBALS['mock_posts'][ $id ] ) ? (array) $GLOBALS['mock_posts'][ $id ] : array();
+		$GLOBALS['mock_posts'][ $id ] = (object) array_merge( $existing, $arr );
+		return $id;
+	}
+}
+if ( ! function_exists( 'wp_delete_post' ) ) {
+	function wp_delete_post( int $postid, bool $force_delete = false ): mixed {
+		if ( ! isset( $GLOBALS['mock_posts'][ $postid ] ) ) {
+			return false;
+		}
+		$post = $GLOBALS['mock_posts'][ $postid ];
+		unset( $GLOBALS['mock_posts'][ $postid ] );
+		return $post;
+	}
+}
+if ( ! function_exists( 'wp_trash_post' ) ) {
+	function wp_trash_post( int $postid ): mixed {
+		if ( ! isset( $GLOBALS['mock_posts'][ $postid ] ) ) {
+			return false;
+		}
+		$GLOBALS['mock_posts'][ $postid ]->post_status = 'trash';
+		return $GLOBALS['mock_posts'][ $postid ];
+	}
+}
+if ( ! function_exists( 'wp_untrash_post' ) ) {
+	function wp_untrash_post( int $postid ): mixed {
+		if ( ! isset( $GLOBALS['mock_posts'][ $postid ] ) ) {
+			return false;
+		}
+		$GLOBALS['mock_posts'][ $postid ]->post_status = 'publish';
+		return $GLOBALS['mock_posts'][ $postid ];
+	}
+}
+if ( ! function_exists( 'set_post_thumbnail' ) ) {
+	function set_post_thumbnail( int|object $post, int $thumbnail_id ): bool {
+		$post_id = is_object( $post ) ? $post->ID : (int) $post;
+		update_post_meta( $post_id, '_thumbnail_id', $thumbnail_id );
+		return true;
+	}
+}
+if ( ! function_exists( 'delete_post_thumbnail' ) ) {
+	function delete_post_thumbnail( int|object $post ): bool {
+		$post_id = is_object( $post ) ? $post->ID : (int) $post;
+		delete_post_meta( $post_id, '_thumbnail_id' );
+		return true;
+	}
+}
+if ( ! function_exists( 'wp_set_object_terms' ) ) {
+	function wp_set_object_terms( int $object_id, mixed $terms, string $taxonomy, bool $append = false ): array|WP_Error {
+		return is_array( $terms ) ? $terms : array( (int) $terms );
+	}
+}
+if ( ! function_exists( 'media_handle_sideload' ) ) {
+	function media_handle_sideload( array $file_array, int $post_id = 0, ?string $desc = null, array $post_data = array() ): int|WP_Error {
+		return wp_insert_post( array(
+			'post_type'      => 'attachment',
+			'post_mime_type' => $file_array['type'] ?? 'image/jpeg',
+			'post_title'     => $desc ?? 'Sideloaded',
+		) );
+	}
+}
 
 class MockElementorDocument {
 	protected int $post_id;
@@ -417,6 +497,7 @@ require_once __DIR__ . '/../includes/safety/class-mutation-context.php';
 require_once __DIR__ . '/../includes/safety/class-confirmation-manager.php';
 require_once __DIR__ . '/../includes/safety/class-idempotency-manager.php';
 require_once __DIR__ . '/../includes/safety/class-mutation-middleware.php';
+require_once __DIR__ . '/../includes/safety/class-safe-writes.php';
 require_once __DIR__ . '/../includes/class-elementor-data.php';
 
 function setup_phase4_test_db(): void {
@@ -1111,6 +1192,472 @@ run_test( 'Security: caller attempting to inject internal safety fields is rejec
 	) );
 
 	assert_error_code( 'reserved_safety_argument', $res );
+} );
+
+// -----------------------------------------------------------------------------
+// 16. Plugin-Owned Safe Write Sinks & Physical Fencing Boundaries
+// -----------------------------------------------------------------------------
+
+run_test( 'Safe_Writes: write without active context is rejected with mutation_context_missing', function () {
+	Full_Elementor_MCP_Mutation_Context::reset();
+
+	$err1 = Full_Elementor_MCP_Safe_Writes::insert_post( array( 'post_title' => 'Unfenced' ) );
+	assert_error_code( 'mutation_context_missing', $err1 );
+
+	$err2 = Full_Elementor_MCP_Safe_Writes::update_post( array( 'ID' => 10, 'post_title' => 'Unfenced' ) );
+	assert_error_code( 'mutation_context_missing', $err2 );
+
+	$err3 = Full_Elementor_MCP_Safe_Writes::delete_post( 10, true );
+	assert_error_code( 'mutation_context_missing', $err3 );
+
+	$err4 = Full_Elementor_MCP_Safe_Writes::trash_post( 10 );
+	assert_error_code( 'mutation_context_missing', $err4 );
+
+	$err5 = Full_Elementor_MCP_Safe_Writes::untrash_post( 10 );
+	assert_error_code( 'mutation_context_missing', $err5 );
+
+	$err6 = Full_Elementor_MCP_Safe_Writes::update_post_meta( 10, '_some_key', 'val' );
+	assert_error_code( 'mutation_context_missing', $err6 );
+
+	$err7 = Full_Elementor_MCP_Safe_Writes::delete_post_meta( 10, '_some_key' );
+	assert_error_code( 'mutation_context_missing', $err7 );
+
+	$err8 = Full_Elementor_MCP_Safe_Writes::set_post_thumbnail( 10, 5 );
+	assert_error_code( 'mutation_context_missing', $err8 );
+
+	$err9 = Full_Elementor_MCP_Safe_Writes::delete_post_thumbnail( 10 );
+	assert_error_code( 'mutation_context_missing', $err9 );
+
+	$err10 = Full_Elementor_MCP_Safe_Writes::set_object_terms( 10, array( 1 ), 'category' );
+	assert_error_code( 'mutation_context_missing', $err10 );
+
+	$err11 = Full_Elementor_MCP_Safe_Writes::update_option( 'test_opt', 'val' );
+	assert_error_code( 'mutation_context_missing', $err11 );
+
+	$err12 = Full_Elementor_MCP_Safe_Writes::delete_option( 'test_opt' );
+	assert_error_code( 'mutation_context_missing', $err12 );
+
+	$err13 = Full_Elementor_MCP_Safe_Writes::media_handle_sideload( array( 'tmp_name' => 'x' ), 10 );
+	assert_error_code( 'mutation_context_missing', $err13 );
+
+	$err14 = Full_Elementor_MCP_Safe_Writes::assert_write_boundary( 'post:10' );
+	assert_error_code( 'mutation_context_missing', $err14 );
+} );
+
+run_test( 'Safe_Writes: readonly ability attempting write through Safe_Writes fails closed', function () {
+	$called = false;
+	register_mock_ability( 'full-elementor-mcp/mock-readonly-writer', true, function ( $input ) use ( &$called ) {
+		$called = true;
+		return Full_Elementor_MCP_Safe_Writes::update_post( array( 'ID' => 10, 'post_title' => 'Sneaky Title' ) );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/mock-readonly-writer', array( 'post_id' => 10 ) );
+	assert_true( $called );
+	assert_error_code( 'readonly_context_write_blocked', $res );
+	assert_false( Full_Elementor_MCP_Mutation_Context::has_active_context() );
+} );
+
+run_test( 'Safe_Writes: readonly ability attempting update_option through Safe_Writes fails closed', function () {
+	register_mock_ability( 'full-elementor-mcp/mock-readonly-option-writer', true, function ( $input ) {
+		return Full_Elementor_MCP_Safe_Writes::update_option( 'forbidden_opt', 'sneak' );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/mock-readonly-option-writer', array( 'post_id' => 10 ) );
+	assert_error_code( 'readonly_context_write_blocked', $res );
+} );
+
+run_test( 'Safe_Writes: stale writer with lower fencing token is rejected at physical boundary', function () {
+	global $wpdb;
+	$lock1 = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:10', 'worker-1' );
+	assert_true( ! is_wp_error( $lock1 ) );
+	$fence1 = $lock1['fencing_token'];
+
+	$ctx_token = Full_Elementor_MCP_Mutation_Context::enter( array(
+		'ability'       => 'full-elementor-mcp/update-element',
+		'resource_key'  => 'post:10',
+		'object_id'     => 10,
+		'owner_id'      => 'worker-1',
+		'fencing_token' => $fence1,
+	) );
+
+	// Force-expire worker-1 lock in DB so worker-2 can acquire it and advance fencing token:
+	$table    = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( 'post:10' );
+	$wpdb->query( "UPDATE {$table} SET expires_at = datetime('now', '-10 seconds') WHERE token_key = '{$lock_key}'" );
+
+	$lock2 = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:10', 'worker-2' );
+	assert_true( ! is_wp_error( $lock2 ) );
+	assert_true( $lock2['fencing_token'] > $fence1 );
+
+	// Worker 1 tries to write with stale fencing token:
+	$write_res = Full_Elementor_MCP_Safe_Writes::update_post( array( 'ID' => 10, 'post_title' => 'Stale Write' ) );
+
+	Full_Elementor_MCP_Mutation_Context::leave( $ctx_token );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:10', 'worker-2', $lock2['fencing_token'] );
+
+	assert_error_code( 'stale_writer_conflict', $write_res, 'Safe_Writes must block stale worker at physical boundary' );
+} );
+
+run_test( 'Safe_Writes: write targeting mismatched resource key fails closed', function () {
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:10', 'worker-target-mismatch' );
+	$ctx_token = Full_Elementor_MCP_Mutation_Context::enter( array(
+		'ability'       => 'full-elementor-mcp/update-element',
+		'resource_key'  => 'post:10',
+		'object_id'     => 10,
+		'owner_id'      => 'worker-target-mismatch',
+		'fencing_token' => $lock['fencing_token'],
+	) );
+
+	// Attempting write targeting post:99 while lock is on post:10:
+	$err = Full_Elementor_MCP_Safe_Writes::update_post( array( 'ID' => 99, 'post_title' => 'Mismatch' ) );
+
+	Full_Elementor_MCP_Mutation_Context::leave( $ctx_token );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:10', 'worker-target-mismatch', $lock['fencing_token'] );
+
+	assert_error_code( 'write_resource_mismatch', $err );
+} );
+
+run_test( 'Safe_Writes: non-create operation calling insert_post fails closed with write_prohibited_in_context', function () {
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:10', 'worker-non-create' );
+	$ctx_token = Full_Elementor_MCP_Mutation_Context::enter( array(
+		'ability'       => 'full-elementor-mcp/update-element',
+		'resource_key'  => 'post:10',
+		'object_id'     => 10,
+		'owner_id'      => 'worker-non-create',
+		'fencing_token' => $lock['fencing_token'],
+	) );
+
+	$err = Full_Elementor_MCP_Safe_Writes::insert_post( array( 'post_title' => 'Illegal Child Post' ) );
+
+	Full_Elementor_MCP_Mutation_Context::leave( $ctx_token );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:10', 'worker-non-create', $lock['fencing_token'] );
+
+	assert_error_code( 'invalid_create_context', $err );
+} );
+
+run_test( 'Safe_Writes: post writes during CREATE before durable insert_post fail closed', function () {
+	$ctx_token = Full_Elementor_MCP_Mutation_Context::enter( array(
+		'ability'           => 'full-elementor-mcp/create-page',
+		'resource_key'      => 'create:create-page:test_hash',
+		'object_id'         => 0,
+		'owner_id'          => 'worker-create-premature',
+		'fencing_token'     => 1,
+		'created_object_id' => null,
+	) );
+
+	$err = Full_Elementor_MCP_Safe_Writes::update_post_meta( 2050, '_elementor_data', '[]' );
+
+	Full_Elementor_MCP_Mutation_Context::leave( $ctx_token );
+
+	assert_error_code( 'created_object_not_yet_bound', $err );
+} );
+
+// -----------------------------------------------------------------------------
+// 17. Readonly / Mutation Registration Consistency
+// -----------------------------------------------------------------------------
+
+run_test( 'Consistency: readonly annotation with registered mutation strategy fails closed', function () {
+	register_mock_ability( 'full-elementor-mcp/update-element', true, fn() => array( 'success' => true ) );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-element', array( 'post_id' => 10 ) );
+	assert_error_code( 'readonly_mutation_conflict', $res );
+} );
+
+run_test( 'Consistency: mutating annotation without registered mutation strategy fails closed', function () {
+	register_mock_ability( 'full-elementor-mcp/unknown-mutator-ability', false, fn() => array( 'success' => true ) );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/unknown-mutator-ability', array( 'post_id' => 10 ) );
+	assert_error_code( 'mutation_strategy_missing', $res );
+} );
+
+// -----------------------------------------------------------------------------
+// 18. Confirmation Deferred CAS & Argument Preserving Hash
+// -----------------------------------------------------------------------------
+
+run_test( 'Confirmation: token is NOT consumed if lock acquisition fails', function () {
+	global $wpdb;
+	register_mock_ability( 'full-elementor-mcp/delete-page', false, fn() => array( 'deleted' => true ) );
+
+	// Pre-lock post 10 by external owner:
+	$ext_lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:10', 'external-owner' );
+
+	// Issue challenge:
+	$challenge = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => true ),
+		1,
+		null,
+		'post:10'
+	);
+	assert_false( is_wp_error( $challenge ) );
+	$token = $challenge['confirmation_token'];
+
+	// Attempt execution while lock is held by external-owner:
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page', array(
+		'post_id'            => 10,
+		'force'              => true,
+		'confirmation_token' => $token,
+	) );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:10', 'external-owner', $ext_lock['fencing_token'] );
+
+	assert_error_code( 'resource_locked', $res );
+
+	// Token MUST still be unconsumed (used = 0) so user can retry!
+	$token_key = 'conf:' . hash( 'sha256', $token );
+	$token_row = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM {$wpdb->prefix}elementor_mcp_tokens WHERE token_type = 'confirmation' AND token_key = %s",
+		$token_key
+	), ARRAY_A );
+	assert_equals( 0, (int) $token_row['used'], 'Confirmation token must not be consumed when lock acquisition fails' );
+} );
+
+run_test( 'Confirmation: canonical hash preserves nested mutation arguments while stripping top-level controls', function () {
+	$args1 = array(
+		'post_id'            => 10,
+		'confirmation_token' => 'tok_abc',
+		'dry_run'            => true,
+		'idempotency_key'    => 'key_xyz',
+		'settings'           => array( 'title' => 'Same', 'dry_run' => 'nested_value_1' ),
+	);
+	$args2 = array(
+		'post_id'            => 10,
+		'confirmation_token' => 'tok_DIFFERENT',
+		'dry_run'            => false,
+		'idempotency_key'    => 'key_DIFFERENT',
+		'settings'           => array( 'title' => 'Same', 'dry_run' => 'nested_value_1' ),
+	);
+	$args3 = array(
+		'post_id'            => 10,
+		'confirmation_token' => 'tok_abc',
+		'settings'           => array( 'title' => 'Same', 'dry_run' => 'nested_value_2_CHANGED' ),
+	);
+
+	$hash1 = Full_Elementor_MCP_Confirmation_Manager::canonical_args_hash( $args1 );
+	$hash2 = Full_Elementor_MCP_Confirmation_Manager::canonical_args_hash( $args2 );
+	$hash3 = Full_Elementor_MCP_Confirmation_Manager::canonical_args_hash( $args3 );
+
+	assert_equals( $hash1, $hash2, 'Top-level confirmation_token, dry_run, idempotency_key must be stripped from hash' );
+	assert_true( $hash1 !== $hash3, 'Nested settings changes MUST produce a different hash' );
+} );
+
+run_test( 'Confirmation: exact credential UUID equality enforced including null', function () {
+	// 1. Token issued for 'cred-A':
+	$c1 = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => true ),
+		1,
+		'cred-A',
+		'post:10'
+	);
+	$tok1 = $c1['confirmation_token'];
+
+	// Validate with 'cred-B' -> fail:
+	$err_b = Full_Elementor_MCP_Confirmation_Manager::validate( $tok1, 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => true ), 1, 'cred-B', 'post:10' );
+	assert_error_code( 'confirmation_credential_mismatch', $err_b );
+
+	// Validate with null -> fail:
+	$err_null = Full_Elementor_MCP_Confirmation_Manager::validate( $tok1, 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => true ), 1, null, 'post:10' );
+	assert_error_code( 'confirmation_credential_mismatch', $err_null );
+
+	// 2. Token issued for null:
+	$c2 = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => true ),
+		1,
+		null,
+		'post:10'
+	);
+	$tok2 = $c2['confirmation_token'];
+
+	// Validate with 'cred-A' -> fail:
+	$err_a2 = Full_Elementor_MCP_Confirmation_Manager::validate( $tok2, 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => true ), 1, 'cred-A', 'post:10' );
+	assert_error_code( 'confirmation_credential_mismatch', $err_a2 );
+
+	// Validate with null -> success:
+	$ok = Full_Elementor_MCP_Confirmation_Manager::validate( $tok2, 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => true ), 1, null, 'post:10' );
+	assert_true( ! is_wp_error( $ok ) );
+} );
+
+// -----------------------------------------------------------------------------
+// 19. Idempotency States (failed_safe vs recovery_required) & Stale Worker Defense
+// -----------------------------------------------------------------------------
+
+run_test( 'Idempotency: failure before writes marks state failed_safe; failure after writes marks recovery_required', function () {
+	global $wpdb;
+
+	// Case A: throws before any write started:
+	register_mock_ability( 'full-elementor-mcp/update-element', false, function ( $input ) {
+		throw new \RuntimeException( 'Crash before writes' );
+	} );
+
+	$key_a = 'idemp_fail_before_' . bin2hex( random_bytes( 6 ) );
+	$res_a = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-element', array(
+		'post_id'         => 10,
+		'element_id'      => 'el_1',
+		'settings'        => array( 'title' => 'A' ),
+		'idempotency_key' => $key_a,
+	) );
+	assert_error_code( 'mutation_exception', $res_a );
+
+	$token_key_a = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key( $key_a, 'full-elementor-mcp/update-element', 1, null );
+	$row_a = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM {$wpdb->prefix}elementor_mcp_tokens WHERE token_key = %s",
+		$token_key_a
+	), ARRAY_A );
+	assert_true( empty( $row_a ), 'Failure before writes must clean up idempotency claim for safe immediate retry' );
+
+	// Case B: writes started on non-rollbackable mutation, THEN throws:
+	register_mock_ability( 'full-elementor-mcp/set-page-meta', false, function ( $input ) {
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( 10, '_some_meta', 'persisted' );
+		throw new \RuntimeException( 'Crash AFTER non-rollbackable write occurred' );
+	} );
+
+	$key_b = 'idemp_fail_after_' . bin2hex( random_bytes( 6 ) );
+	$res_b = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/set-page-meta', array(
+		'post_id'         => 10,
+		'meta_key'        => '_some_meta',
+		'meta_value'      => 'persisted',
+		'idempotency_key' => $key_b,
+	) );
+	assert_error_code( 'mutation_exception', $res_b );
+
+	$token_key_b = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key( $key_b, 'full-elementor-mcp/set-page-meta', 1, null );
+	$row_b = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM {$wpdb->prefix}elementor_mcp_tokens WHERE token_key = %s",
+		$token_key_b
+	), ARRAY_A );
+	$payload_b = json_decode( (string) $row_b['payload'], true );
+	assert_equals( 'recovery_required', $payload_b['status'], 'Failure after non-rollbackable write started must be recovery_required' );
+
+	// Retrying on recovery_required returns idempotency_recovery_required error:
+	$res_retry = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/set-page-meta', array(
+		'post_id'         => 10,
+		'meta_key'        => '_some_meta',
+		'meta_value'      => 'persisted',
+		'idempotency_key' => $key_b,
+	) );
+	assert_error_code( 'idempotency_recovery_required', $res_retry );
+} );
+
+run_test( 'Idempotency: completed high-risk replay returns cached result without requiring confirmation challenge', function () {
+	register_mock_ability( 'full-elementor-mcp/delete-page', false, fn() => array( 'deleted' => true ) );
+
+	$idemp_key = 'idemp_perm_del_' . bin2hex( random_bytes( 6 ) );
+	$args = array(
+		'post_id'         => 10,
+		'force'           => true,
+		'idempotency_key' => $idemp_key,
+	);
+
+	// 1. Initial attempt receives confirmation challenge:
+	$c_res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page', $args );
+	assert_error_code( 'confirmation_required', $c_res );
+	$token = $c_res->get_error_data()['confirmation_token'];
+
+	// 2. Supply confirmation token -> executes and completes:
+	$args['confirmation_token'] = $token;
+	$res_exec = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page', $args );
+	assert_true( $res_exec['deleted'] );
+
+	// 3. Third call with same idempotency key and NO confirmation token:
+	unset( $args['confirmation_token'] );
+	$res_replay = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page', $args );
+	assert_true( $res_replay['deleted'], 'Completed replay must return cached result without prompting confirmation' );
+} );
+
+run_test( 'Idempotency: stale worker cannot complete another owner claim', function () {
+	$key = 'stale_worker_' . bin2hex( random_bytes( 6 ) );
+	$claim = Full_Elementor_MCP_Idempotency_Manager::claim( $key, 'full-elementor-mcp/update-element', 1, null, array( 'post_id' => 10 ), 'worker-A' );
+	assert_equals( 'claimed', $claim['status'] );
+
+	// Worker B attempts to complete Worker A claim:
+	$res = Full_Elementor_MCP_Idempotency_Manager::complete( $claim['token_key'], 'worker-B', array( 'done' => true ) );
+	assert_false( $res, 'Worker B cannot complete Worker A claim' );
+} );
+
+// -----------------------------------------------------------------------------
+// 20. Post-Mutation Fail-Closed Tree Check & Rollback Trigger
+// -----------------------------------------------------------------------------
+
+run_test( 'Post-Mutation: malformed tree persisted during mutation triggers rollback and returns post_mutation_validation_failed', function () {
+	// Set up valid initial page:
+	$initial_tree = array(
+		array(
+			'id'       => 'sec111',
+			'elType'   => 'section',
+			'elements' => array(
+				array(
+					'id'         => 'col111',
+					'elType'     => 'column',
+					'elements'   => array(),
+					'isInner'    => false,
+					'settings'   => array(),
+				),
+			),
+			'isInner'  => false,
+			'settings' => array(),
+		),
+	);
+	update_post_meta( 10, '_elementor_data', wp_json_encode( $initial_tree ) );
+
+	register_mock_ability( 'full-elementor-mcp/update-element', false, function ( $input ) {
+		// Callback persists a malformed tree (missing elType and id):
+		$corrupted_tree = array( array( 'bad_node' => true ) );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( 10, '_elementor_data', wp_json_encode( $corrupted_tree ) );
+		return array( 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-element', array(
+		'post_id'    => 10,
+		'element_id' => 'sec111',
+		'settings'   => array( 'title' => 'Corrupting' ),
+	) );
+
+	assert_error_code( 'post_mutation_validation_failed', $res );
+
+	// Verify rollback restored the original valid tree:
+	$restored = json_decode( get_post_meta( 10, '_elementor_data', true ), true );
+	assert_equals( 'sec111', $restored[0]['id'], 'Rollback must have restored initial valid tree' );
+} );
+
+// -----------------------------------------------------------------------------
+// 21. Strict Boolean `force` Semantics
+// -----------------------------------------------------------------------------
+
+run_test( 'Destructive: delete-page with force => "true" (string) is NOT irreversible permanent deletion', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => 'true' )
+	);
+	assert_false( $prof['irreversible'] );
+	assert_true( 'permanent_deletion' !== $prof['security_category'] );
+} );
+
+run_test( 'Destructive: delete-page with force => true (boolean) IS irreversible permanent deletion', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 10, 'force' => true )
+	);
+	assert_true( $prof['irreversible'] );
+	assert_equals( 'permanent_deletion', $prof['security_category'] );
+} );
+
+// -----------------------------------------------------------------------------
+// 22. Missing Safety Dependencies Fail Closed
+// -----------------------------------------------------------------------------
+
+run_test( 'Dependencies: all 10 required safety classes are present and enforced', function () {
+	assert_true( class_exists( 'Full_Elementor_MCP_Safe_Writes' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Database_Installer' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Lock_Manager' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Journal' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Tree_Validator' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Confirmation_Manager' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Idempotency_Manager' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) );
 } );
 
 echo "\n=======================================================\n";

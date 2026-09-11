@@ -107,6 +107,15 @@ final class Full_Elementor_MCP_Mutation_Context {
 	}
 
 	/**
+	 * Resets the context stack completely.
+	 *
+	 * Primarily used for test harness isolation and process cleanups.
+	 */
+	public static function reset(): void {
+		self::$stack = array();
+	}
+
+	/**
 	 * Gets the current topmost active context.
 	 *
 	 * @return array<string, mixed>|null
@@ -147,10 +156,115 @@ final class Full_Elementor_MCP_Mutation_Context {
 	}
 
 	/**
-	 * Resets the entire context stack (for test teardown or fatal error recovery).
+	 * Binds newly created object ID to the active mutation context.
+	 *
+	 * @param int $created_object_id Durably inserted entity ID.
+	 * @return bool True on success.
 	 */
-	public static function reset(): void {
-		self::$stack = array();
+	public static function bind_created_object_id( int $created_object_id ): bool {
+		return self::update_current( array( 'created_object_id' => $created_object_id ) );
+	}
+
+	/**
+	 * Marks that persistent writing has begun for the current mutation context.
+	 */
+	public static function mark_write_started(): void {
+		self::update_current( array( 'write_started' => true ) );
+	}
+
+	/**
+	 * Increments the persistent write counter for the current mutation context.
+	 */
+	public static function increment_write_count(): void {
+		$ctx   = self::current();
+		$count = (int) ( $ctx['write_count'] ?? 0 ) + 1;
+		self::update_current( array( 'write_count' => $count ) );
+	}
+
+	/**
+	 * Checks whether a persistent write has been started under the active context.
+	 *
+	 * @return bool
+	 */
+	public static function has_write_started(): bool {
+		$ctx = self::current();
+		return ! empty( $ctx['write_started'] );
+	}
+
+	/**
+	 * Returns the count of persistent writes executed under the active context.
+	 *
+	 * @return int
+	 */
+	public static function get_write_count(): int {
+		$ctx = self::current();
+		return (int) ( $ctx['write_count'] ?? 0 );
+	}
+
+	/**
+	 * Asserts that the active mutation context is valid for an initial object creation primitive.
+	 *
+	 * Before the object exists, context authorizes ONLY creation. After creation,
+	 * bind_created_object_id must be called before subsequent post writes.
+	 *
+	 * @return true|\WP_Error True if authorized for creation; WP_Error on failure.
+	 */
+	public static function assert_create_write_context(): bool|\WP_Error {
+		$ctx = self::current();
+		if ( null === $ctx ) {
+			return new \WP_Error(
+				'mutation_context_missing',
+				__( 'Persistent write rejected: no active Full Elementor MCP mutation context exists.', 'full-elementor-mcp' )
+			);
+		}
+
+		if ( ! empty( $ctx['is_dry_run'] ) ) {
+			return new \WP_Error(
+				'dry_run_write_blocked',
+				__( 'Persistent write rejected: execution is running in dry-run mode.', 'full-elementor-mcp' )
+			);
+		}
+
+		if ( ! empty( $ctx['is_readonly'] ) ) {
+			return new \WP_Error(
+				'readonly_context_write_blocked',
+				__( 'Persistent write rejected: readonly context cannot perform persistent modifications.', 'full-elementor-mcp' )
+			);
+		}
+
+		$norm_actual = trim( (string) $ctx['resource_key'] );
+		if ( 0 !== strpos( $norm_actual, 'create:' ) ) {
+			return new \WP_Error(
+				'invalid_create_context',
+				__( 'Persistent creation rejected: active context is not a creation operation.', 'full-elementor-mcp' )
+			);
+		}
+
+		if ( ! empty( $ctx['created_object_id'] ) ) {
+			return new \WP_Error(
+				'created_object_already_bound',
+				__( 'Persistent creation rejected: an object ID has already been created and bound to this context.', 'full-elementor-mcp' )
+			);
+		}
+
+		$owner_id      = (string) $ctx['owner_id'];
+		$fencing_token = (int) $ctx['fencing_token'];
+
+		if ( '' === $owner_id || $fencing_token < 1 ) {
+			return new \WP_Error(
+				'write_fencing_missing',
+				__( 'Persistent write rejected: active context lacks valid owner ID or fencing token.', 'full-elementor-mcp' )
+			);
+		}
+
+		if ( ! class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
+			return new \WP_Error(
+				'write_fencing_unavailable',
+				__( 'Persistent write rejected: authoritative Lock Manager infrastructure is unavailable.', 'full-elementor-mcp' )
+			);
+		}
+
+		return Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $norm_actual, $owner_id, $fencing_token );
 	}
 
 	/**
@@ -160,9 +274,10 @@ final class Full_Elementor_MCP_Mutation_Context {
 	 * Checks:
 	 * 1. Active context exists.
 	 * 2. Not in dry-run mode.
-	 * 3. Target resource matches expected canonical resource key.
-	 * 4. Owner ID and fencing token exist.
-	 * 5. Fencing ownership is strictly asserted against Lock Manager.
+	 * 3. Not in readonly mode.
+	 * 4. Target resource matches expected canonical resource key (or newly bound created entity).
+	 * 5. Owner ID and fencing token exist.
+	 * 6. Fencing ownership is strictly asserted against Lock Manager (fails closed if missing).
 	 *
 	 * @param string $expected_resource_key The canonical resource key (e.g. 'post:123').
 	 * @return true|\WP_Error True if authorized to write; WP_Error on failure.
@@ -206,7 +321,28 @@ final class Full_Elementor_MCP_Mutation_Context {
 		// and post write binds to post:<ID>.
 		$is_create = 0 === strpos( $norm_actual, 'create:' );
 
-		if ( ! $is_create && '' !== $norm_expected && '' !== $norm_actual && $norm_expected !== $norm_actual ) {
+		if ( $is_create ) {
+			$bound_id = (int) ( $ctx['created_object_id'] ?? 0 );
+			if ( $bound_id <= 0 ) {
+				return new \WP_Error(
+					'created_object_not_yet_bound',
+					__( 'Persistent post write rejected: target entity ID has not been durably created or bound yet.', 'full-elementor-mcp' )
+				);
+			}
+
+			$expected_bound_key = "post:{$bound_id}";
+			if ( $norm_expected !== $expected_bound_key ) {
+				return new \WP_Error(
+					'write_resource_mismatch',
+					sprintf(
+						/* translators: 1: expected resource key, 2: actual resource key */
+						__( 'Persistent write rejected: target resource "%1$s" does not match newly bound created entity "%2$s".', 'full-elementor-mcp' ),
+						$norm_expected,
+						$expected_bound_key
+					)
+				);
+			}
+		} elseif ( '' !== $norm_expected && '' !== $norm_actual && $norm_expected !== $norm_actual ) {
 			return new \WP_Error(
 				'write_resource_mismatch',
 				sprintf(
@@ -228,14 +364,15 @@ final class Full_Elementor_MCP_Mutation_Context {
 			);
 		}
 
-		// Authoritative lock ownership assertion immediately before write:
-		if ( class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $norm_actual, $owner_id, $fencing_token );
-			if ( is_wp_error( $fence_check ) ) {
-				return $fence_check;
-			}
+		// Fail closed if Lock Manager is unavailable:
+		if ( ! class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
+			return new \WP_Error(
+				'write_fencing_unavailable',
+				__( 'Persistent write rejected: authoritative Lock Manager infrastructure is unavailable.', 'full-elementor-mcp' )
+			);
 		}
 
-		return true;
+		return Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $norm_actual, $owner_id, $fencing_token );
 	}
 }
+

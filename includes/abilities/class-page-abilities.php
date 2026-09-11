@@ -221,7 +221,7 @@ class Full_Elementor_MCP_Page_Abilities {
 			return new \WP_Error( 'missing_title', __( 'The title parameter is required.', 'full-elementor-mcp' ) );
 		}
 
-		$post_id = wp_insert_post(
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'  => $title,
 				'post_status' => $status,
@@ -240,7 +240,7 @@ class Full_Elementor_MCP_Page_Abilities {
 
 		// Set page template if provided.
 		if ( ! empty( $input['template'] ) ) {
-			update_post_meta( $post_id, '_wp_page_template', sanitize_text_field( $input['template'] ) );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_wp_page_template', sanitize_text_field( $input['template'] ) );
 		}
 
 		// Save initial content if provided.
@@ -599,7 +599,7 @@ class Full_Elementor_MCP_Page_Abilities {
 
 	public function execute_delete_page( $input ) {
 		$post_id = absint( $input['post_id'] ?? 0 );
-		$force   = ! empty( $input['force'] );
+		$force   = true === ( $input['force'] ?? false );
 
 		if ( ! $post_id ) {
 			return new \WP_Error( 'missing_post_id', __( 'The post_id parameter is required.', 'full-elementor-mcp' ) );
@@ -610,10 +610,10 @@ class Full_Elementor_MCP_Page_Abilities {
 			return new \WP_Error( 'post_not_found', __( 'Post not found.', 'full-elementor-mcp' ) );
 		}
 
-		$result = wp_delete_post( $post_id, $force );
+		$result = Full_Elementor_MCP_Safe_Writes::delete_post( $post_id, $force );
 
-		if ( false === $result || null === $result ) {
-			return new \WP_Error( 'delete_failed', __( 'Failed to delete the post.', 'full-elementor-mcp' ) );
+		if ( false === $result || null === $result || is_wp_error( $result ) ) {
+			return is_wp_error( $result ) ? $result : new \WP_Error( 'delete_failed', __( 'Failed to delete the post.', 'full-elementor-mcp' ) );
 		}
 
 		return array(
@@ -692,7 +692,7 @@ class Full_Elementor_MCP_Page_Abilities {
 			? sanitize_text_field( $input['title'] )
 			: $source->post_title . ' ' . __( '(Copy)', 'full-elementor-mcp' );
 
-		$new_id = wp_insert_post(
+		$new_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'   => $title,
 				'post_status'  => $status,
@@ -720,12 +720,12 @@ class Full_Elementor_MCP_Page_Abilities {
 			$duplicate_data = $this->data->reassign_ids( $source_data );
 			$save           = $this->data->save_page_data( $new_id, $duplicate_data );
 			if ( is_wp_error( $save ) ) {
-				wp_delete_post( $new_id, true );
+				Full_Elementor_MCP_Safe_Writes::delete_post( $new_id, true );
 				return $save;
 			}
 		} else {
 			// Still need to flag the duplicate as Elementor-built.
-			update_post_meta( $new_id, '_elementor_edit_mode', 'builder' );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $new_id, '_elementor_edit_mode', 'builder' );
 		}
 
 		// Mirror the most common Elementor meta keys.
@@ -733,21 +733,19 @@ class Full_Elementor_MCP_Page_Abilities {
 			'_elementor_template_type',
 			'_elementor_version',
 			'_elementor_page_settings',
-			'_elementor_conditions',
-			'_elementor_extra_options',
-			'_wp_page_template',
 		);
+
 		foreach ( $copyable_meta as $key ) {
 			$value = get_post_meta( $source_id, $key, true );
-			if ( '' !== $value && null !== $value ) {
-				update_post_meta( $new_id, $key, $value );
+			if ( '' !== $value && false !== $value ) {
+				Full_Elementor_MCP_Safe_Writes::update_post_meta( $new_id, $key, $value );
 			}
 		}
 
-		// Copy featured image.
+		// Also copy featured image if present.
 		$thumb = get_post_thumbnail_id( $source_id );
 		if ( $thumb ) {
-			set_post_thumbnail( $new_id, $thumb );
+			Full_Elementor_MCP_Safe_Writes::set_post_thumbnail( $new_id, $thumb );
 		}
 
 		return array(
@@ -815,16 +813,21 @@ class Full_Elementor_MCP_Page_Abilities {
 			return new \WP_Error( 'post_not_found', __( 'Post not found.', 'full-elementor-mcp' ) );
 		}
 
-		if ( 0 === $attachment_id ) {
-			delete_post_thumbnail( $post_id );
-			return array( 'success' => true, 'attachment_id' => 0 );
+		if ( empty( $attachment_id ) ) {
+			$result = Full_Elementor_MCP_Safe_Writes::delete_post_thumbnail( $post_id );
+			return array(
+				'success'       => true,
+				'post_id'       => $post_id,
+				'attachment_id' => 0,
+				'action'        => 'removed',
+			);
 		}
 
 		if ( 'attachment' !== get_post_type( $attachment_id ) ) {
 			return new \WP_Error( 'invalid_attachment', __( 'The attachment_id does not refer to a media library attachment.', 'full-elementor-mcp' ) );
 		}
 
-		$result = set_post_thumbnail( $post_id, $attachment_id );
+		$result = Full_Elementor_MCP_Safe_Writes::set_post_thumbnail( $post_id, $attachment_id );
 		if ( false === $result ) {
 			return new \WP_Error( 'set_failed', __( 'Failed to set the featured image.', 'full-elementor-mcp' ) );
 		}
@@ -930,7 +933,7 @@ class Full_Elementor_MCP_Page_Abilities {
 			return new \WP_Error( 'no_fields', __( 'Provide at least one field to update.', 'full-elementor-mcp' ) );
 		}
 
-		$result = wp_update_post( $update, true );
+		$result = Full_Elementor_MCP_Safe_Writes::update_post( $update, true );
 		if ( is_wp_error( $result ) ) {
 			return $result;
 		}
@@ -997,7 +1000,7 @@ class Full_Elementor_MCP_Page_Abilities {
 			return new \WP_Error( 'post_not_found', __( 'Post not found.', 'full-elementor-mcp' ) );
 		}
 
-		$result = wp_update_post(
+		$result = Full_Elementor_MCP_Safe_Writes::update_post(
 			array(
 				'ID'        => $post_id,
 				'post_name' => $slug,

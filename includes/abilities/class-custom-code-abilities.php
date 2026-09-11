@@ -549,7 +549,7 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 		}
 
 		// Create the elementor_snippet CPT post.
-		$post_id = wp_insert_post(
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'  => $title,
 				'post_type'   => 'elementor_snippet',
@@ -563,18 +563,15 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 		}
 
 		// Set the custom code meta fields (matching Elementor Pro's Custom Code module).
-		update_post_meta( $post_id, '_elementor_location', $elementor_location );
-		update_post_meta( $post_id, '_elementor_priority', $priority );
-		update_post_meta( $post_id, '_elementor_code', $code );
-		update_post_meta( $post_id, '_elementor_template_type', 'code_snippet' );
-		update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_location', $elementor_location );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_priority', $priority );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_code', $code );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_template_type', 'code_snippet' );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
 
-		// Set ensure_jquery extra option if requested. Elementor Pro reads
-		// this as an associative map (`['ensure_jquery' => 'yes']`), not a
-		// numerically-indexed list — the previous shape made the option
-		// silently inert.
+		// Set ensure_jquery extra option if requested.
 		if ( $ensure_jquery ) {
-			update_post_meta( $post_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
 		}
 
 		$edit_url = admin_url( 'post.php?post=' . $post_id . '&action=edit' );
@@ -798,15 +795,15 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 		if ( array_key_exists( 'status', $input ) ) {
 			$post_update['post_status'] = sanitize_key( $input['status'] );
 		}
-		if ( count( $post_update ) > 1 ) {
-			$res = wp_update_post( $post_update, true );
+		if ( count( $post_update) > 1 ) {
+			$res = Full_Elementor_MCP_Safe_Writes::update_post( $post_update, true );
 			if ( is_wp_error( $res ) ) {
 				return $res;
 			}
 		}
 
 		if ( array_key_exists( 'code', $input ) ) {
-			update_post_meta( $snippet_id, '_elementor_code', (string) $input['code'] );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_code', (string) $input['code'] );
 		}
 
 		if ( array_key_exists( 'location', $input ) ) {
@@ -817,19 +814,19 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 			);
 			$location_key = sanitize_key( $input['location'] );
 			if ( isset( $location_map[ $location_key ] ) ) {
-				update_post_meta( $snippet_id, '_elementor_location', $location_map[ $location_key ] );
+				Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_location', $location_map[ $location_key ] );
 			}
 		}
 
 		if ( array_key_exists( 'priority', $input ) ) {
-			update_post_meta( $snippet_id, '_elementor_priority', max( 1, (int) $input['priority'] ) );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_priority', max( 1, (int) $input['priority'] ) );
 		}
 
 		if ( array_key_exists( 'ensure_jquery', $input ) ) {
 			if ( ! empty( $input['ensure_jquery'] ) ) {
-				update_post_meta( $snippet_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
+				Full_Elementor_MCP_Safe_Writes::update_post_meta( $snippet_id, '_elementor_extra_options', array( 'ensure_jquery' => 'yes' ) );
 			} else {
-				delete_post_meta( $snippet_id, '_elementor_extra_options' );
+				Full_Elementor_MCP_Safe_Writes::delete_post_meta( $snippet_id, '_elementor_extra_options' );
 			}
 		}
 
@@ -879,7 +876,7 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 
 	public function execute_delete_code_snippet( $input ) {
 		$snippet_id = absint( $input['snippet_id'] ?? 0 );
-		$force      = ! empty( $input['force'] );
+		$force      = true === ( $input['force'] ?? false );
 
 		if ( ! $snippet_id ) {
 			return new \WP_Error( 'missing_snippet_id', __( 'snippet_id is required.', 'full-elementor-mcp' ) );
@@ -890,9 +887,9 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 			return new \WP_Error( 'not_a_snippet', __( 'The given post is not an Elementor code snippet.', 'full-elementor-mcp' ) );
 		}
 
-		$result = wp_delete_post( $snippet_id, $force );
-		if ( false === $result || null === $result ) {
-			return new \WP_Error( 'delete_failed', __( 'Failed to delete the snippet.', 'full-elementor-mcp' ) );
+		$result = Full_Elementor_MCP_Safe_Writes::delete_post( $snippet_id, $force );
+		if ( false === $result || null === $result || is_wp_error( $result ) ) {
+			return is_wp_error( $result ) ? $result : new \WP_Error( 'delete_failed', __( 'Failed to delete the snippet.', 'full-elementor-mcp' ) );
 		}
 
 		return array( 'success' => true );
@@ -952,7 +949,7 @@ class Full_Elementor_MCP_Custom_Code_Abilities {
 
 		$new_status = ( 'publish' === $post->post_status ) ? 'draft' : 'publish';
 
-		$res = wp_update_post(
+		$res = Full_Elementor_MCP_Safe_Writes::update_post(
 			array(
 				'ID'          => $snippet_id,
 				'post_status' => $new_status,

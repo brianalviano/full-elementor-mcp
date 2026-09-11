@@ -194,14 +194,6 @@ class Full_Elementor_MCP_Data {
 	 * @return bool|\WP_Error True on success, WP_Error on failure.
 	 */
 	public function save_page_data( int $post_id, array $data ) {
-		// Low-level write guard: assert active mutation context & fencing immediately before write:
-		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
-			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
-			if ( is_wp_error( $context_guard ) ) {
-				return $context_guard;
-			}
-		}
-
 		// Tree validation immediately before write:
 		if ( class_exists( 'Full_Elementor_MCP_Tree_Validator' ) ) {
 			$tree_validation = Full_Elementor_MCP_Tree_Validator::validate_document(
@@ -222,6 +214,16 @@ class Full_Elementor_MCP_Data {
 			return $document;
 		}
 
+		// Low-level write guard: assert active mutation context & fencing immediately before physical write:
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
+			if ( is_wp_error( $context_guard ) ) {
+				return $context_guard;
+			}
+			Full_Elementor_MCP_Mutation_Context::mark_write_started();
+			Full_Elementor_MCP_Mutation_Context::increment_write_count();
+		}
+
 		// Attempt native Elementor save (handles CSS regen, cache busting).
 		$result = $document->save( array( 'elements' => $data ) );
 
@@ -234,6 +236,14 @@ class Full_Elementor_MCP_Data {
 					'json_encode_failed',
 					__( 'Failed to encode element data as JSON.', 'full-elementor-mcp' )
 				);
+			}
+
+			if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+				$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
+				if ( is_wp_error( $context_guard ) ) {
+					return $context_guard;
+				}
+				Full_Elementor_MCP_Mutation_Context::increment_write_count();
 			}
 
 			update_post_meta( $post_id, '_elementor_data', wp_slash( $json ) );
@@ -287,18 +297,20 @@ class Full_Elementor_MCP_Data {
 	 * @return bool|\WP_Error True on success, WP_Error on failure.
 	 */
 	public function save_page_settings( int $post_id, array $settings ) {
-		// Low-level write guard: assert active mutation context & fencing immediately before write:
+		$document = $this->get_document( $post_id );
+
+		if ( is_wp_error( $document ) ) {
+			return $document;
+		}
+
+		// Low-level write guard: assert active mutation context & fencing immediately before physical write:
 		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
 			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
 			if ( is_wp_error( $context_guard ) ) {
 				return $context_guard;
 			}
-		}
-
-		$document = $this->get_document( $post_id );
-
-		if ( is_wp_error( $document ) ) {
-			return $document;
+			Full_Elementor_MCP_Mutation_Context::mark_write_started();
+			Full_Elementor_MCP_Mutation_Context::increment_write_count();
 		}
 
 		$result = $document->save( array( 'settings' => $settings ) );
@@ -311,6 +323,15 @@ class Full_Elementor_MCP_Data {
 			}
 
 			$merged = array_merge( $existing, $settings );
+
+			if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
+				$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
+				if ( is_wp_error( $context_guard ) ) {
+					return $context_guard;
+				}
+				Full_Elementor_MCP_Mutation_Context::increment_write_count();
+			}
+
 			update_post_meta( $post_id, '_elementor_page_settings', $merged );
 
 			// Invalidate CSS cache.

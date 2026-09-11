@@ -36,6 +36,147 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 	const COMPLETED_TTL_SECONDS = 86400;
 
 	/**
+	 * Pre-checks idempotency state before acquiring locks or issuing confirmation challenges.
+	 *
+	 * Allows completed idempotent replays to return cached results immediately without
+	 * prompting for re-confirmation or acquiring resources.
+	 *
+	 * @param string      $idempotency_key Caller idempotency key.
+	 * @param string      $ability         Target ability.
+	 * @param int         $user_id         Active user ID.
+	 * @param string|null $credential_uuid Authenticated App Password UUID.
+	 * @param array       $args            Incoming mutation arguments.
+	 * @return array{status: string, token_key: string, result?: array}|\WP_Error
+	 */
+	public static function precheck(
+		string $idempotency_key,
+		string $ability,
+		int $user_id,
+		?string $credential_uuid,
+		array $args
+	): array|\WP_Error {
+		global $wpdb;
+
+		if ( '' === trim( $idempotency_key ) ) {
+			return new \WP_Error( 'idempotency_key_empty', __( 'Idempotency key cannot be empty.', 'full-elementor-mcp' ) );
+		}
+
+		if ( ! class_exists( 'Full_Elementor_MCP_Database_Installer' ) || ! class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
+			return new \WP_Error( 'safety_db_unavailable', __( 'Safety infrastructure unavailable.', 'full-elementor-mcp' ) );
+		}
+
+		$table     = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+		$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key( $idempotency_key, $ability, $user_id, $credential_uuid );
+		$args_hash = Full_Elementor_MCP_Confirmation_Manager::canonical_args_hash( $args );
+
+		if ( is_wp_error( $args_hash ) ) {
+			return $args_hash;
+		}
+
+		$existing = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT payload, owner_id, used, expires_at, (expires_at > UTC_TIMESTAMP()) AS is_active_lease FROM {$table} WHERE token_key = %s AND token_type = 'idempotency'",
+				$token_key
+			),
+			ARRAY_A
+		);
+
+		if ( empty( $existing ) ) {
+			return array(
+				'status'    => 'proceed',
+				'token_key' => $token_key,
+			);
+		}
+
+		$payload = json_decode( (string) $existing['payload'], true );
+		if ( ! is_array( $payload ) ) {
+			return new \WP_Error( 'idempotency_cache_corrupt', __( 'Corrupted idempotency record: payload is invalid.', 'full-elementor-mcp' ) );
+		}
+
+		// Conflict check: same key with different arguments:
+		if ( empty( $payload['args_hash'] ) || ! hash_equals( (string) $payload['args_hash'], $args_hash ) ) {
+			return new \WP_Error(
+				'idempotency_conflict',
+				__( 'Idempotency key has already been used with different arguments.', 'full-elementor-mcp' ),
+				array(
+					'idempotency_key' => $idempotency_key,
+					'ability'         => $ability,
+				)
+			);
+		}
+
+		$status = (string) ( $payload['status'] ?? ( 1 === (int) $existing['used'] ? 'completed' : 'pending' ) );
+
+		if ( 'completed' === $status ) {
+			return array(
+				'status'    => 'completed',
+				'token_key' => $token_key,
+				'result'    => is_array( $payload['result'] ?? null ) ? $payload['result'] : array( 'success' => true ),
+			);
+		}
+
+		if ( 'recovery_required' === $status ) {
+			return new \WP_Error(
+				'idempotency_recovery_required',
+				__( 'Prior mutation state is unverified or awaiting crash recovery. Please inspect journal before retrying.', 'full-elementor-mcp' ),
+				array( 'journal_id' => (int) ( $payload['journal_id'] ?? 0 ) )
+			);
+		}
+
+		if ( ! empty( $existing['is_active_lease'] ) ) {
+			return new \WP_Error(
+				'idempotency_in_progress',
+				__( 'An identical mutation request is currently in progress. Please retry shortly.', 'full-elementor-mcp' ),
+				array(
+					'idempotency_key' => $idempotency_key,
+					'ability'         => $ability,
+				)
+			);
+		}
+
+		// If expired lease, check WAL reconciliation:
+		$journal_id = (int) ( $payload['journal_id'] ?? 0 );
+		if ( $journal_id > 0 && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
+			$journal_row = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT status FROM {$wpdb->prefix}elementor_mcp_journal WHERE id = %d",
+					$journal_id
+				),
+				ARRAY_A
+			);
+
+			if ( ! empty( $journal_row ) && 'committed' === $journal_row['status'] ) {
+				self::complete( $token_key, (string) $existing['owner_id'], $payload['result'] ?? array( 'success' => true ), $journal_id );
+				return array(
+					'status'    => 'completed',
+					'token_key' => $token_key,
+					'result'    => $payload['result'] ?? array( 'success' => true ),
+				);
+			}
+
+			if ( ! empty( $journal_row ) && 'rolled_back' === $journal_row['status'] ) {
+				return array(
+					'status'    => 'proceed',
+					'token_key' => $token_key,
+				);
+			}
+		}
+
+		if ( 'failed_safe' === $status || 'failed' === $status ) {
+			return array(
+				'status'    => 'proceed',
+				'token_key' => $token_key,
+			);
+		}
+
+		return new \WP_Error(
+			'idempotency_recovery_required',
+			__( 'Prior mutation state is unverified or awaiting crash recovery. Please inspect journal before retrying.', 'full-elementor-mcp' ),
+			array( 'journal_id' => $journal_id )
+		);
+	}
+
+	/**
 	 * Atomically claims an idempotency key before mutation execution.
 	 *
 	 * @param string      $idempotency_key Caller idempotency key/UUID.
@@ -67,6 +208,10 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 		$table     = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 		$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key( $idempotency_key, $ability, $user_id, $credential_uuid );
 		$args_hash = Full_Elementor_MCP_Confirmation_Manager::canonical_args_hash( $args );
+
+		if ( is_wp_error( $args_hash ) ) {
+			return $args_hash;
+		}
 
 		$initial_payload = array(
 			'status'          => 'pending',
@@ -143,7 +288,16 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 			);
 		}
 
-		// 5. Active Pending Lease: Another concurrent worker is currently processing this exact mutation.
+		// 5. Recovery required:
+		if ( 'recovery_required' === $status ) {
+			return new \WP_Error(
+				'idempotency_recovery_required',
+				__( 'Prior mutation state is unverified or awaiting crash recovery. Please inspect journal before retrying.', 'full-elementor-mcp' ),
+				array( 'journal_id' => (int) ( $payload['journal_id'] ?? 0 ) )
+			);
+		}
+
+		// 6. Active Pending Lease: Another concurrent worker is currently processing this exact mutation.
 		if ( ! empty( $existing['is_active_lease'] ) ) {
 			return new \WP_Error(
 				'idempotency_in_progress',
@@ -155,7 +309,7 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 			);
 		}
 
-		// 6. Stale Pending Claim: The previous execution crashed or timed out.
+		// 7. Stale Pending Claim: The previous execution crashed or timed out.
 		// Check associated Write-Ahead Journal status for reconciliation.
 		$journal_id = (int) ( $payload['journal_id'] ?? 0 );
 		if ( $journal_id > 0 && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
@@ -168,7 +322,6 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 			);
 
 			if ( ! empty( $journal_row ) && 'committed' === $journal_row['status'] ) {
-				// Journal was committed, but idempotency completion failed: reconcile to completed.
 				self::complete( $token_key, (string) $existing['owner_id'], $payload['result'] ?? array( 'success' => true ), $journal_id );
 				return array(
 					'status'    => 'completed',
@@ -176,10 +329,14 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 					'result'    => $payload['result'] ?? array( 'success' => true ),
 				);
 			}
+
+			if ( ! empty( $journal_row ) && 'rolled_back' === $journal_row['status'] ) {
+				$status = 'failed_safe';
+			}
 		}
 
-		// If previous execution is definitively failed, allow controlled retry takeover.
-		if ( 'failed' === $status ) {
+		// If previous execution was failed_safe or failed, allow controlled retry takeover via CAS.
+		if ( 'failed' === $status || 'failed_safe' === $status ) {
 			$initial_payload['owner_id'] = $owner_id;
 			$updated = $wpdb->query(
 				$wpdb->prepare(
@@ -221,7 +378,7 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 		$table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 
 		$row = $wpdb->get_row(
-			$wpdb->prepare( "SELECT payload FROM {$table} WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s", $token_key, $owner_id ),
+			$wpdb->prepare( "SELECT payload FROM {$table} WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s AND used = 0", $token_key, $owner_id ),
 			ARRAY_A
 		);
 		if ( empty( $row ) ) {
@@ -237,14 +394,14 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 
 		$updated = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET payload = %s WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s",
+				"UPDATE {$table} SET payload = %s WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s AND used = 0",
 				wp_json_encode( $payload ),
 				$token_key,
 				$owner_id
 			)
 		);
 
-		return false !== $updated;
+		return ! empty( $updated ) && $updated > 0;
 	}
 
 	/**
@@ -298,25 +455,28 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 		$updated = $wpdb->query(
 			$wpdb->prepare(
 				"UPDATE {$table} SET payload = %s, used = 1, expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d SECOND)
-				 WHERE token_key = %s AND token_type = 'idempotency'",
+				 WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s AND used = 0",
 				wp_json_encode( $payload ),
 				self::COMPLETED_TTL_SECONDS,
-				$token_key
+				$token_key,
+				$owner_id
 			)
 		);
 
-		return false !== $updated;
+		return ! empty( $updated ) && $updated > 0;
 	}
 
 	/**
-	 * Marks an idempotency claim as failed or cleans it up.
+	 * Cleans up or marks claim as failed_safe when mutation failed BEFORE persistent writes began.
+	 *
+	 * Allows immediate safe retries.
 	 *
 	 * @param string $token_key
 	 * @param string $owner_id
 	 * @param string $error_message
 	 * @return bool
 	 */
-	public static function fail( string $token_key, string $owner_id, string $error_message ): bool {
+	public static function fail_safe( string $token_key, string $owner_id, string $error_message = '' ): bool {
 		global $wpdb;
 		if ( ! class_exists( 'Full_Elementor_MCP_Database_Installer' ) ) {
 			return false;
@@ -333,7 +493,72 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 			)
 		);
 
-		return false !== $deleted;
+		return ! empty( $deleted ) && $deleted > 0;
+	}
+
+	/**
+	 * Marks claim as recovery_required when writes occurred or uncertainty exists.
+	 *
+	 * Blocks blind retries until journal is resolved.
+	 *
+	 * @param string $token_key
+	 * @param string $owner_id
+	 * @param int    $journal_id
+	 * @param string $reason
+	 * @return bool
+	 */
+	public static function mark_recovery_required( string $token_key, string $owner_id, int $journal_id = 0, string $reason = '' ): bool {
+		global $wpdb;
+		if ( ! class_exists( 'Full_Elementor_MCP_Database_Installer' ) ) {
+			return false;
+		}
+
+		$table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+		$existing = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT payload FROM {$table} WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s",
+				$token_key,
+				$owner_id
+			),
+			ARRAY_A
+		);
+
+		$payload = array();
+		if ( ! empty( $existing['payload'] ) ) {
+			$payload = json_decode( (string) $existing['payload'], true );
+			if ( ! is_array( $payload ) ) {
+				$payload = array();
+			}
+		}
+
+		$payload['status']     = 'recovery_required';
+		$payload['journal_id'] = $journal_id > 0 ? $journal_id : ( $payload['journal_id'] ?? 0 );
+		$payload['reason']     = $reason;
+		$payload['updated_at'] = gmdate( 'Y-m-d H:i:s' );
+
+		$updated = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET payload = %s WHERE token_key = %s AND token_type = 'idempotency' AND owner_id = %s AND used = 0",
+				wp_json_encode( $payload ),
+				$token_key,
+				$owner_id
+			)
+		);
+
+		return ! empty( $updated ) && $updated > 0;
+	}
+
+	/**
+	 * Backward compatibility alias for fail_safe().
+	 *
+	 * @param string $token_key
+	 * @param string $owner_id
+	 * @param string $error_message
+	 * @return bool
+	 */
+	public static function fail( string $token_key, string $owner_id, string $error_message = '' ): bool {
+		return self::fail_safe( $token_key, $owner_id, $error_message );
 	}
 
 	/**
@@ -351,6 +576,11 @@ final class Full_Elementor_MCP_Idempotency_Manager {
 			// Avoid caching multi-megabyte trees inside idempotency payload:
 			if ( 'elements' === $k && is_array( $v ) ) {
 				$sanitized['element_count'] = count( $v );
+				continue;
+			}
+			// Bound large string properties to 16KB to keep tokens table lean:
+			if ( is_string( $v ) && strlen( $v ) > 16384 ) {
+				$sanitized[ $k ] = substr( $v, 0, 16384 ) . '...[truncated]';
 				continue;
 			}
 			$sanitized[ $k ] = $v;

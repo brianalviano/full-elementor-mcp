@@ -183,7 +183,7 @@ class Full_Elementor_MCP_Composite_Abilities {
 		}
 
 		// 1. Create the WordPress post.
-		$post_id = wp_insert_post(
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'  => $title,
 				'post_status' => $status,

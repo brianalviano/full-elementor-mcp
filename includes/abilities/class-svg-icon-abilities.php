@@ -234,7 +234,7 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 
 		// Set the title.
 		if ( ! empty( $title ) ) {
-			wp_update_post( array(
+			Full_Elementor_MCP_Safe_Writes::update_post( array(
 				'ID'         => $attachment_id,
 				'post_title' => $title,
 			) );
@@ -391,7 +391,7 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 			'tmp_name' => $tmp_file,
 		);
 
-		$attachment_id = media_handle_sideload( $file_array, 0 );
+		$attachment_id = Full_Elementor_MCP_Safe_Writes::media_handle_sideload( $file_array, 0 );
 
 		if ( is_wp_error( $attachment_id ) ) {
 			if ( file_exists( $tmp_file ) ) {

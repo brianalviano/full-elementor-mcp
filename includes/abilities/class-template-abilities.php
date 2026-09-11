@@ -206,7 +206,7 @@ class Full_Elementor_MCP_Template_Abilities {
 		}
 
 		// Create the template post in Elementor's library CPT.
-		$template_id = wp_insert_post(
+		$template_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'  => $title,
 				'post_status' => 'publish',
@@ -224,7 +224,7 @@ class Full_Elementor_MCP_Template_Abilities {
 		}
 
 		// Set the template type taxonomy.
-		wp_set_object_terms( $template_id, $template_type, 'elementor_library_type' );
+		Full_Elementor_MCP_Safe_Writes::set_object_terms( $template_id, $template_type, 'elementor_library_type' );
 
 		// Save the element data to the template.
 		$save_result = $this->data->save_page_data( $template_id, $elements_data );
@@ -426,7 +426,7 @@ class Full_Elementor_MCP_Template_Abilities {
 		}
 
 		// Create the template post.
-		$post_id = wp_insert_post(
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'  => $title,
 				'post_status' => 'publish',
@@ -443,7 +443,7 @@ class Full_Elementor_MCP_Template_Abilities {
 			return $post_id;
 		}
 
-		wp_set_object_terms( $post_id, $template_type, 'elementor_library_type' );
+		Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, $template_type, 'elementor_library_type' );
 
 		// Initialize with empty Elementor data.
 		$this->data->save_page_data( $post_id, array() );
@@ -514,7 +514,7 @@ class Full_Elementor_MCP_Template_Abilities {
 			}
 		}
 
-		update_post_meta( $post_id, '_elementor_conditions', $formatted );
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $formatted );
 
 		// Bust Elementor Pro's modern Theme Builder conditions cache. The old
 		// `elementor_pro_theme_builder_conditions` option key was removed in
@@ -752,7 +752,7 @@ class Full_Elementor_MCP_Template_Abilities {
 			return new \WP_Error( 'missing_params', __( 'title is required.', 'full-elementor-mcp' ) );
 		}
 
-		$post_id = wp_insert_post(
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post(
 			array(
 				'post_title'  => $title,
 				'post_status' => 'publish',
@@ -769,7 +769,7 @@ class Full_Elementor_MCP_Template_Abilities {
 			return $post_id;
 		}
 
-		wp_set_object_terms( $post_id, 'popup', 'elementor_library_type' );
+		Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, 'popup', 'elementor_library_type' );
 		$this->data->save_page_data( $post_id, array() );
 
 		return array(
@@ -874,7 +874,7 @@ class Full_Elementor_MCP_Template_Abilities {
 					$formatted[] = $condition;
 				}
 			}
-			update_post_meta( $post_id, '_elementor_conditions', $formatted );
+			Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $formatted );
 
 			delete_transient( 'elementor_theme_builder_conditions_cache' );
 			delete_option( 'elementor_pro_theme_builder_conditions' );
@@ -930,7 +930,7 @@ class Full_Elementor_MCP_Template_Abilities {
 
 	public function execute_delete_template( $input ) {
 		$template_id = absint( $input['template_id'] ?? 0 );
-		$force       = ! empty( $input['force'] );
+		$force       = true === ( $input['force'] ?? false );
 
 		if ( ! $template_id ) {
 			return new \WP_Error( 'missing_template_id', __( 'The template_id parameter is required.', 'full-elementor-mcp' ) );
@@ -948,10 +948,10 @@ class Full_Elementor_MCP_Template_Abilities {
 			);
 		}
 
-		$result = wp_delete_post( $template_id, $force );
+		$result = Full_Elementor_MCP_Safe_Writes::delete_post( $template_id, $force );
 
-		if ( false === $result || null === $result ) {
-			return new \WP_Error( 'delete_failed', __( 'Failed to delete the template.', 'full-elementor-mcp' ) );
+		if ( false === $result || null === $result || is_wp_error( $result ) ) {
+			return is_wp_error( $result ) ? $result : new \WP_Error( 'delete_failed', __( 'Failed to delete the template.', 'full-elementor-mcp' ) );
 		}
 
 		return array( 'success' => true );
@@ -1119,16 +1119,16 @@ class Full_Elementor_MCP_Template_Abilities {
 		$remove = $input['conditions'] ?? null;
 
 		if ( null === $remove ) {
-			delete_post_meta( $post_id, '_elementor_conditions' );
+			Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
 			$remaining = array();
 		} else {
 			$remove    = array_map( 'sanitize_text_field', (array) $remove );
 			$existing  = (array) get_post_meta( $post_id, '_elementor_conditions', true );
 			$remaining = array_values( array_diff( $existing, $remove ) );
 			if ( empty( $remaining ) ) {
-				delete_post_meta( $post_id, '_elementor_conditions' );
+				Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
 			} else {
-				update_post_meta( $post_id, '_elementor_conditions', $remaining );
+				Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $remaining );
 			}
 		}
 

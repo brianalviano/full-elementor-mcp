@@ -187,6 +187,11 @@ class Full_Elementor_MCP_Global_Abilities {
 			}
 		}
 
+		$guard = Full_Elementor_MCP_Safe_Writes::assert_write_boundary( 'global:elementor-kit-state' );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		$kit->update_settings( array( 'custom_colors' => $existing_colors ) );
 
 		return array( 'success' => true );
@@ -334,6 +339,11 @@ class Full_Elementor_MCP_Global_Abilities {
 			}
 		}
 
+		$guard = Full_Elementor_MCP_Safe_Writes::assert_write_boundary( 'global:elementor-kit-state' );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		$kit->update_settings( array( 'custom_typography' => $existing_typo ) );
 
 		return array( 'success' => true );
@@ -461,7 +471,10 @@ class Full_Elementor_MCP_Global_Abilities {
 			return new \WP_Error( 'not_a_kit', __( 'Post is not an Elementor kit.', 'full-elementor-mcp' ) );
 		}
 
-		update_option( 'elementor_active_kit', $kit_id );
+		$opt_res = Full_Elementor_MCP_Safe_Writes::update_option( 'elementor_active_kit', $kit_id );
+		if ( is_wp_error( $opt_res ) ) {
+			return $opt_res;
+		}
 
 		// Clear Elementor's CSS cache so new globals take effect.
 		if ( class_exists( '\\Elementor\\Plugin' ) && isset( \Elementor\Plugin::$instance->files_manager ) ) {

@@ -104,9 +104,13 @@ function full_elementor_mcp_register_ability( string $name, array $args ) {
 		$args['output_schema'] = full_elementor_mcp_sanitize_schema( $args['output_schema'] );
 	}
 	// Phase 4: Route ability execution through central safety middleware:
-	if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
-		$args = Full_Elementor_MCP_Mutation_Middleware::wrap_ability( $name, $args );
+	if ( ! class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
+		return new \WP_Error(
+			'safety_middleware_missing',
+			__( 'Central safety middleware unavailable. Ability registration rejected.', 'full-elementor-mcp' )
+		);
 	}
+	$args = Full_Elementor_MCP_Mutation_Middleware::wrap_ability( $name, $args );
 	return wp_register_ability( $name, $args );
 }
 
@@ -211,6 +215,7 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-registry.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-journal.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-context.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-safe-writes.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-confirmation-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-idempotency-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-middleware.php';
@@ -255,6 +260,28 @@ function full_elementor_mcp_init(): void {
 					'unexpected_script_shutdown',
 					(int) ( $ctx['fencing_token'] ?? 0 )
 				);
+			}
+			if ( ! empty( $ctx['idempotency_key'] ) && class_exists( 'Full_Elementor_MCP_Idempotency_Manager' ) && ! empty( $ctx['owner_id'] ) && class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
+				$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key(
+					(string) $ctx['idempotency_key'],
+					(string) ( $ctx['ability'] ?? '' ),
+					(int) ( $ctx['user_id'] ?? 0 ),
+					$ctx['credential_uuid'] ?? null
+				);
+				if ( ! empty( $ctx['write_started'] ) ) {
+					Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required(
+						$token_key,
+						(string) $ctx['owner_id'],
+						(int) ( $ctx['journal_id'] ?? 0 ),
+						'unexpected_script_shutdown'
+					);
+				} else {
+					Full_Elementor_MCP_Idempotency_Manager::fail_safe(
+						$token_key,
+						(string) $ctx['owner_id'],
+						'unexpected_script_shutdown'
+					);
+				}
 			}
 			Full_Elementor_MCP_Mutation_Context::reset();
 		}
