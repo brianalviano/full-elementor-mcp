@@ -544,7 +544,33 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		// 17.5. Durable Encrypted Checkpoint Policy Gate:
 		$checkpoint_info = null;
+		if ( defined( 'FULL_ELEMENTOR_MCP_PHASE5_ACTIVE' ) && ! class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+			Full_Elementor_MCP_Journal::mark_failed( $journal_id, 'checkpoint_infrastructure_unavailable', $fencing_token );
+			Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+			if ( $idemp_token_key ) {
+				Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'checkpoint_infrastructure_unavailable' );
+			}
+			return new \WP_Error(
+				'checkpoint_infrastructure_unavailable',
+				__( 'Fatal safety error: checkpoint subsystem is unavailable for required checkpoint mutation.', 'full-elementor-mcp' ),
+				array( 'ability' => $ability )
+			);
+		}
+
 		if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+			if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Crypto' ) || ! class_exists( 'Full_Elementor_MCP_Checkpoint_Strategies' ) ) {
+				Full_Elementor_MCP_Journal::mark_failed( $journal_id, 'checkpoint_infrastructure_unavailable', $fencing_token );
+				Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+				if ( $idemp_token_key ) {
+					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'checkpoint_infrastructure_unavailable' );
+				}
+				return new \WP_Error(
+					'checkpoint_infrastructure_unavailable',
+					__( 'Fatal safety error: checkpoint subsystem is unavailable for required checkpoint mutation.', 'full-elementor-mcp' ),
+					array( 'ability' => $ability )
+				);
+			}
+
 			$checkpoint_req   = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint_requirement( $ability, $input, $strategy );
 			$caller_requested = ! empty( $input['create_checkpoint'] ) || ! empty( $input['_safety']['create_checkpoint'] );
 
@@ -555,7 +581,6 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				$chk_meta = array(
 					'source_ability'      => $ability,
 					'source_journal_id'   => $journal_id,
-					'state'               => $before_state,
 					'user_id'             => $user_id,
 					'credential_uuid'     => $cred_uuid,
 					'is_permanent_delete' => ! empty( $security_profile['irreversible'] ),

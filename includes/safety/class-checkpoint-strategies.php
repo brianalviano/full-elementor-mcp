@@ -76,7 +76,7 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 	 * @return string CAPABILITY_EXACT, CAPABILITY_RECOVERY_ONLY, or CAPABILITY_UNSUPPORTED.
 	 */
 	public static function get_restore_capability( string $resource_key, ?string $checkpoint_type = null, array $context = array() ): string {
-		if ( 'recovery' === $checkpoint_type || ! empty( $context['is_permanent_delete'] ) ) {
+		if ( 'recovery' === $checkpoint_type || 'recovery_only' === $checkpoint_type || ! empty( $context['is_permanent_delete'] ) || ( $context['restore_capability'] ?? '' ) === self::CAPABILITY_RECOVERY_ONLY ) {
 			return self::CAPABILITY_RECOVERY_ONLY;
 		}
 
@@ -86,6 +86,113 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 		}
 
 		return self::CAPABILITY_UNSUPPORTED;
+	}
+
+	/**
+	 * Validates state array against the resolved strategy schema.
+	 *
+	 * @param string               $resource_key Target canonical resource key.
+	 * @param array<string, mixed> $state        Captured state to validate.
+	 * @return true|\WP_Error
+	 */
+	public static function validate_state_schema( string $resource_key, array $state ) {
+		$strategy = self::resolve_strategy( $resource_key );
+		if ( empty( $strategy ) ) {
+			return new \WP_Error(
+				'checkpoint_strategy_missing',
+				sprintf(
+					/* translators: %s: resource key */
+					__( 'No checkpoint strategy available for resource "%s".', 'full-elementor-mcp' ),
+					$resource_key
+				),
+				array( 'resource_key' => $resource_key )
+			);
+		}
+
+		if ( empty( $state['strategy'] ) ) {
+			return new \WP_Error(
+				'checkpoint_state_schema_invalid',
+				__( 'Checkpoint payload missing strategy identifier.', 'full-elementor-mcp' )
+			);
+		}
+
+		if ( $state['strategy'] !== $strategy ) {
+			return new \WP_Error(
+				'checkpoint_resource_mismatch',
+				sprintf(
+					/* translators: 1: expected strategy, 2: actual strategy */
+					__( 'Checkpoint strategy mismatch: expected "%1$s" but payload strategy was "%2$s".', 'full-elementor-mcp' ),
+					$strategy,
+					$state['strategy']
+				),
+				array(
+					'expected' => $strategy,
+					'actual'   => $state['strategy'],
+				)
+			);
+		}
+
+		if ( self::STRATEGY_POST === $strategy ) {
+			$expected_post_id = (int) substr( $resource_key, 5 );
+			if ( (int) ( $state['post_id'] ?? 0 ) !== $expected_post_id ) {
+				return new \WP_Error(
+					'checkpoint_resource_mismatch',
+					sprintf(
+						/* translators: 1: payload post ID, 2: expected post ID */
+						__( 'Checkpoint payload post_id %1$d does not match resource_key post ID %2$d.', 'full-elementor-mcp' ),
+						(int) ( $state['post_id'] ?? 0 ),
+						$expected_post_id
+					)
+				);
+			}
+
+			if ( ! isset( $state['post_fields'] ) || ! is_array( $state['post_fields'] ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Post checkpoint missing post_fields array.', 'full-elementor-mcp' ) );
+			}
+
+			if ( ! isset( $state['elementor'] ) || ! is_array( $state['elementor'] ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Post checkpoint missing elementor structure.', 'full-elementor-mcp' ) );
+			}
+
+			if ( ! isset( $state['elementor']['data'] ) || ! is_array( $state['elementor']['data'] ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Post checkpoint missing elementor.data list.', 'full-elementor-mcp' ) );
+			}
+
+			if ( ! array_key_exists( 'featured_image', $state ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Post checkpoint missing featured_image field.', 'full-elementor-mcp' ) );
+			}
+
+			if ( ! isset( $state['terms'] ) || ! is_array( $state['terms'] ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Post checkpoint missing terms map.', 'full-elementor-mcp' ) );
+			}
+		} elseif ( self::STRATEGY_SNIPPET === $strategy ) {
+			$expected_post_id = (int) substr( $resource_key, 5 );
+			if ( (int) ( $state['post_id'] ?? 0 ) !== $expected_post_id ) {
+				return new \WP_Error(
+					'checkpoint_resource_mismatch',
+					sprintf(
+						/* translators: 1: payload post ID, 2: expected post ID */
+						__( 'Snippet payload post_id %1$d does not match resource_key post ID %2$d.', 'full-elementor-mcp' ),
+						(int) ( $state['post_id'] ?? 0 ),
+						$expected_post_id
+					)
+				);
+			}
+
+			if ( ! isset( $state['post_title'] ) || ! isset( $state['code'] ) || ! isset( $state['location'] ) || ! isset( $state['priority'] ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Snippet checkpoint missing required snippet fields.', 'full-elementor-mcp' ) );
+			}
+		} elseif ( self::STRATEGY_GLOBAL === $strategy ) {
+			if ( ! array_key_exists( 'active_kit_id', $state ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Global checkpoint missing active_kit_id field.', 'full-elementor-mcp' ) );
+			}
+
+			if ( ! isset( $state['kit_settings'] ) || ! is_array( $state['kit_settings'] ) ) {
+				return new \WP_Error( 'checkpoint_state_schema_invalid', __( 'Global checkpoint missing kit_settings array.', 'full-elementor-mcp' ) );
+			}
+		}
+
+		return true;
 	}
 
 	/**
@@ -195,56 +302,108 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			'post_password'  => (string) ( $post->post_password ?? '' ),
 		);
 
-		// 2. Elementor data & settings:
+		// 2. Elementor data & settings (fails closed on malformed storage):
 		$raw_data = get_post_meta( $post_id, '_elementor_data', true );
 		if ( is_string( $raw_data ) && '' !== trim( $raw_data ) ) {
-			$elements = json_decode( $raw_data, true );
+			try {
+				$elements = json_decode( $raw_data, true, 512, JSON_THROW_ON_ERROR );
+			} catch ( \Throwable $e ) {
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					sprintf(
+						/* translators: %s: error message */
+						__( 'Malformed JSON in _elementor_data storage: %s', 'full-elementor-mcp' ),
+						$e->getMessage()
+					),
+					array( 'post_id' => $post_id )
+				);
+			}
 			if ( ! is_array( $elements ) ) {
-				$elements = array();
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					__( '_elementor_data JSON must decode to an array list.', 'full-elementor-mcp' ),
+					array( 'post_id' => $post_id )
+				);
+			}
+			if ( ! empty( $elements ) && array_keys( $elements ) !== range( 0, count( $elements ) - 1 ) ) {
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					__( '_elementor_data elements root must be a list of elements, not an associative object.', 'full-elementor-mcp' ),
+					array( 'post_id' => $post_id )
+				);
 			}
 		} elseif ( is_array( $raw_data ) ) {
+			if ( ! empty( $raw_data ) && array_keys( $raw_data ) !== range( 0, count( $raw_data ) - 1 ) ) {
+				return new \WP_Error(
+					'checkpoint_capture_failed',
+					__( '_elementor_data elements root must be a list of elements, not an associative object.', 'full-elementor-mcp' ),
+					array( 'post_id' => $post_id )
+				);
+			}
 			$elements = $raw_data;
-		} else {
+		} elseif ( empty( $raw_data ) ) {
 			$elements = array();
+		} else {
+			return new \WP_Error(
+				'checkpoint_capture_failed',
+				__( 'Invalid type for _elementor_data storage.', 'full-elementor-mcp' ),
+				array( 'post_id' => $post_id )
+			);
 		}
 
-		$raw_settings = get_post_meta( $post_id, '_elementor_page_settings', true );
+		$raw_settings  = get_post_meta( $post_id, '_elementor_page_settings', true );
 		$page_settings = is_array( $raw_settings ) ? $raw_settings : array();
 
-		$elementor_meta = array(
-			'data'           => $elements,
-			'page_settings'  => $page_settings,
-			'edit_mode'      => (string) get_post_meta( $post_id, '_elementor_edit_mode', true ),
-			'template_type'  => (string) get_post_meta( $post_id, '_elementor_template_type', true ),
-			'version'        => (string) get_post_meta( $post_id, '_elementor_version', true ),
-			'pro_version'    => (string) get_post_meta( $post_id, '_elementor_pro_version', true ),
-			'conditions'     => get_post_meta( $post_id, '_elementor_conditions', true ),
-			'popup_display'  => get_post_meta( $post_id, '_elementor_popup_display', true ),
-			'page_template'  => (string) get_post_meta( $post_id, '_wp_page_template', true ),
+		// 3. Relevant Elementor meta keys with explicit existence semantics:
+		$tracked_meta_keys = array(
+			'_elementor_edit_mode',
+			'_elementor_template_type',
+			'_elementor_version',
+			'_elementor_pro_version',
+			'_elementor_conditions',
+			'_elementor_popup_display',
+			'_wp_page_template',
 		);
 
-		// 3. Featured Image attachment:
+		$meta_entries = array();
+		foreach ( $tracked_meta_keys as $m_key ) {
+			$exists = function_exists( 'metadata_exists' ) ? metadata_exists( 'post', $post_id, $m_key ) : false;
+			$val    = $exists ? get_post_meta( $post_id, $m_key, true ) : null;
+			$meta_entries[ $m_key ] = array(
+				'exists' => (bool) $exists,
+				'value'  => $val,
+			);
+		}
+
+		$elementor_meta = array(
+			'data'          => $elements,
+			'page_settings' => $page_settings,
+			'meta'          => $meta_entries,
+		);
+
+		// 4. Featured Image attachment:
 		$thumb_id = (int) get_post_meta( $post_id, '_thumbnail_id', true );
 
-		// 4. Relevant terms (taxonomies):
+		// 5. Relevant terms (taxonomies) with explicit empty list tracking:
 		$terms_map = array();
 		if ( function_exists( 'wp_get_object_terms' ) ) {
-			$taxonomies = array( 'elementor_library_type', 'category', 'post_tag' );
+			$taxonomies = array( 'elementor_library_type', 'elementor_library_category', 'category', 'post_tag' );
 			foreach ( $taxonomies as $tax ) {
-				$terms = wp_get_object_terms( $post_id, $tax, array( 'fields' => 'slugs' ) );
-				if ( ! is_wp_error( $terms ) && ! empty( $terms ) ) {
-					$terms_map[ $tax ] = array_values( (array) $terms );
+				if ( function_exists( 'taxonomy_exists' ) && ! taxonomy_exists( $tax ) ) {
+					continue;
 				}
+				$terms = wp_get_object_terms( $post_id, $tax, array( 'fields' => 'slugs' ) );
+				$terms_map[ $tax ] = ( ! is_wp_error( $terms ) && is_array( $terms ) ) ? array_values( (array) $terms ) : array();
 			}
 		}
 
 		return array(
-			'strategy'        => self::STRATEGY_POST,
-			'post_id'         => $post_id,
-			'post_fields'     => $post_fields,
-			'elementor'       => $elementor_meta,
-			'featured_image'  => $thumb_id,
-			'terms'           => $terms_map,
+			'strategy'       => self::STRATEGY_POST,
+			'post_id'        => $post_id,
+			'post_fields'    => $post_fields,
+			'elementor'      => $elementor_meta,
+			'featured_image' => $thumb_id,
+			'terms'          => $terms_map,
 		);
 	}
 
@@ -283,40 +442,17 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			return $settings_res;
 		}
 
-		// 4. Restore Elementor flags and metadata:
-		$el_meta = $state['elementor'] ?? array();
-		if ( isset( $el_meta['edit_mode'] ) && '' !== $el_meta['edit_mode'] ) {
-			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_edit_mode', $el_meta['edit_mode'] );
-			if ( is_wp_error( $res ) ) {
-				return $res;
-			}
-		}
-
-		if ( isset( $el_meta['template_type'] ) && '' !== $el_meta['template_type'] ) {
-			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_template_type', $el_meta['template_type'] );
-			if ( is_wp_error( $res ) ) {
-				return $res;
-			}
-		}
-
-		if ( isset( $el_meta['page_template'] ) && '' !== $el_meta['page_template'] ) {
-			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_wp_page_template', $el_meta['page_template'] );
-			if ( is_wp_error( $res ) ) {
-				return $res;
-			}
-		}
-
-		if ( isset( $el_meta['conditions'] ) ) {
-			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $el_meta['conditions'] );
-			if ( is_wp_error( $res ) ) {
-				return $res;
-			}
-		}
-
-		if ( isset( $el_meta['popup_display'] ) ) {
-			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_popup_display', $el_meta['popup_display'] );
-			if ( is_wp_error( $res ) ) {
-				return $res;
+		// 4. Restore tracked Elementor metadata preserving exact existence semantics:
+		if ( isset( $state['elementor']['meta'] ) && is_array( $state['elementor']['meta'] ) ) {
+			foreach ( $state['elementor']['meta'] as $m_key => $entry ) {
+				if ( ! empty( $entry['exists'] ) ) {
+					$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, $m_key, $entry['value'] );
+				} else {
+					$res = Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, $m_key );
+				}
+				if ( is_wp_error( $res ) ) {
+					return $res;
+				}
 			}
 		}
 
@@ -334,8 +470,8 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			}
 		}
 
-		// 6. Restore terms:
-		if ( ! empty( $state['terms'] ) && is_array( $state['terms'] ) ) {
+		// 6. Restore terms (taxonomies) symmetrically:
+		if ( isset( $state['terms'] ) && is_array( $state['terms'] ) ) {
 			foreach ( $state['terms'] as $tax => $slugs ) {
 				$term_res = Full_Elementor_MCP_Safe_Writes::set_object_terms( $post_id, (array) $slugs, $tax );
 				if ( is_wp_error( $term_res ) ) {
@@ -363,15 +499,25 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			return new \WP_Error( 'checkpoint_capture_failed', __( 'Snippet post not found.', 'full-elementor-mcp' ), array( 'post_id' => $post_id ) );
 		}
 
+		$conditions_exists = function_exists( 'metadata_exists' ) ? metadata_exists( 'post', $post_id, '_elementor_conditions' ) : false;
+		$extra_exists      = function_exists( 'metadata_exists' ) ? metadata_exists( 'post', $post_id, '_elementor_extra_options' ) : false;
+
 		return array(
-			'strategy'        => self::STRATEGY_SNIPPET,
-			'post_id'         => $post_id,
-			'post_title'      => (string) ( $post->post_title ?? '' ),
-			'post_status'     => (string) ( $post->post_status ?? 'publish' ),
-			'code'            => (string) get_post_meta( $post_id, '_elementor_code', true ),
-			'location'        => (string) get_post_meta( $post_id, '_elementor_location', true ),
-			'priority'        => (int) get_post_meta( $post_id, '_elementor_priority', true ),
-			'conditions'      => get_post_meta( $post_id, '_elementor_conditions', true ),
+			'strategy'      => self::STRATEGY_SNIPPET,
+			'post_id'       => $post_id,
+			'post_title'    => (string) ( $post->post_title ?? '' ),
+			'post_status'   => (string) ( $post->post_status ?? 'publish' ),
+			'code'          => (string) get_post_meta( $post_id, '_elementor_code', true ),
+			'location'      => (string) get_post_meta( $post_id, '_elementor_location', true ),
+			'priority'      => (int) get_post_meta( $post_id, '_elementor_priority', true ),
+			'conditions'    => array(
+				'exists' => (bool) $conditions_exists,
+				'value'  => $conditions_exists ? get_post_meta( $post_id, '_elementor_conditions', true ) : null,
+			),
+			'extra_options' => array(
+				'exists' => (bool) $extra_exists,
+				'value'  => $extra_exists ? get_post_meta( $post_id, '_elementor_extra_options', true ) : null,
+			),
 		);
 	}
 
@@ -410,8 +556,25 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			return $res;
 		}
 
-		if ( isset( $state['conditions'] ) ) {
-			$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $state['conditions'] );
+		// Conditions with existence semantics:
+		if ( isset( $state['conditions'] ) && is_array( $state['conditions'] ) ) {
+			if ( ! empty( $state['conditions']['exists'] ) ) {
+				$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_conditions', $state['conditions']['value'] );
+			} else {
+				$res = Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_conditions' );
+			}
+			if ( is_wp_error( $res ) ) {
+				return $res;
+			}
+		}
+
+		// Extra options (ensure_jquery, etc.) with existence semantics:
+		if ( isset( $state['extra_options'] ) && is_array( $state['extra_options'] ) ) {
+			if ( ! empty( $state['extra_options']['exists'] ) ) {
+				$res = Full_Elementor_MCP_Safe_Writes::update_post_meta( $post_id, '_elementor_extra_options', $state['extra_options']['value'] );
+			} else {
+				$res = Full_Elementor_MCP_Safe_Writes::delete_post_meta( $post_id, '_elementor_extra_options' );
+			}
 			if ( is_wp_error( $res ) ) {
 				return $res;
 			}
@@ -447,10 +610,10 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 		}
 
 		return array(
-			'strategy'       => self::STRATEGY_GLOBAL,
-			'active_kit_id'  => $active_kit_id,
-			'kit_post'       => $kit_post,
-			'kit_settings'   => $kit_settings,
+			'strategy'      => self::STRATEGY_GLOBAL,
+			'active_kit_id' => $active_kit_id,
+			'kit_post'      => $kit_post,
+			'kit_settings'  => $kit_settings,
 		);
 	}
 
@@ -466,19 +629,22 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 		$target_kit_id  = (int) ( $state['active_kit_id'] ?? 0 );
 		$current_kit_id = (int) get_option( 'elementor_active_kit', 0 );
 
-		if ( $target_kit_id > 0 && $target_kit_id !== $current_kit_id ) {
+		// Always restore active kit option, even when target is 0:
+		if ( $target_kit_id !== $current_kit_id ) {
 			$opt_res = Full_Elementor_MCP_Safe_Writes::update_option( 'elementor_active_kit', $target_kit_id );
 			if ( is_wp_error( $opt_res ) ) {
 				return $opt_res;
 			}
 		}
 
-		if ( $target_kit_id > 0 && ! empty( $state['kit_settings'] ) ) {
+		if ( $target_kit_id > 0 ) {
 			$guard = Full_Elementor_MCP_Safe_Writes::assert_write_boundary( 'global:elementor-kit-state' );
 			if ( is_wp_error( $guard ) ) {
 				return $guard;
 			}
-			update_post_meta( $target_kit_id, '_elementor_page_settings', (array) $state['kit_settings'] );
+			// Write settings even when empty array:
+			$kit_settings = isset( $state['kit_settings'] ) && is_array( $state['kit_settings'] ) ? $state['kit_settings'] : array();
+			update_post_meta( $target_kit_id, '_elementor_page_settings', $kit_settings );
 			Full_Elementor_MCP_Mutation_Context::increment_write_count();
 		}
 

@@ -178,6 +178,19 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			return $salt_key;
 		}
 
+		// If key starts with wp_salt_, return explicit rotation error:
+		if ( str_starts_with( $key_id, 'wp_salt_' ) ) {
+			return new \WP_Error(
+				'checkpoint_key_rotated',
+				sprintf(
+					/* translators: %s: key ID */
+					__( 'WordPress salts have rotated since checkpoint was created. Key "%s" is no longer available.', 'full-elementor-mcp' ),
+					$key_id
+				),
+				array( 'key_id' => $key_id )
+			);
+		}
+
 		return new \WP_Error(
 			'checkpoint_key_unavailable',
 			sprintf(
@@ -220,8 +233,11 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			);
 		}
 
+		$fingerprint = substr( hash_hmac( 'sha256', 'salt_fingerprint', $raw_key ), 0, 16 );
+		$key_id      = 'wp_salt_v1_' . $fingerprint;
+
 		return array(
-			'key_id'  => 'wp_salt_v1',
+			'key_id'  => $key_id,
 			'version' => 1,
 			'raw_key' => $raw_key,
 		);
@@ -264,12 +280,14 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 	 */
 	public static function build_aad( array $meta ): string {
 		$bound_fields = array(
+			'checkpoint_type'        => (string) ( $meta['checkpoint_type'] ?? 'automatic' ),
 			'checkpoint_uuid'        => (string) ( $meta['checkpoint_uuid'] ?? '' ),
 			'encryption_algorithm'   => (string) ( $meta['encryption_algorithm'] ?? '' ),
 			'key_id'                 => (string) ( $meta['key_id'] ?? '' ),
 			'key_version'            => (int) ( $meta['key_version'] ?? 1 ),
 			'payload_schema_version' => (int) ( $meta['payload_schema_version'] ?? 1 ),
 			'resource_key'           => (string) ( $meta['resource_key'] ?? '' ),
+			'restore_capability'     => (string) ( $meta['restore_capability'] ?? 'exact' ),
 		);
 
 		ksort( $bound_fields );
@@ -486,10 +504,44 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			return new \WP_Error( 'checkpoint_integrity_failed', __( 'Checkpoint payload or nonce is missing.', 'full-elementor-mcp' ) );
 		}
 
+		// 0. Enforce supported payload schema version (only v1 supported currently):
+		$schema_version = (int) ( $row['payload_schema_version'] ?? 1 );
+		if ( 1 !== $schema_version ) {
+			return new \WP_Error(
+				'checkpoint_schema_unsupported',
+				sprintf(
+					/* translators: %d: schema version */
+					__( 'Unsupported checkpoint payload schema version: %d.', 'full-elementor-mcp' ),
+					$schema_version
+				),
+				array( 'payload_schema_version' => $schema_version )
+			);
+		}
+
 		// 1. Resolve decryption key:
 		$key_info = self::get_key_by_id( $key_id );
 		if ( is_wp_error( $key_info ) ) {
 			return $key_info;
+		}
+
+		// Validate key version consistency:
+		$expected_version = (int) ( $row['key_version'] ?? 1 );
+		if ( (int) $key_info['version'] !== $expected_version ) {
+			return new \WP_Error(
+				'checkpoint_key_version_mismatch',
+				sprintf(
+					/* translators: 1: expected version, 2: key ID, 3: actual version */
+					__( 'Key version mismatch: checkpoint requires version %1$d but key "%2$s" is version %3$d.', 'full-elementor-mcp' ),
+					$expected_version,
+					$key_id,
+					$key_info['version']
+				),
+				array(
+					'key_id'           => $key_id,
+					'expected_version' => $expected_version,
+					'actual_version'   => $key_info['version'],
+				)
+			);
 		}
 
 		// 2. Decode binary ciphertext and nonce:
@@ -502,12 +554,14 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 
 		// 3. Build expected AAD from row metadata:
 		$aad = self::build_aad( array(
+			'checkpoint_type'        => $row['checkpoint_type'] ?? 'automatic',
 			'checkpoint_uuid'        => $row['checkpoint_uuid'] ?? '',
 			'encryption_algorithm'   => $algo,
 			'key_id'                 => $key_id,
 			'key_version'            => (int) ( $row['key_version'] ?? 1 ),
-			'payload_schema_version' => (int) ( $row['payload_schema_version'] ?? 1 ),
+			'payload_schema_version' => $schema_version,
 			'resource_key'           => $row['resource_key'] ?? '',
+			'restore_capability'     => $row['restore_capability'] ?? 'exact',
 		) );
 
 		// 4. Perform authenticated decryption:
