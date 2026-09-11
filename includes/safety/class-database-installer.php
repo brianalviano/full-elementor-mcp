@@ -28,7 +28,7 @@ class Full_Elementor_MCP_Database_Installer {
 	 *
 	 * 1.1.0: Phase 5 encrypted checkpoints and restore engine schema extensions.
 	 */
-	public const DB_VERSION = '1.1.0';
+	public const DB_VERSION = '1.2.0';
 
 	/**
 	 * Option key storing installed schema version.
@@ -126,6 +126,7 @@ class Full_Elementor_MCP_Database_Installer {
 				checkpoint_type varchar(30) NOT NULL default 'automatic',
 				restore_capability varchar(30) NOT NULL default 'exact',
 				payload_schema_version int(10) unsigned NOT NULL default 1,
+				crypto_envelope_version int(10) unsigned NOT NULL default 1,
 				encryption_algorithm varchar(30) NOT NULL default 'none',
 				key_version int(10) unsigned NOT NULL default 1,
 				key_id varchar(64) default NULL,
@@ -229,6 +230,9 @@ class Full_Elementor_MCP_Database_Installer {
 		// Ensure any missing columns from expected schema are added via ALTER TABLE migration:
 		self::ensure_missing_columns();
 
+		// Migrate existing checkpoint records and enforce checkpoint_uuid single-column uniqueness:
+		self::migrate_checkpoint_uuids_and_unique_constraint();
+
 		// Verify that all 4 required tables, columns, indexes, and unique constraints exist!
 		if ( ! self::verify_schema() ) {
 			return false;
@@ -250,23 +254,24 @@ class Full_Elementor_MCP_Database_Installer {
 		global $wpdb;
 
 		$col_defs = array(
-			'checkpoint_uuid'        => "varchar(64) NOT NULL default ''",
-			'resource_key'           => "varchar(128) NOT NULL default ''",
-			'object_type'            => "varchar(30) NOT NULL default ''",
-			'object_id'              => "bigint(20) unsigned NOT NULL default 0",
-			'checkpoint_type'        => "varchar(30) NOT NULL default 'automatic'",
-			'restore_capability'     => "varchar(30) NOT NULL default 'exact'",
-			'payload_schema_version' => "int(10) unsigned NOT NULL default 1",
-			'nonce'                  => "varchar(64) NOT NULL default ''",
-			'auth_tag'               => "varchar(64) default NULL",
-			'encrypted_payload'      => "longtext default NULL",
-			'state_hash'             => "varchar(64) NOT NULL default ''",
-			'compression_algorithm'  => "varchar(20) default 'none'",
-			'source_ability'         => "varchar(100) default NULL",
-			'source_journal_id'      => "bigint(20) unsigned default NULL",
-			'credential_uuid'        => "varchar(64) default NULL",
-			'is_pinned'              => "tinyint(1) NOT NULL default 0",
-			'rollback_supported'     => "tinyint(1) NOT NULL default 0",
+			'checkpoint_uuid'         => "varchar(64) NOT NULL default ''",
+			'resource_key'            => "varchar(128) NOT NULL default ''",
+			'object_type'             => "varchar(30) NOT NULL default ''",
+			'object_id'               => "bigint(20) unsigned NOT NULL default 0",
+			'checkpoint_type'         => "varchar(30) NOT NULL default 'automatic'",
+			'restore_capability'      => "varchar(30) NOT NULL default 'exact'",
+			'payload_schema_version'  => "int(10) unsigned NOT NULL default 1",
+			'crypto_envelope_version' => "int(10) unsigned NOT NULL default 1",
+			'nonce'                   => "varchar(64) NOT NULL default ''",
+			'auth_tag'                => "varchar(64) default NULL",
+			'encrypted_payload'       => "longtext default NULL",
+			'state_hash'              => "varchar(64) NOT NULL default ''",
+			'compression_algorithm'   => "varchar(20) default 'none'",
+			'source_ability'          => "varchar(100) default NULL",
+			'source_journal_id'       => "bigint(20) unsigned default NULL",
+			'credential_uuid'         => "varchar(64) default NULL",
+			'is_pinned'               => "tinyint(1) NOT NULL default 0",
+			'rollback_supported'      => "tinyint(1) NOT NULL default 0",
 		);
 
 		$expected = self::get_expected_schema();
@@ -283,10 +288,80 @@ class Full_Elementor_MCP_Database_Installer {
 				}
 			}
 		}
+	}
 
-		// Ensure checkpoint_uuid has a UNIQUE constraint:
+	/**
+	 * Migrates existing checkpoint records and ensures checkpoint_uuid has a single-column UNIQUE guarantee.
+	 *
+	 * 1. Inspects existing checkpoint rows.
+	 * 2. Assigns a unique server-generated UUID to any blank or duplicate checkpoint UUIDs.
+	 * 3. Preserves all checkpoint payload and metadata (never deletes rows).
+	 * 4. Removes/replaces conflicting old non-unique index if needed.
+	 * 5. Creates a true single-column UNIQUE index on checkpoint_uuid.
+	 */
+	public static function migrate_checkpoint_uuids_and_unique_constraint(): void {
+		global $wpdb;
+
 		$chk_table = self::get_checkpoints_table();
-		if ( in_array( $chk_table, array_keys( $expected ), true ) && ! self::verify_single_column_unique_constraint( $chk_table, 'checkpoint_uuid' ) ) {
+		$cols      = self::get_table_columns( $chk_table );
+		if ( empty( $cols ) ) {
+			return;
+		}
+
+		// 1. Inspect existing rows in checkpoints table:
+		$rows = $wpdb->get_results( "SELECT id, checkpoint_uuid FROM {$chk_table}", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! empty( $rows ) && is_array( $rows ) ) {
+			$seen_uuids = array();
+			foreach ( $rows as $row ) {
+				$row_id = (int) ( $row['id'] ?? 0 );
+				$uuid   = trim( (string) ( $row['checkpoint_uuid'] ?? '' ) );
+
+				$needs_new_uuid = false;
+				if ( '' === $uuid ) {
+					$needs_new_uuid = true;
+				} elseif ( isset( $seen_uuids[ $uuid ] ) ) {
+					$needs_new_uuid = true;
+				}
+
+				if ( $needs_new_uuid ) {
+					do {
+						$new_uuid = function_exists( 'wp_generate_uuid4' )
+							? wp_generate_uuid4()
+							: sprintf(
+								'%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+								mt_rand( 0, 0xffff ),
+								mt_rand( 0, 0xffff ),
+								mt_rand( 0, 0xffff ),
+								mt_rand( 0, 0x0fff ) | 0x4000,
+								mt_rand( 0, 0x3fff ) | 0x8000,
+								mt_rand( 0, 0xffff ),
+								mt_rand( 0, 0xffff ),
+								mt_rand( 0, 0xffff )
+							);
+					} while ( isset( $seen_uuids[ $new_uuid ] ) );
+
+					$seen_uuids[ $new_uuid ] = true;
+					$wpdb->query(
+						$wpdb->prepare(
+							"UPDATE {$chk_table} SET checkpoint_uuid = %s WHERE id = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+							$new_uuid,
+							$row_id
+						)
+					);
+				} else {
+					$seen_uuids[ $uuid ] = true;
+				}
+			}
+		}
+
+		// 2. Ensure single-column uniqueness on checkpoint_uuid:
+		if ( ! self::verify_single_column_unique_constraint( $chk_table, 'checkpoint_uuid' ) ) {
+			// Drop old non-unique index if it exists:
+			@$wpdb->query( "ALTER TABLE {$chk_table} DROP INDEX idx_checkpoint_uuid" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			@$wpdb->query( "DROP INDEX IF EXISTS idx_checkpoint_uuid ON {$chk_table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			@$wpdb->query( "DROP INDEX IF EXISTS {$chk_table}_idx_checkpoint_uuid" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+
+			// Add single-column UNIQUE index:
 			@$wpdb->query( "ALTER TABLE {$chk_table} ADD UNIQUE KEY idx_checkpoint_uuid (checkpoint_uuid)" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			@$wpdb->query( "CREATE UNIQUE INDEX IF NOT EXISTS {$chk_table}_idx_checkpoint_uuid ON {$chk_table}(checkpoint_uuid)" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		}
@@ -364,6 +439,7 @@ class Full_Elementor_MCP_Database_Installer {
 					'checkpoint_type',
 					'restore_capability',
 					'payload_schema_version',
+					'crypto_envelope_version',
 					'encryption_algorithm',
 					'key_version',
 					'key_id',
@@ -390,7 +466,7 @@ class Full_Elementor_MCP_Database_Installer {
 					'idx_resource',
 				),
 				'primary'       => 'id',
-				'single_unique' => 'id',
+				'single_unique' => 'checkpoint_uuid',
 			),
 			// Audit log table: forensic mutation history.
 			self::get_audit_log_table()   => array(

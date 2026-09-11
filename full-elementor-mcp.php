@@ -225,6 +225,9 @@ function full_elementor_mcp_init(): void {
 
 	// Initialize mutation strategies:
 	Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+	if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+		Full_Elementor_MCP_Checkpoint_Manager::ensure_restore_strategy_registered();
+	}
 
 	// Execute runtime schema upgrade check to support in-place updates.
 	// Fail-closed policy: block MCP initialization if safety database cannot be verified.

@@ -174,12 +174,23 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 
 		// Check WP salt fallback key:
 		$salt_key = self::derive_wordpress_salt_key();
-		if ( ! is_wp_error( $salt_key ) && $salt_key['key_id'] === $key_id ) {
-			return $salt_key;
+		if ( ! is_wp_error( $salt_key ) ) {
+			if ( $salt_key['key_id'] === $key_id ) {
+				return $salt_key;
+			}
+			// Legacy Phase 5 key compatibility:
+			// If key_id is 'wp_salt_v1', allow attempting with current salt key material under key_id 'wp_salt_v1'
+			if ( 'wp_salt_v1' === $key_id ) {
+				return array(
+					'key_id'  => 'wp_salt_v1',
+					'version' => 1,
+					'raw_key' => $salt_key['raw_key'],
+				);
+			}
 		}
 
-		// If key starts with wp_salt_, return explicit rotation error:
-		if ( str_starts_with( $key_id, 'wp_salt_' ) ) {
+		// If key starts with wp_salt_ or equals wp_salt_v1, return explicit rotation error:
+		if ( 'wp_salt_v1' === $key_id || str_starts_with( $key_id, 'wp_salt_' ) ) {
 			return new \WP_Error(
 				'checkpoint_key_rotated',
 				sprintf(
@@ -275,20 +286,37 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 	 * Cryptographically binds ciphertext to the checkpoint UUID, resource key, schema version,
 	 * algorithm, and key metadata to prevent row-swapping or metadata tampering.
 	 *
-	 * @param array<string, mixed> $meta Required metadata fields.
+	 * Envelope v1 (legacy Phase 5): binds uuid, algorithm, key_id, key_version, payload_schema_version, resource_key.
+	 * Envelope v2 (current): also binds checkpoint_type and restore_capability.
+	 *
+	 * @param array<string, mixed> $meta             Required metadata fields.
+	 * @param int                  $envelope_version Crypto envelope version (1 or 2).
 	 * @return string Canonical JSON AAD string.
 	 */
-	public static function build_aad( array $meta ): string {
-		$bound_fields = array(
-			'checkpoint_type'        => (string) ( $meta['checkpoint_type'] ?? 'automatic' ),
-			'checkpoint_uuid'        => (string) ( $meta['checkpoint_uuid'] ?? '' ),
-			'encryption_algorithm'   => (string) ( $meta['encryption_algorithm'] ?? '' ),
-			'key_id'                 => (string) ( $meta['key_id'] ?? '' ),
-			'key_version'            => (int) ( $meta['key_version'] ?? 1 ),
-			'payload_schema_version' => (int) ( $meta['payload_schema_version'] ?? 1 ),
-			'resource_key'           => (string) ( $meta['resource_key'] ?? '' ),
-			'restore_capability'     => (string) ( $meta['restore_capability'] ?? 'exact' ),
-		);
+	public static function build_aad( array $meta, int $envelope_version = 2 ): string {
+		if ( 1 === $envelope_version ) {
+			$bound_fields = array(
+				'checkpoint_uuid'        => (string) ( $meta['checkpoint_uuid'] ?? '' ),
+				'encryption_algorithm'   => (string) ( $meta['encryption_algorithm'] ?? '' ),
+				'key_id'                 => (string) ( $meta['key_id'] ?? '' ),
+				'key_version'            => (int) ( $meta['key_version'] ?? 1 ),
+				'payload_schema_version' => (int) ( $meta['payload_schema_version'] ?? 1 ),
+				'resource_key'           => (string) ( $meta['resource_key'] ?? '' ),
+			);
+		} elseif ( 2 === $envelope_version ) {
+			$bound_fields = array(
+				'checkpoint_type'        => (string) ( $meta['checkpoint_type'] ?? 'automatic' ),
+				'checkpoint_uuid'        => (string) ( $meta['checkpoint_uuid'] ?? '' ),
+				'encryption_algorithm'   => (string) ( $meta['encryption_algorithm'] ?? '' ),
+				'key_id'                 => (string) ( $meta['key_id'] ?? '' ),
+				'key_version'            => (int) ( $meta['key_version'] ?? 1 ),
+				'payload_schema_version' => (int) ( $meta['payload_schema_version'] ?? 1 ),
+				'resource_key'           => (string) ( $meta['resource_key'] ?? '' ),
+				'restore_capability'     => (string) ( $meta['restore_capability'] ?? 'exact' ),
+			);
+		} else {
+			return '';
+		}
 
 		ksort( $bound_fields );
 		return (string) wp_json_encode( $bound_fields, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
@@ -424,12 +452,14 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 		}
 
 		// 6. Build immutable AAD:
-		$aad_meta = array_merge( $metadata, array(
-			'encryption_algorithm' => $algo,
-			'key_id'               => $key_info['key_id'],
-			'key_version'          => $key_info['version'],
+		$envelope_version = (int) ( $metadata['crypto_envelope_version'] ?? 2 );
+		$aad_meta         = array_merge( $metadata, array(
+			'encryption_algorithm'    => $algo,
+			'key_id'                  => $key_info['key_id'],
+			'key_version'             => $key_info['version'],
+			'crypto_envelope_version' => $envelope_version,
 		) );
-		$aad = self::build_aad( $aad_meta );
+		$aad = self::build_aad( $aad_meta, $envelope_version );
 
 		// 7. Perform AEAD encryption with cryptographically random nonce:
 		$ciphertext = '';
@@ -473,14 +503,15 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 		}
 
 		return array(
-			'encrypted_payload'    => base64_encode( $ciphertext ),
-			'nonce'                => base64_encode( $nonce ),
-			'auth_tag'             => $auth_tag,
-			'encryption_algorithm' => $algo,
-			'key_id'               => $key_info['key_id'],
-			'key_version'          => $key_info['version'],
-			'state_hash'           => $state_hash,
-			'size_bytes'           => $size_bytes,
+			'encrypted_payload'       => base64_encode( $ciphertext ),
+			'nonce'                   => base64_encode( $nonce ),
+			'auth_tag'                => $auth_tag,
+			'encryption_algorithm'    => $algo,
+			'key_id'                  => $key_info['key_id'],
+			'key_version'             => $key_info['version'],
+			'state_hash'              => $state_hash,
+			'size_bytes'              => $size_bytes,
+			'crypto_envelope_version' => $envelope_version,
 		);
 	}
 
@@ -504,7 +535,21 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			return new \WP_Error( 'checkpoint_integrity_failed', __( 'Checkpoint payload or nonce is missing.', 'full-elementor-mcp' ) );
 		}
 
-		// 0. Enforce supported payload schema version (only v1 supported currently):
+		// 0. Enforce supported crypto envelope version (v1 or v2):
+		$envelope_version = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : 1;
+		if ( 1 !== $envelope_version && 2 !== $envelope_version ) {
+			return new \WP_Error(
+				'checkpoint_envelope_unsupported',
+				sprintf(
+					/* translators: %d: envelope version */
+					__( 'Unsupported checkpoint crypto envelope version: %d.', 'full-elementor-mcp' ),
+					$envelope_version
+				),
+				array( 'crypto_envelope_version' => $envelope_version )
+			);
+		}
+
+		// 0.1. Enforce supported payload schema version (only v1 supported currently):
 		$schema_version = (int) ( $row['payload_schema_version'] ?? 1 );
 		if ( 1 !== $schema_version ) {
 			return new \WP_Error(
@@ -552,7 +597,7 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			return new \WP_Error( 'checkpoint_integrity_failed', __( 'Corrupted base64 encoding in checkpoint payload or nonce.', 'full-elementor-mcp' ) );
 		}
 
-		// 3. Build expected AAD from row metadata:
+		// 3. Build expected AAD from row metadata according to envelope version:
 		$aad = self::build_aad( array(
 			'checkpoint_type'        => $row['checkpoint_type'] ?? 'automatic',
 			'checkpoint_uuid'        => $row['checkpoint_uuid'] ?? '',
@@ -562,7 +607,7 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			'payload_schema_version' => $schema_version,
 			'resource_key'           => $row['resource_key'] ?? '',
 			'restore_capability'     => $row['restore_capability'] ?? 'exact',
-		) );
+		), $envelope_version );
 
 		// 4. Perform authenticated decryption:
 		$plaintext = false;
@@ -579,6 +624,13 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 					$key_info['raw_key']
 				);
 			} catch ( \Throwable $e ) {
+				if ( 'wp_salt_v1' === $key_id && ! isset( self::$keyring['wp_salt_v1'] ) ) {
+					return new \WP_Error(
+						'checkpoint_key_rotated',
+						__( 'WordPress salts have rotated since legacy checkpoint was created. Key "wp_salt_v1" is no longer available.', 'full-elementor-mcp' ),
+						array( 'key_id' => 'wp_salt_v1' )
+					);
+				}
 				return new \WP_Error( 'checkpoint_integrity_failed', __( 'Checkpoint decryption authentication failed.', 'full-elementor-mcp' ) );
 			}
 		} elseif ( self::ALGO_AES_256_GCM === $algo ) {
@@ -598,6 +650,16 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 				$tag,
 				$aad
 			);
+			if ( false === $plaintext ) {
+				if ( 'wp_salt_v1' === $key_id && ! isset( self::$keyring['wp_salt_v1'] ) ) {
+					return new \WP_Error(
+						'checkpoint_key_rotated',
+						__( 'WordPress salts have rotated since legacy checkpoint was created. Key "wp_salt_v1" is no longer available.', 'full-elementor-mcp' ),
+						array( 'key_id' => 'wp_salt_v1' )
+					);
+				}
+				return new \WP_Error( 'checkpoint_integrity_failed', __( 'Checkpoint integrity verification failed (ciphertext or AAD tampered).', 'full-elementor-mcp' ) );
+			}
 		} else {
 			return new \WP_Error(
 				'checkpoint_crypto_unavailable',
@@ -610,6 +672,13 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 		}
 
 		if ( false === $plaintext ) {
+			if ( 'wp_salt_v1' === $key_id && ! isset( self::$keyring['wp_salt_v1'] ) ) {
+				return new \WP_Error(
+					'checkpoint_key_rotated',
+					__( 'WordPress salts have rotated since legacy checkpoint was created. Key "wp_salt_v1" is no longer available.', 'full-elementor-mcp' ),
+					array( 'key_id' => 'wp_salt_v1' )
+				);
+			}
 			return new \WP_Error( 'checkpoint_integrity_failed', __( 'Checkpoint integrity verification failed (ciphertext or AAD tampered).', 'full-elementor-mcp' ) );
 		}
 

@@ -1102,6 +1102,11 @@ class Full_Elementor_MCP_Mutation_Registry {
 				)
 			);
 		}
+
+		// Phase 5 internal strategy: ensure checkpoint-restore is registered upon core strategy initialization:
+		if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+			Full_Elementor_MCP_Checkpoint_Manager::ensure_restore_strategy_registered();
+		}
 	}
 
 	// -------------------------------------------------------------------------

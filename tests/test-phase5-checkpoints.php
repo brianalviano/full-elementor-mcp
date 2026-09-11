@@ -451,6 +451,22 @@ class Phase5_Mock_WPDB {
 				return false;
 			}
 
+			if ( preg_match( '/^ALTER\s+TABLE\s+([^\s]+)\s+DROP\s+INDEX\s+([^\s;]+)/i', trim( $query ), $dm ) ) {
+				$table = trim( $dm[1], '`' );
+				$idx   = trim( $dm[2], '`' );
+				try { $this->pdo->exec( "DROP INDEX IF EXISTS {$idx};" ); } catch ( \Throwable $e ) {}
+				try { $this->pdo->exec( "DROP INDEX IF EXISTS {$table}_{$idx};" ); } catch ( \Throwable $e ) {}
+				return 1;
+			}
+
+			if ( preg_match( '/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+UNIQUE\s+(?:KEY|INDEX)\s+([^\s(]+)\s*\(([^)]+)\)/i', trim( $query ), $am ) ) {
+				$table = trim( $am[1], '`' );
+				$idx   = trim( $am[2], '`' );
+				$cols  = $am[3];
+				try { $this->pdo->exec( "CREATE UNIQUE INDEX IF NOT EXISTS {$table}_{$idx} ON {$table}({$cols});" ); } catch ( \Throwable $e ) {}
+				return 1;
+			}
+
 			$query = $this->translate_query_for_sqlite( $query );
 			$count = $this->pdo->exec( $query );
 			$this->insert_id = (int) $this->pdo->lastInsertId();
@@ -1427,7 +1443,7 @@ run_test( 'Schema: exactly four safety tables remain after Phase 5 extensions', 
 	assert_equals( 4, count( $expected ), 'There must be exactly four expected schema table specs' );
 
 	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema(), 'Full schema verification must pass' );
-	assert_equals( '1.1.0', Full_Elementor_MCP_Database_Installer::DB_VERSION );
+	assert_equals( '1.2.0', Full_Elementor_MCP_Database_Installer::DB_VERSION );
 } );
 
 // -----------------------------------------------------------------------------
@@ -1969,6 +1985,382 @@ run_test( 'Corrective Pass: Restore tree validation fails closed on invalid tree
 
 	$restore_res = Full_Elementor_MCP_Checkpoint_Manager::restore( $re_encrypted['id'] );
 	assert_error_code( 'post_mutation_validation_failed', $restore_res, 'Invalid widget tree must fail restore before writes' );
+} );
+
+// -----------------------------------------------------------------------------
+// 13. Phase 5 Final Corrective Pass Regression Tests
+// -----------------------------------------------------------------------------
+
+run_test( 'Final Corrective Pass: Upgrade from simulated 1.1.0 preserves rows, generates unique UUIDs, and enforces single-column uniqueness', function () {
+	global $wpdb;
+	$table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+
+	// Set version option to 1.1.0:
+	update_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION, '1.1.0' );
+
+	// Drop unique index to simulate old 1.1.0 non-unique index:
+	$wpdb->query( "ALTER TABLE {$table} DROP INDEX idx_checkpoint_uuid" );
+	$wpdb->query( "CREATE INDEX IF NOT EXISTS {$table}_idx_checkpoint_uuid ON {$table}(checkpoint_uuid)" );
+
+	// Insert test rows with missing, blank, and duplicate UUIDs:
+	$wpdb->query( "DELETE FROM {$table}" );
+	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (1, '', '2026-09-10 00:00:00', 'post:1', 'post', 1, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p1', 'h1', 10, 'blank_uuid', 'manual', '', '', 0)" );
+	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (2, 'dup_uuid', '2026-09-10 00:01:00', 'post:2', 'post', 2, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p2', 'h2', 10, 'dup_1', 'manual', '', '', 0)" );
+	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (3, 'dup_uuid', '2026-09-10 00:02:00', 'post:3', 'post', 3, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p3', 'h3', 10, 'dup_2', 'manual', '', '', 0)" );
+	$wpdb->query( "INSERT INTO {$table} (id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned) VALUES (4, 'unique_orig_uuid', '2026-09-10 00:03:00', 'post:4', 'post', 4, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p4', 'h4', 10, 'orig', 'manual', '', '', 0)" );
+
+	// Execute actual upgrade from old 1.1.0 schema:
+	$upgraded = Full_Elementor_MCP_Database_Installer::upgrade( '1.1.0' );
+	assert_true( $upgraded, 'Database upgrade from 1.1.0 must succeed' );
+
+	// Verify DB version is updated to 1.2.0:
+	$installed_version = get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION );
+	assert_equals( '1.2.0', $installed_version, 'DB version must be upgraded to 1.2.0' );
+
+	// Exactly four tables remain:
+	$schemas = Full_Elementor_MCP_Database_Installer::get_schema_definitions();
+	assert_equals( 4, count( $schemas ), 'Exactly four safety tables must exist' );
+
+	// All rows preserved (none deleted):
+	$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
+	assert_equals( 4, $count, 'All existing checkpoint rows must be preserved' );
+
+	// Every row has non-empty and distinct UUID:
+	$uuids = $wpdb->get_col( "SELECT checkpoint_uuid FROM {$table} ORDER BY id ASC" );
+	foreach ( $uuids as $u ) {
+		assert_true( ! empty( $u ), 'Every checkpoint UUID must be non-empty' );
+	}
+	assert_equals( 4, count( array_unique( $uuids ) ), 'Every checkpoint UUID must be unique after migration' );
+	assert_equals( 'unique_orig_uuid', $uuids[3], 'Existing unique UUID must be preserved' );
+
+	// Schema verification confirms single-column uniqueness on checkpoint_uuid:
+	$is_unique = Full_Elementor_MCP_Database_Installer::verify_single_column_unique_constraint( $table, 'checkpoint_uuid' );
+	assert_true( $is_unique, 'checkpoint_uuid must possess single-column uniqueness guarantee' );
+
+	// Proven at DB level: duplicate insert must fail:
+	$dup_res = $wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), 'post:999', 'post', 999, 'manual', 'exact', 1, 'none', 1, 'k', 'n', 't', 'p', 'h', 10, 'dup', 'manual', '', '', 0)",
+			$uuids[0]
+		)
+	);
+	assert_false( $dup_res, 'Inserting duplicate checkpoint_uuid must fail at DB level' );
+} );
+
+run_test( 'Final Corrective Pass: Checkpoint-restore strategy survives process restart and recovery does not report unsupported', function () {
+	global $wpdb;
+	$post_id      = wp_insert_post( array( 'post_title' => 'Fresh Request Crash Post' ) );
+	$res_key      = 'post:' . $post_id;
+	$before_state = Full_Elementor_MCP_Checkpoint_Strategies::capture( $res_key );
+	$before_json  = wp_json_encode( $before_state );
+	$before_hash  = Full_Elementor_MCP_Journal::hash_state( $before_state );
+
+	// Insert abandoned lock token:
+	$tokens_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key     = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res_key );
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$tokens_table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
+			 VALUES (%s, 'lock', 'crashed_worker', 1, '', datetime(UTC_TIMESTAMP(), '-2 hours'), datetime(UTC_TIMESTAMP(), '-1 hours'), 0)",
+			$lock_key
+		)
+	);
+
+	// Insert pending checkpoint-restore WAL:
+	$journal_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$journal_table} (created_at, updated_at, ability, action, object_type, object_id, resource_key, rollback_supported, fencing_token, before_state, before_hash, status, user_id)
+			 VALUES (datetime(UTC_TIMESTAMP(), '-2 hours'), datetime(UTC_TIMESTAMP(), '-2 hours'), 'checkpoint-restore', 'restore', 'resource', %d, %s, 1, 1, %s, %s, 'pending', 1)",
+			$post_id,
+			$res_key,
+			$before_json,
+			$before_hash
+		)
+	);
+	$pending_jid = (int) $wpdb->insert_id;
+
+	// Simulate complete process termination:
+	Full_Elementor_MCP_Mutation_Registry::reset();
+	Full_Elementor_MCP_Mutation_Context::reset();
+	Full_Elementor_MCP_Mutation_Middleware::reset();
+
+	// Initialize only what normal new plugin request initializes (normal bootstrap):
+	Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+
+	// Strategy must be available WITHOUT calling any test-only registration helper:
+	assert_true( Full_Elementor_MCP_Mutation_Registry::has( 'checkpoint-restore' ), 'Strategy must be registered on new request' );
+	assert_true( Full_Elementor_MCP_Mutation_Registry::supports_rollback( 'checkpoint-restore' ), 'Strategy must support rollback on new request' );
+
+	// Run recovery path:
+	$rec_results = Full_Elementor_MCP_Journal::recover_pending();
+	assert_true( ! empty( $rec_results ), 'Recovery must process pending WAL' );
+
+	$found_entry = null;
+	foreach ( $rec_results as $r ) {
+		if ( (int) $r['journal_id'] === $pending_jid ) {
+			$found_entry = $r;
+			break;
+		}
+	}
+	assert_true( null !== $found_entry, 'Pending journal must be found in recovery results' );
+	assert_true( 'unsupported_strategy' !== $found_entry['reason'], 'Recovery must NOT report unsupported_strategy solely due to request restart' );
+	assert_true( 'recovery_failed' !== $found_entry['status'], 'Recovery must not fail due to missing strategy' );
+	assert_equals( 'clean_noop', $found_entry['reason'], 'Clean unchanged state must resolve to clean_noop' );
+
+	// Also verify that forced/manual fenced rollback remains functional:
+	$lock_res = Full_Elementor_MCP_Lock_Manager::acquire_lock( $res_key, 'admin_recovery' );
+	assert_false( is_wp_error( $lock_res ), 'Must be able to acquire recovery lock' );
+	$fb_fence = (int) $lock_res['fencing_token'];
+	$fb_res   = Full_Elementor_MCP_Journal::rollback( $pending_jid, 'admin_recovery', $fb_fence, array( 'force' => true ) );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $res_key, 'admin_recovery', $fb_fence );
+	assert_false( is_wp_error( $fb_res ), 'Forced fenced rollback must succeed' );
+
+	// Test divergent state: if live state diverges, recovery reports manual_recovery_required (never unsupported_strategy):
+	$div_post_id  = wp_insert_post( array( 'post_title' => 'Divergent Recovery Post' ) );
+	$div_res_key  = 'post:' . $div_post_id;
+	$div_before   = Full_Elementor_MCP_Checkpoint_Strategies::capture( $div_res_key );
+	$div_json     = wp_json_encode( $div_before );
+	$div_hash     = Full_Elementor_MCP_Journal::hash_state( $div_before );
+	$div_lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $div_res_key );
+
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$tokens_table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
+			 VALUES (%s, 'lock', 'crashed_worker', 1, '', datetime(UTC_TIMESTAMP(), '-2 hours'), datetime(UTC_TIMESTAMP(), '-1 hours'), 0)",
+			$div_lock_key
+		)
+	);
+
+	// Mutate live state to diverge from before_state:
+	update_post_meta( $div_post_id, '_elementor_data', wp_json_encode( array( array( 'id' => 'diverged_sec', 'elType' => 'section', 'elements' => array() ) ) ) );
+
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$journal_table} (created_at, updated_at, ability, action, object_type, object_id, resource_key, rollback_supported, fencing_token, before_state, before_hash, status, user_id)
+			 VALUES (datetime(UTC_TIMESTAMP(), '-2 hours'), datetime(UTC_TIMESTAMP(), '-2 hours'), 'checkpoint-restore', 'restore', 'resource', %d, %s, 1, 1, %s, %s, 'pending', 1)",
+			$div_post_id,
+			$div_res_key,
+			$div_json,
+			$div_hash
+		)
+	);
+	$pending_div_jid = (int) $wpdb->insert_id;
+
+	// Reset again to simulate fresh request:
+	Full_Elementor_MCP_Mutation_Registry::reset();
+	Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+
+	$rec_div = Full_Elementor_MCP_Journal::recover_pending();
+	$found_div = null;
+	foreach ( $rec_div as $r ) {
+		if ( (int) $r['journal_id'] === $pending_div_jid ) {
+			$found_div = $r;
+			break;
+		}
+	}
+	assert_true( null !== $found_div, 'Divergent pending journal must be processed' );
+	assert_true( 'unsupported_strategy' !== $found_div['reason'], 'Divergent state must NOT report unsupported_strategy' );
+	assert_equals( 'manual_recovery_required', $found_div['reason'], 'Divergent state must report manual_recovery_required' );
+} );
+
+run_test( 'Final Corrective Pass: Crypto envelope v1/v2 compatibility, legacy wp_salt_v1 fallback, and rotation error handling', function () {
+	global $wpdb;
+	$compat_post_id = wp_insert_post( array( 'post_title' => 'Crypto Envelope Compat Post' ) );
+	$compat_res_key = 'post:' . $compat_post_id;
+	$compat_state   = Full_Elementor_MCP_Checkpoint_Strategies::capture( $compat_res_key );
+	$compat_json    = Full_Elementor_MCP_Checkpoint_Crypto::serialize_state( $compat_state );
+	$compat_hash    = Full_Elementor_MCP_Checkpoint_Crypto::hash_state( $compat_state );
+	$salt_info      = Full_Elementor_MCP_Checkpoint_Crypto::get_active_key();
+	$algo           = Full_Elementor_MCP_Checkpoint_Crypto::resolve_algorithm();
+
+	$legacy_uuid = 'legacy-phase5-chk-0001';
+
+	// Build exact envelope v1 AAD (omits checkpoint_type and restore_capability):
+	$legacy_aad = Full_Elementor_MCP_Checkpoint_Crypto::build_aad( array(
+		'checkpoint_uuid'        => $legacy_uuid,
+		'encryption_algorithm'   => $algo,
+		'key_id'                 => 'wp_salt_v1',
+		'key_version'            => 1,
+		'payload_schema_version' => 1,
+		'resource_key'           => $compat_res_key,
+	), 1 );
+
+	if ( Full_Elementor_MCP_Checkpoint_Crypto::ALGO_XCHACHA20_POLY1305 === $algo ) {
+		$legacy_nonce = random_bytes( 24 );
+		$legacy_cipher = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt(
+			$compat_json,
+			$legacy_aad,
+			$legacy_nonce,
+			$salt_info['raw_key']
+		);
+		$legacy_tag = null;
+	} else {
+		$legacy_nonce = random_bytes( 12 );
+		$raw_tag      = '';
+		$legacy_cipher = openssl_encrypt(
+			$compat_json,
+			'aes-256-gcm',
+			$salt_info['raw_key'],
+			OPENSSL_RAW_DATA,
+			$legacy_nonce,
+			$raw_tag,
+			$legacy_aad,
+			16
+		);
+		$legacy_tag = base64_encode( $raw_tag );
+	}
+
+	// Insert into DB as an existing Phase 5 row (crypto_envelope_version = 1, key_id = 'wp_salt_v1'):
+	$chk_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$chk_table} (checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, key_id, nonce, auth_tag, encrypted_payload, state_hash, size_bytes, label, trigger_type, file_path, file_hash_hmac, is_pinned)
+			 VALUES (%s, UTC_TIMESTAMP(), %s, 'post', %d, 'automatic', 'exact', 1, 1, %s, 1, 'wp_salt_v1', %s, %s, %s, %s, %d, 'legacy_v1', 'auto', '', '', 0)",
+			$legacy_uuid,
+			$compat_res_key,
+			$compat_post_id,
+			$algo,
+			base64_encode( $legacy_nonce ),
+			$legacy_tag,
+			base64_encode( $legacy_cipher ),
+			$compat_hash,
+			strlen( $compat_json )
+		)
+	);
+	$legacy_row_id = (int) $wpdb->insert_id;
+	$legacy_row    = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $legacy_row_id );
+
+	// 1. Decrypt with unchanged salts -> MUST SUCCEED
+	$decrypted_v1 = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $legacy_row );
+	assert_false( is_wp_error( $decrypted_v1 ), 'Legacy v1 checkpoint must decrypt with unchanged salts' );
+	assert_equals( $compat_post_id, $decrypted_v1['post_id'], 'Decrypted post_id must match' );
+
+	// 2. Restore legacy checkpoint -> MUST SUCCEED
+	$restore_v1 = Full_Elementor_MCP_Checkpoint_Manager::restore( $legacy_row_id );
+	assert_false( is_wp_error( $restore_v1 ), 'Legacy v1 checkpoint must restore cleanly' );
+
+	// 3. Rotate WordPress salts:
+	$original_raw_key = $salt_info['raw_key'];
+	$GLOBALS['wp_test_salt_prefix'] = 'rotated_salts_98765_';
+
+	// Decryption without old key in keyring -> MUST RETURN checkpoint_key_rotated
+	$dec_rotated = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $legacy_row );
+	assert_error_code( 'checkpoint_key_rotated', $dec_rotated, 'Rotated salts without historical key must return checkpoint_key_rotated' );
+
+	// 4. Register historical key in keyring:
+	Full_Elementor_MCP_Checkpoint_Crypto::register_key( 'wp_salt_v1', 1, $original_raw_key, false );
+
+	// Decryption with historical key registered -> MUST SUCCEED AGAIN
+	$dec_re_registered = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $legacy_row );
+	assert_false( is_wp_error( $dec_re_registered ), 'Historical key in keyring must decrypt legacy checkpoint' );
+
+	// 5. Unknown envelope version (e.g. 3) -> fails closed with checkpoint_envelope_unsupported
+	$legacy_row['crypto_envelope_version'] = 3;
+	$dec_unsupported = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $legacy_row );
+	assert_error_code( 'checkpoint_envelope_unsupported', $dec_unsupported, 'Unknown envelope version must fail closed' );
+
+	// 6. Envelope v2 rejects restore_capability tampering:
+	$v2_saved = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:' . $compat_post_id );
+	assert_false( is_wp_error( $v2_saved ) );
+	$v2_row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $v2_saved['id'] );
+	assert_equals( 2, (int) $v2_row['crypto_envelope_version'], 'New checkpoint must use envelope version 2' );
+	$v2_row['restore_capability'] = 'tampered';
+	$dec_v2_tampered = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $v2_row );
+	assert_error_code( 'checkpoint_integrity_failed', $dec_v2_tampered, 'Tampered restore_capability on envelope v2 must fail AEAD verification' );
+
+	// Cleanup crypto test:
+	Full_Elementor_MCP_Checkpoint_Crypto::reset_keys();
+	$GLOBALS['wp_test_salt_prefix'] = null;
+} );
+
+run_test( 'Final Corrective Pass: Exact post & snippet strategies preserve strict existence semantics and unskewed priority', function () {
+	// 1. Post: absent _elementor_data and _elementor_page_settings:
+	$clean_post_id = wp_insert_post( array( 'post_title' => 'Clean Post Absent Meta' ) );
+	delete_post_meta( $clean_post_id, '_elementor_data' );
+	delete_post_meta( $clean_post_id, '_elementor_page_settings' );
+
+	assert_false( metadata_exists( 'post', $clean_post_id, '_elementor_data' ), '_elementor_data must be absent' );
+	assert_false( metadata_exists( 'post', $clean_post_id, '_elementor_page_settings' ), '_elementor_page_settings must be absent' );
+
+	$chk_clean = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:' . $clean_post_id );
+	assert_false( is_wp_error( $chk_clean ) );
+
+	// Verify captured state explicitly records absent flags:
+	$clean_state = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $chk_clean['id'] ) );
+	assert_false( $clean_state['elementor']['data_exists'], 'data_exists must be false' );
+	assert_false( $clean_state['elementor']['page_settings_exists'], 'page_settings_exists must be false' );
+
+	// Mutate post: add meta
+	update_post_meta( $clean_post_id, '_elementor_data', wp_json_encode( array( array( 'id' => 'x1', 'elType' => 'section', 'elements' => array() ) ) ) );
+	update_post_meta( $clean_post_id, '_elementor_page_settings', array( 'custom_title' => 'mutated' ) );
+	assert_true( metadata_exists( 'post', $clean_post_id, '_elementor_data' ) );
+
+	// Restore checkpoint:
+	$res_clean = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_clean['id'] );
+	assert_false( is_wp_error( $res_clean ), 'Restore must succeed' );
+
+	// Symmetrical assertion: keys must be deleted if they were absent:
+	assert_false( metadata_exists( 'post', $clean_post_id, '_elementor_data' ), 'Restored absent _elementor_data must be deleted' );
+	assert_false( metadata_exists( 'post', $clean_post_id, '_elementor_page_settings' ), 'Restored absent _elementor_page_settings must be deleted' );
+
+	// 2. Post: valid empty tree '[]' existing:
+	$empty_tree_id = wp_insert_post( array( 'post_title' => 'Empty Tree Post' ) );
+	update_post_meta( $empty_tree_id, '_elementor_data', '[]' );
+	update_post_meta( $empty_tree_id, '_elementor_page_settings', array() );
+
+	$chk_empty = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:' . $empty_tree_id );
+	assert_false( is_wp_error( $chk_empty ) );
+
+	$empty_state = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $chk_empty['id'] ) );
+	assert_true( $empty_state['elementor']['data_exists'], 'data_exists must be true for existing empty tree' );
+	assert_true( $empty_state['elementor']['page_settings_exists'], 'page_settings_exists must be true for existing empty settings' );
+
+	// Mutate post: add section
+	update_post_meta( $empty_tree_id, '_elementor_data', wp_json_encode( array( array( 'id' => 's1', 'elType' => 'section', 'elements' => array() ) ) ) );
+
+	// Restore:
+	$res_empty = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_empty['id'] );
+	assert_false( is_wp_error( $res_empty ) );
+
+	// Must exist and be empty array:
+	assert_true( metadata_exists( 'post', $empty_tree_id, '_elementor_data' ), 'Empty tree _elementor_data must exist' );
+	$restored_raw = get_post_meta( $empty_tree_id, '_elementor_data', true );
+	assert_true( '[]' === $restored_raw || array() === $restored_raw, 'Empty tree must decode to empty' );
+
+	// 3. Snippet exact fields: template_type, edit_mode, exact priority 0:
+	$snip_id = wp_insert_post( array(
+		'post_title'  => 'Exact Snippet Test',
+		'post_status' => 'publish',
+		'post_type'   => 'elementor_snippet',
+	) );
+	update_post_meta( $snip_id, '_elementor_code', 'console.log("exact");' );
+	update_post_meta( $snip_id, '_elementor_location', 'elementor_head' );
+	update_post_meta( $snip_id, '_elementor_priority', 0 ); // Exact 0
+	update_post_meta( $snip_id, '_elementor_template_type', 'custom_code' );
+	update_post_meta( $snip_id, '_elementor_edit_mode', 'builder' );
+	delete_post_meta( $snip_id, '_elementor_extra_options' );
+
+	$chk_snip = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:' . $snip_id );
+	assert_false( is_wp_error( $chk_snip ) );
+
+	// Mutate snippet:
+	update_post_meta( $snip_id, '_elementor_code', 'alert("mutated");' );
+	update_post_meta( $snip_id, '_elementor_priority', 42 );
+	update_post_meta( $snip_id, '_elementor_template_type', 'mutated_type' );
+	update_post_meta( $snip_id, '_elementor_edit_mode', 'mutated_mode' );
+	update_post_meta( $snip_id, '_elementor_extra_options', array( 'ensure_jquery' => 1 ) );
+
+	// Restore snippet:
+	$res_snip = Full_Elementor_MCP_Checkpoint_Manager::restore( $chk_snip['id'] );
+	assert_false( is_wp_error( $res_snip ) );
+
+	assert_equals( 'console.log("exact");', get_post_meta( $snip_id, '_elementor_code', true ), 'Code must be restored' );
+	assert_equals( 0, (int) get_post_meta( $snip_id, '_elementor_priority', true ), 'Exact priority 0 must NOT be converted to 1' );
+	assert_equals( 'custom_code', get_post_meta( $snip_id, '_elementor_template_type', true ), 'template_type must be restored' );
+	assert_equals( 'builder', get_post_meta( $snip_id, '_elementor_edit_mode', true ), 'edit_mode must be restored' );
+	assert_false( metadata_exists( 'post', $snip_id, '_elementor_extra_options' ), 'Absent extra_options must be deleted on restore' );
 } );
 
 echo "\n=======================================================\n";
