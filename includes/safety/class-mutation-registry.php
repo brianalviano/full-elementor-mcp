@@ -172,15 +172,19 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$descriptor['supports_rollback']              = (bool) $descriptor['supports_rollback'];
 
 		// Phase 3 security and validation metadata:
-		$descriptor['requires_tree_validation'] = ! empty( $descriptor['requires_tree_validation'] )
-			|| self::CATEGORY_ELEMENTOR_DATA === $descriptor['category'];
+		$descriptor['requires_tree_validation'] = isset( $descriptor['requires_tree_validation'] )
+			? (bool) $descriptor['requires_tree_validation']
+			: ( self::CATEGORY_ELEMENTOR_DATA === $descriptor['category'] );
 		$descriptor['security_profile']         = (string) ( $descriptor['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $descriptor['category'] ? 'high_risk' : 'standard' ) );
-		$descriptor['external_network_access']  = ! empty( $descriptor['external_network_access'] )
-			|| self::CATEGORY_UNSUPPORTED === $descriptor['category'] && str_contains( $ability, 'image' );
-		$descriptor['executable_content']       = ! empty( $descriptor['executable_content'] )
-			|| self::CATEGORY_CUSTOM_CODE === $descriptor['category'];
-		$descriptor['requires_unfiltered_html'] = ! empty( $descriptor['requires_unfiltered_html'] )
-			|| self::CATEGORY_CUSTOM_CODE === $descriptor['category'];
+		$descriptor['external_network_access']  = isset( $descriptor['external_network_access'] )
+			? (bool) $descriptor['external_network_access']
+			: ( self::CATEGORY_UNSUPPORTED === $descriptor['category'] && str_contains( $ability, 'image' ) );
+		$descriptor['executable_content']       = isset( $descriptor['executable_content'] )
+			? (bool) $descriptor['executable_content']
+			: ( self::CATEGORY_CUSTOM_CODE === $descriptor['category'] );
+		$descriptor['requires_unfiltered_html'] = isset( $descriptor['requires_unfiltered_html'] )
+			? (bool) $descriptor['requires_unfiltered_html']
+			: ( self::CATEGORY_CUSTOM_CODE === $descriptor['category'] );
 
 		self::$strategies[ $ability ] = $descriptor;
 
@@ -407,14 +411,32 @@ class Full_Elementor_MCP_Mutation_Registry {
 	}
 
 	/**
-	 * Gets the security profile classification for an ability.
+	 * Resolves the authoritative normalized security profile for an ability.
 	 *
-	 * @param string $ability Ability name.
-	 * @return string Security profile ('standard', 'high_risk', 'custom_code', etc.).
+	 * Delegates to Full_Elementor_MCP_Security_Strategies::get_security_profile().
+	 *
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Input arguments for dynamic classification.
+	 * @return array<string, mixed> Normalized security profile.
 	 */
-	public static function get_security_profile( string $ability ): string {
+	public static function get_security_profile( string $ability, array $args = array() ): array {
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			return Full_Elementor_MCP_Security_Strategies::get_security_profile( $ability, $args );
+		}
+
 		$strategy = self::get( $ability );
-		return (string) ( $strategy['security_profile'] ?? 'standard' );
+		return array(
+			'ability'                     => $ability,
+			'executable_content'          => ! empty( $strategy['executable_content'] ),
+			'high_risk'                   => 'high_risk' === ( $strategy['security_profile'] ?? '' ),
+			'requires_unfiltered_html'    => ! empty( $strategy['requires_unfiltered_html'] ),
+			'external_network_access'     => ! empty( $strategy['external_network_access'] ),
+			'irreversible'                => ! empty( $strategy['is_destructive'] ),
+			'protected_resource_possible' => false,
+			'tree_validation_required'    => ! empty( $strategy['requires_tree_validation'] ),
+			'security_category'           => (string) ( $strategy['security_profile'] ?? 'standard' ),
+			'reasons'                     => array(),
+		);
 	}
 
 	/**
@@ -524,7 +546,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'full-elementor-mcp/delete-page-content'      => array( 'action' => 'delete_page_content', 'destructive' => true ),
 			'full-elementor-mcp/add-flexbox'              => array( 'action' => 'add_flexbox', 'destructive' => false ),
 			'full-elementor-mcp/add-div-block'            => array( 'action' => 'add_div_block', 'destructive' => false ),
-			'full-elementor-mcp/add-custom-js'            => array( 'action' => 'add_custom_js', 'destructive' => false ),
+			'full-elementor-mcp/add-custom-js'            => array( 'action' => 'add_custom_js', 'destructive' => false, 'executable_content' => true, 'high_risk' => true, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code' ),
 
 			// Universal & Atomic Widgets (12)
 			'full-elementor-mcp/add-widget'               => array( 'action' => 'add_widget', 'destructive' => false ),
@@ -561,7 +583,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'full-elementor-mcp/add-google-maps'          => array( 'action' => 'add_google_maps', 'destructive' => false ),
 			'full-elementor-mcp/add-heading'              => array( 'action' => 'add_heading', 'destructive' => false ),
 			'full-elementor-mcp/add-hotspot'              => array( 'action' => 'add_hotspot', 'destructive' => false ),
-			'full-elementor-mcp/add-html'                 => array( 'action' => 'add_html', 'destructive' => false ),
+			'full-elementor-mcp/add-html'                 => array( 'action' => 'add_html', 'destructive' => false, 'requires_unfiltered_html' => true, 'security_profile' => 'potentially_executable' ),
 			'full-elementor-mcp/add-icon'                 => array( 'action' => 'add_icon', 'destructive' => false ),
 			'full-elementor-mcp/add-icon-box'             => array( 'action' => 'add_icon_box', 'destructive' => false ),
 			'full-elementor-mcp/add-icon-list'            => array( 'action' => 'add_icon_list', 'destructive' => false ),
@@ -631,8 +653,11 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'restore_before'          => $restore_elementor_data,
 					'capture_after'           => $capture_after_elementor_data,
 					'supports_rollback'       => true,
-					'created_object_tracking' => false,
-					'is_destructive'          => $meta['destructive'],
+					'created_object_tracking'  => false,
+					'is_destructive'           => $meta['destructive'],
+					'executable_content'       => $meta['executable_content'] ?? false,
+					'requires_unfiltered_html' => $meta['requires_unfiltered_html'] ?? false,
+					'security_profile'         => $meta['security_profile'] ?? 'standard',
 				)
 			);
 		}
@@ -866,37 +891,41 @@ class Full_Elementor_MCP_Mutation_Registry {
 		// 7. Newly Created Custom Code & Media Entities (3 abilities)
 		// ---------------------------------------------------------------------
 		$new_entity_abilities = array(
-			'full-elementor-mcp/add-code-snippet' => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
-			'full-elementor-mcp/sideload-image'   => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
-			'full-elementor-mcp/upload-svg-icon'  => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
+			'full-elementor-mcp/add-code-snippet' => array( 'action' => 'add_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false, 'executable_content' => true, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code' ),
+			'full-elementor-mcp/sideload-image'   => array( 'action' => 'sideload_image', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false, 'external_network_access' => true ),
+			'full-elementor-mcp/upload-svg-icon'  => array( 'action' => 'upload_svg_icon', 'object_type' => 'attachment', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false, 'external_network_access' => true ),
 		);
 
 		foreach ( $new_entity_abilities as $ability => $meta ) {
 			self::register(
 				array(
-					'ability'                 => $ability,
-					'action'                  => $meta['action'],
-					'object_type'             => $meta['object_type'],
-					'category'                => $meta['category'],
-					'resource_key_resolver'   => static function ( array $args = array() ) use ( $ability ): string {
+					'ability'                  => $ability,
+					'action'                   => $meta['action'],
+					'object_type'              => $meta['object_type'],
+					'category'                 => $meta['category'],
+					'resource_key_resolver'    => static function ( array $args = array() ) use ( $ability ): string {
 						return self::build_create_resource_key( $ability, $args );
 					},
-					'object_id_resolver'      => static function ( array $args = array() ): int {
+					'object_id_resolver'       => static function ( array $args = array() ): int {
 						return 0; // Newly created entity ID unknown before execution.
 					},
-					'capture_before'          => static function ( int $object_id, array $args = array() ) {
+					'capture_before'           => static function ( int $object_id, array $args = array() ) {
 						return null;
 					},
-					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					'restore_before'           => static function ( mixed $before_state, array $context = array() ) {
 						return new \WP_Error(
 							'mutation_not_rollbackable',
 							__( 'This mutation category does not support automated rollback.', 'full-elementor-mcp' )
 						);
 					},
-					'capture_after'           => null,
-					'supports_rollback'       => false,
-					'created_object_tracking' => false,
-					'is_destructive'          => $meta['destructive'],
+					'capture_after'            => null,
+					'supports_rollback'        => false,
+					'created_object_tracking'  => false,
+					'is_destructive'           => $meta['destructive'],
+					'executable_content'       => $meta['executable_content'] ?? false,
+					'requires_unfiltered_html' => $meta['requires_unfiltered_html'] ?? false,
+					'external_network_access'  => $meta['external_network_access'] ?? false,
+					'security_profile'         => $meta['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $meta['category'] ? 'high_risk' : 'standard' ),
 				)
 			);
 		}
@@ -905,11 +934,11 @@ class Full_Elementor_MCP_Mutation_Registry {
 		// 8. Existing Post-Backed Custom Code, Meta, & Composite Mutations (9 abilities)
 		// ---------------------------------------------------------------------
 		$post_backed_custom_or_composite = array(
-			'full-elementor-mcp/update-code-snippet'        => array( 'action' => 'update_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
-			'full-elementor-mcp/delete-code-snippet'        => array( 'action' => 'delete_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => true ),
-			'full-elementor-mcp/toggle-code-snippet-status' => array( 'action' => 'toggle_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
-			'full-elementor-mcp/add-custom-css'             => array( 'action' => 'add_custom_css', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false ),
-			'full-elementor-mcp/add-stock-image'            => array( 'action' => 'add_stock_image', 'object_type' => 'post', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
+			'full-elementor-mcp/update-code-snippet'        => array( 'action' => 'update_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false, 'executable_content' => true, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code' ),
+			'full-elementor-mcp/delete-code-snippet'        => array( 'action' => 'delete_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => true, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code' ),
+			'full-elementor-mcp/toggle-code-snippet-status' => array( 'action' => 'toggle_code_snippet', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_code' ),
+			'full-elementor-mcp/add-custom-css'             => array( 'action' => 'add_custom_css', 'object_type' => 'custom_code', 'category' => self::CATEGORY_CUSTOM_CODE, 'destructive' => false, 'executable_content' => false, 'requires_unfiltered_html' => true, 'security_profile' => 'custom_css' ),
+			'full-elementor-mcp/add-stock-image'            => array( 'action' => 'add_stock_image', 'object_type' => 'post', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false, 'external_network_access' => true ),
 			'full-elementor-mcp/set-page-meta'              => array( 'action' => 'set_page_meta', 'object_type' => 'post', 'category' => self::CATEGORY_UNSUPPORTED, 'destructive' => false ),
 			'full-elementor-mcp/set-popup-settings'         => array( 'action' => 'set_popup_settings', 'object_type' => 'popup', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
 			'full-elementor-mcp/set-template-conditions'    => array( 'action' => 'set_template_conditions', 'object_type' => 'template', 'category' => self::CATEGORY_COMPOSITE, 'destructive' => false ),
@@ -919,30 +948,34 @@ class Full_Elementor_MCP_Mutation_Registry {
 		foreach ( $post_backed_custom_or_composite as $ability => $meta ) {
 			self::register(
 				array(
-					'ability'                 => $ability,
-					'action'                  => $meta['action'],
-					'object_type'             => $meta['object_type'],
-					'category'                => $meta['category'],
-					'resource_key_resolver'   => static function ( array $args = array() ): string {
+					'ability'                  => $ability,
+					'action'                   => $meta['action'],
+					'object_type'              => $meta['object_type'],
+					'category'                 => $meta['category'],
+					'resource_key_resolver'    => static function ( array $args = array() ): string {
 						$id = absint( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['post_id'] ?? ( $args['id'] ?? ( $args['object_id'] ?? 0 ) ) ) ) ) );
 						return self::build_resource_key( 'post', $id );
 					},
-					'object_id_resolver'      => static function ( array $args = array() ): int {
+					'object_id_resolver'       => static function ( array $args = array() ): int {
 						return absint( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['post_id'] ?? ( $args['id'] ?? ( $args['object_id'] ?? 0 ) ) ) ) ) );
 					},
-					'capture_before'          => static function ( int $object_id, array $args = array() ) {
+					'capture_before'           => static function ( int $object_id, array $args = array() ) {
 						return null;
 					},
-					'restore_before'          => static function ( mixed $before_state, array $context = array() ) {
+					'restore_before'           => static function ( mixed $before_state, array $context = array() ) {
 						return new \WP_Error(
 							'mutation_not_rollbackable',
 							__( 'This mutation category does not support automated rollback.', 'full-elementor-mcp' )
 						);
 					},
-					'capture_after'           => null,
-					'supports_rollback'       => false,
-					'created_object_tracking' => false,
-					'is_destructive'          => $meta['destructive'],
+					'capture_after'            => null,
+					'supports_rollback'        => false,
+					'created_object_tracking'  => false,
+					'is_destructive'           => $meta['destructive'],
+					'executable_content'       => $meta['executable_content'] ?? ( self::CATEGORY_CUSTOM_CODE === $meta['category'] ),
+					'requires_unfiltered_html' => $meta['requires_unfiltered_html'] ?? ( self::CATEGORY_CUSTOM_CODE === $meta['category'] ),
+					'external_network_access'  => $meta['external_network_access'] ?? false,
+					'security_profile'         => $meta['security_profile'] ?? ( self::CATEGORY_CUSTOM_CODE === $meta['category'] ? 'high_risk' : 'standard' ),
 				)
 			);
 		}

@@ -29,6 +29,16 @@ class Full_Elementor_MCP_Security_Strategies {
 	public const ALLOWED_PORTS = array( 80, 443 );
 
 	/**
+	 * Maximum allowed size for downloaded image assets (15 MB).
+	 */
+	public const MAX_IMAGE_BYTES = 15728640;
+
+	/**
+	 * Maximum allowed size for downloaded SVG assets (2 MB).
+	 */
+	public const MAX_SVG_BYTES = 2097152;
+
+	/**
 	 * Maximum allowed HTTP redirects when downloading external assets.
 	 */
 	public const MAX_REDIRECTS = 5;
@@ -125,24 +135,6 @@ class Full_Elementor_MCP_Security_Strategies {
 			);
 		}
 
-		// Port validation.
-		$allowed_ports = isset( $options['allowed_ports'] ) && is_array( $options['allowed_ports'] )
-			? array_map( 'intval', $options['allowed_ports'] )
-			: self::ALLOWED_PORTS;
-
-		$port = isset( $parsed['port'] ) ? (int) $parsed['port'] : ( 'https' === $scheme ? 443 : 80 );
-		if ( ! in_array( $port, $allowed_ports, true ) ) {
-			return new \WP_Error(
-				'ssrf_blocked_port',
-				sprintf(
-					/* translators: %d: port */
-					__( 'Outbound request to port %d is disallowed by safety policy.', 'full-elementor-mcp' ),
-					$port
-				),
-				array( 'port' => $port, 'allowed_ports' => $allowed_ports )
-			);
-		}
-
 		$raw_host = (string) $parsed['host'];
 		// Normalize host: strip brackets for IPv6 literal (e.g. [::1] -> ::1).
 		$host = trim( $raw_host, '[]' );
@@ -206,6 +198,24 @@ class Full_Elementor_MCP_Security_Strategies {
 					array( 'host' => $host, 'blocked_ip' => $ip )
 				);
 			}
+		}
+
+		// Port validation.
+		$allowed_ports = isset( $options['allowed_ports'] ) && is_array( $options['allowed_ports'] )
+			? array_map( 'intval', $options['allowed_ports'] )
+			: self::ALLOWED_PORTS;
+
+		$port = isset( $parsed['port'] ) ? (int) $parsed['port'] : ( 'https' === $scheme ? 443 : 80 );
+		if ( ! in_array( $port, $allowed_ports, true ) ) {
+			return new \WP_Error(
+				'ssrf_blocked_port',
+				sprintf(
+					/* translators: %d: port */
+					__( 'Outbound request to port %d is disallowed by safety policy.', 'full-elementor-mcp' ),
+					$port
+				),
+				array( 'port' => $port, 'allowed_ports' => $allowed_ports )
+			);
 		}
 
 		return true;
@@ -354,28 +364,148 @@ class Full_Elementor_MCP_Security_Strategies {
 	 * @param int    $timeout Request timeout in seconds.
 	 * @return string|\WP_Error Path to downloaded temporary file, or WP_Error on failure.
 	 */
-	public static function safe_download_url( string $url, int $timeout = 30 ) {
+	/**
+	 * Resolves a redirect location header against the base URL.
+	 *
+	 * Handles:
+	 * - Absolute URLs (https://example.com/path)
+	 * - Scheme-relative URLs (//example.com/path)
+	 * - Absolute paths (/path/to/file)
+	 * - Query-only redirects (?param=1)
+	 * - Relative paths (image.jpg, ../image.jpg)
+	 *
+	 * @param string $location Location header from redirect response.
+	 * @param string $base_url Current request URL.
+	 * @return string Normalized target URL.
+	 */
+	public static function resolve_redirect_url( string $location, string $base_url ): string {
+		$location = trim( $location );
+		if ( '' === $location ) {
+			return $base_url;
+		}
+
+		// Full URL with scheme.
+		if ( preg_match( '/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//', $location ) ) {
+			return $location;
+		}
+
+		$parsed_base = wp_parse_url( $base_url );
+		$scheme      = $parsed_base['scheme'] ?? 'https';
+		$host        = $parsed_base['host'] ?? '';
+		$port_str    = isset( $parsed_base['port'] ) ? ':' . $parsed_base['port'] : '';
+		$base_origin = $scheme . '://' . $host . $port_str;
+
+		// Scheme-relative: //host/path
+		if ( str_starts_with( $location, '//' ) ) {
+			return $scheme . ':' . $location;
+		}
+
+		// Absolute path: /path/to/resource
+		if ( str_starts_with( $location, '/' ) ) {
+			return $base_origin . $location;
+		}
+
+		// Query-only: ?foo=bar
+		if ( str_starts_with( $location, '?' ) ) {
+			$base_path = $parsed_base['path'] ?? '/';
+			return $base_origin . $base_path . $location;
+		}
+
+		// Relative path: resolve against directory of current base path.
+		$base_path = $parsed_base['path'] ?? '/';
+		$dir       = '/' . trim( dirname( $base_path ), '/\\' );
+		if ( '/' === $dir || '/.' === $dir ) {
+			$dir = '';
+		}
+		$combined_path = ( '' !== $dir ? $dir . '/' : '/' ) . $location;
+
+		// Normalize . and .. segments safely.
+		$parts = explode( '/', $combined_path );
+		$stack = array();
+		foreach ( $parts as $seg ) {
+			if ( '' === $seg || '.' === $seg ) {
+				continue;
+			}
+			if ( '..' === $seg ) {
+				array_pop( $stack );
+			} else {
+				$stack[] = $seg;
+			}
+		}
+
+		return $base_origin . '/' . implode( '/', $stack );
+	}
+
+	/**
+	 * Deletes a temporary file safely if it exists.
+	 *
+	 * @param string|null $file File path to remove.
+	 */
+	private static function cleanup_file( ?string $file ): void {
+		if ( ! empty( $file ) && file_exists( $file ) ) {
+			@unlink( $file );
+		}
+	}
+
+	/**
+	 * Safely downloads an external resource to a temporary file, defending against redirect SSRF,
+	 * memory exhaustion, and oversized payloads.
+	 *
+	 * Features:
+	 * - Evaluates every redirect hop manually against SSRF policy.
+	 * - Normalizes relative, scheme-relative, query-only, and path-traversal redirect locations.
+	 * - Validates Content-Length header against max allowed bytes prior to download.
+	 * - Enforces bounded streaming to temporary disk file with limit_response_size.
+	 * - Verifies final file size on disk and unlinks partial temp file on failure.
+	 *
+	 * @param string $url       The URL to download.
+	 * @param int    $timeout   Request timeout in seconds.
+	 * @param int    $max_bytes Maximum permitted response size in bytes. Defaults to MAX_IMAGE_BYTES.
+	 * @return string|\WP_Error Path to downloaded temporary file, or WP_Error on failure.
+	 */
+	public static function safe_download_url( string $url, int $timeout = 30, int $max_bytes = 0 ) {
+		if ( $max_bytes <= 0 ) {
+			$max_bytes = self::MAX_IMAGE_BYTES;
+		}
+
 		$current_url    = $url;
 		$redirect_count = 0;
+		$tmp_file       = null;
 
 		while ( $redirect_count <= self::MAX_REDIRECTS ) {
 			// Validate current target URL before connecting.
 			$val = self::validate_url( $current_url );
 			if ( is_wp_error( $val ) ) {
+				self::cleanup_file( $tmp_file );
 				return $val;
 			}
 
-			// Perform safe request without auto-following redirects.
+			if ( ! function_exists( 'wp_tempnam' ) ) {
+				require_once ABSPATH . 'wp-admin/includes/file.php';
+			}
+
+			if ( null === $tmp_file ) {
+				$tmp_file = wp_tempnam( 'mcp_dl_' );
+				if ( ! $tmp_file ) {
+					return new \WP_Error( 'temp_file_failed', __( 'Could not create temporary file for download.', 'full-elementor-mcp' ) );
+				}
+			}
+
+			// Perform safe request with bounded streaming and manual redirect validation.
 			$response = wp_safe_remote_get(
 				$current_url,
 				array(
-					'timeout'     => $timeout,
-					'redirection' => 0, // Manual redirect validation.
-					'user-agent'  => 'Full-Elementor-MCP/' . FULL_ELEMENTOR_MCP_VERSION . '; ' . get_bloginfo( 'name' ),
+					'timeout'             => $timeout,
+					'redirection'         => 0, // Manual redirect validation.
+					'user-agent'          => 'Full-Elementor-MCP/' . FULL_ELEMENTOR_MCP_VERSION . '; ' . get_bloginfo( 'name' ),
+					'stream'              => true,
+					'filename'            => $tmp_file,
+					'limit_response_size' => $max_bytes + 1,
 				)
 			);
 
 			if ( is_wp_error( $response ) ) {
+				self::cleanup_file( $tmp_file );
 				return $response;
 			}
 
@@ -385,28 +515,27 @@ class Full_Elementor_MCP_Security_Strategies {
 			if ( in_array( $status, array( 301, 302, 303, 307, 308 ), true ) ) {
 				$location = wp_remote_retrieve_header( $response, 'location' );
 				if ( empty( $location ) || ! is_string( $location ) ) {
+					self::cleanup_file( $tmp_file );
 					return new \WP_Error( 'ssrf_redirect_missing_location', __( 'Redirect response did not include a Location header.', 'full-elementor-mcp' ) );
 				}
 
-				// Resolve relative redirect locations if necessary.
-				$parsed_loc = wp_parse_url( $location );
-				if ( empty( $parsed_loc['host'] ) ) {
-					$parsed_orig = wp_parse_url( $current_url );
-					$base        = ( $parsed_orig['scheme'] ?? 'https' ) . '://' . ( $parsed_orig['host'] ?? '' );
-					$location    = $base . ( str_starts_with( $location, '/' ) ? '' : '/' ) . $location;
-				}
-
-				$current_url = $location;
+				// Robust relative redirect resolution:
+				$current_url = self::resolve_redirect_url( $location, $current_url );
 				$redirect_count++;
 
 				if ( $redirect_count > self::MAX_REDIRECTS ) {
+					self::cleanup_file( $tmp_file );
 					return new \WP_Error( 'too_many_redirects', __( 'Too many redirects encountered while downloading resource.', 'full-elementor-mcp' ) );
 				}
 
+				// Reset temp file for next redirect hop.
+				self::cleanup_file( $tmp_file );
+				$tmp_file = null;
 				continue;
 			}
 
 			if ( $status < 200 || $status >= 300 ) {
+				self::cleanup_file( $tmp_file );
 				return new \WP_Error(
 					'http_download_failed',
 					sprintf(
@@ -418,27 +547,71 @@ class Full_Elementor_MCP_Security_Strategies {
 				);
 			}
 
+			// Validate Content-Length if provided by server.
+			$content_length = wp_remote_retrieve_header( $response, 'content-length' );
+			if ( ! empty( $content_length ) && is_numeric( $content_length ) ) {
+				if ( (int) $content_length > $max_bytes ) {
+					self::cleanup_file( $tmp_file );
+					return new \WP_Error(
+						'remote_file_too_large',
+						sprintf(
+							/* translators: 1: size, 2: max */
+							__( 'Remote file Content-Length (%1$d bytes) exceeds maximum limit (%2$d bytes).', 'full-elementor-mcp' ),
+							(int) $content_length,
+							$max_bytes
+						),
+						array( 'content_length' => (int) $content_length, 'max_bytes' => $max_bytes )
+					);
+				}
+			}
+
+			// In test mocks or non-streaming transports where body is returned in memory:
 			$body = wp_remote_retrieve_body( $response );
-			if ( '' === $body ) {
-				return new \WP_Error( 'empty_response', __( 'Downloaded file is empty.', 'full-elementor-mcp' ) );
+			if ( '' !== $body && ( ! file_exists( $tmp_file ) || 0 === filesize( $tmp_file ) ) ) {
+				if ( strlen( $body ) > $max_bytes ) {
+					self::cleanup_file( $tmp_file );
+					return new \WP_Error(
+						'remote_file_too_large',
+						sprintf(
+							/* translators: 1: size, 2: max */
+							__( 'Downloaded body size (%1$d bytes) exceeds maximum limit (%2$d bytes).', 'full-elementor-mcp' ),
+							strlen( $body ),
+							$max_bytes
+						),
+						array( 'size' => strlen( $body ), 'max_bytes' => $max_bytes )
+					);
+				}
+				file_put_contents( $tmp_file, $body );
 			}
 
-			// Write body to temporary file.
-			if ( ! function_exists( 'wp_tempnam' ) ) {
-				require_once ABSPATH . 'wp-admin/includes/file.php';
-			}
-
-			$tmp = wp_tempnam( 'mcp_dl_' );
-			if ( ! $tmp ) {
+			if ( ! file_exists( $tmp_file ) ) {
 				return new \WP_Error( 'temp_file_failed', __( 'Could not create temporary file for download.', 'full-elementor-mcp' ) );
 			}
 
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-			file_put_contents( $tmp, $body );
+			$actual_size = filesize( $tmp_file );
+			if ( false === $actual_size || 0 === $actual_size ) {
+				self::cleanup_file( $tmp_file );
+				return new \WP_Error( 'empty_response', __( 'Downloaded file is empty.', 'full-elementor-mcp' ) );
+			}
 
-			return $tmp;
+			if ( $actual_size > $max_bytes ) {
+				self::cleanup_file( $tmp_file );
+				return new \WP_Error(
+					'remote_file_too_large',
+					sprintf(
+						/* translators: 1: size, 2: max */
+						__( 'Downloaded file size (%1$d bytes) exceeds maximum limit (%2$d bytes).', 'full-elementor-mcp' ),
+						$actual_size,
+						$max_bytes
+					),
+					array( 'size' => $actual_size, 'max_bytes' => $max_bytes )
+				);
+			}
+
+			return $tmp_file;
 		}
 
+		self::cleanup_file( $tmp_file );
 		return new \WP_Error( 'too_many_redirects', __( 'Too many redirects encountered while downloading resource.', 'full-elementor-mcp' ) );
 	}
 
@@ -451,11 +624,13 @@ class Full_Elementor_MCP_Security_Strategies {
 	 *
 	 * Safe XML parsing:
 	 * - Uses DOMDocument with LIBXML_NONET to block external entity resolution.
+	 * - Rejects all <!DOCTYPE declarations entirely (fail closed for XXE).
 	 * - Rejects <script> tags.
+	 * - Rejects <foreignObject> tags alone (case-insensitive).
 	 * - Rejects inline event handler attributes (on*="...").
 	 * - Rejects javascript: URLs in href/xlink:href/src.
-	 * - Rejects dangerous <foreignObject> constructs.
-	 * - Rejects <!DOCTYPE with external entity definitions.
+	 * - Rejects external remote references in href, xlink:href, src, style, and <style> (http, https, //, file, etc.).
+	 * - Permitted: safe local fragment references (#id) and embedded raster data URIs (data:image/png...).
 	 *
 	 * @param string $svg_content Raw SVG markup.
 	 * @return true|\WP_Error True if safe, WP_Error if malicious or invalid.
@@ -472,33 +647,50 @@ class Full_Elementor_MCP_Security_Strategies {
 		}
 
 		// 1. Fast regex checks for obvious attacks before XML parsing.
+
+		// DOCTYPE rejection: reject all <!DOCTYPE declarations entirely.
+		if ( preg_match( '/<!DOCTYPE\b/i', $svg ) ) {
+			return new \WP_Error( 'svg_doctype_forbidden', __( 'SVG files with <!DOCTYPE> declarations are not allowed.', 'full-elementor-mcp' ) );
+		}
+
+		// Entity declaration rejection:
+		if ( preg_match( '/<!ENTITY\b/i', $svg ) ) {
+			return new \WP_Error( 'svg_xxe_detected', __( 'SVG contains forbidden entity declarations.', 'full-elementor-mcp' ) );
+		}
+
+		// <script> elements:
 		if ( preg_match( '/<script\b/i', $svg ) ) {
 			return new \WP_Error( 'svg_has_script', __( 'SVG contains forbidden <script> elements.', 'full-elementor-mcp' ) );
 		}
 
-		// Event handlers (e.g. onload, onerror, onclick).
+		// <foreignObject> elements alone (case-insensitive):
+		if ( preg_match( '/<\s*foreignObject\b/i', $svg ) ) {
+			return new \WP_Error( 'svg_has_foreign_object', __( 'SVG contains forbidden <foreignObject> elements.', 'full-elementor-mcp' ) );
+		}
+
+		// Event handlers (e.g. onload, onerror, onclick):
 		if ( preg_match( '/\s+on[a-zA-Z0-9_\-]+\s*=/i', $svg ) ) {
 			return new \WP_Error( 'svg_has_event_handler', __( 'SVG contains forbidden inline event handler attributes.', 'full-elementor-mcp' ) );
 		}
 
-		// javascript: or vbscript: URIs.
+		// javascript: or vbscript: URIs:
 		if ( preg_match( '/(javascript|vbscript)\s*:/i', $svg ) ) {
 			return new \WP_Error( 'svg_has_javascript_uri', __( 'SVG contains forbidden javascript: or vbscript: URIs.', 'full-elementor-mcp' ) );
 		}
 
-		// Dangerous data URIs (allow safe image/png, image/jpeg, image/webp raster embeds only).
+		// CSS @import rules:
+		if ( preg_match( '/@import\b/i', $svg ) ) {
+			return new \WP_Error( 'svg_external_resource_forbidden', __( 'SVG contains forbidden CSS @import rule.', 'full-elementor-mcp' ) );
+		}
+
+		// Dangerous data URIs (allow safe image/png, image/jpeg, image/webp raster embeds only):
 		if ( preg_match( '/data\s*:\s*(?!image\/(?:png|jpeg|jpg|webp|gif))/i', $svg ) ) {
 			return new \WP_Error( 'svg_has_dangerous_data_uri', __( 'SVG contains forbidden non-image data: URIs.', 'full-elementor-mcp' ) );
 		}
 
-		// Embedded interactive / executable elements.
+		// Embedded interactive / executable elements:
 		if ( preg_match( '/<(?:iframe|object|embed|applet|meta|link|form)\b/i', $svg ) ) {
 			return new \WP_Error( 'svg_has_forbidden_tag', __( 'SVG contains forbidden embedded document or object tags.', 'full-elementor-mcp' ) );
-		}
-
-		// XXE defense: check for external entity declarations in DOCTYPE.
-		if ( preg_match( '/<!DOCTYPE\b[^>]*\b(?:SYSTEM|PUBLIC|ENTITY)\b/i', $svg ) ) {
-			return new \WP_Error( 'svg_xxe_detected', __( 'SVG contains external DOCTYPE or entity declarations (XXE defense).', 'full-elementor-mcp' ) );
 		}
 
 		// 2. Strict XML Parser validation using DOMDocument with libxml security flags.
@@ -506,7 +698,7 @@ class Full_Elementor_MCP_Security_Strategies {
 			$prev_libxml = libxml_use_internal_errors( true );
 			$dom         = new \DOMDocument();
 
-			// Flags: LIBXML_NONET (disable network access), LIBXML_NOENT (substitute entities safely).
+			// Flags: LIBXML_NONET (disable network access).
 			$options = LIBXML_NONET;
 			if ( defined( 'LIBXML_NOBLANKS' ) ) {
 				$options |= LIBXML_NOBLANKS;
@@ -522,8 +714,8 @@ class Full_Elementor_MCP_Security_Strategies {
 				return new \WP_Error( 'invalid_svg_xml', sprintf( __( 'SVG XML parsing failed: %s', 'full-elementor-mcp' ), trim( $err_msg ) ) );
 			}
 
-			// Inspect DOM tree for forbidden nodes.
-			$forbidden_tags = array( 'script', 'foreignobject', 'iframe', 'object', 'embed', 'applet', 'meta', 'link', 'form' );
+			// Inspect DOM tree for forbidden nodes and foreignObject:
+			$forbidden_tags = array( 'script', 'iframe', 'object', 'embed', 'applet', 'meta', 'link', 'form' );
 			foreach ( $forbidden_tags as $tag ) {
 				$nodes = $dom->getElementsByTagName( $tag );
 				if ( $nodes->length > 0 ) {
@@ -538,23 +730,112 @@ class Full_Elementor_MCP_Security_Strategies {
 				}
 			}
 
-			// Inspect all attributes across all elements for event handlers or javascript: hrefs.
+			// Check foreignObject specifically in DOM:
+			$fo_nodes = $dom->getElementsByTagName( 'foreignObject' );
+			if ( 0 === $fo_nodes->length ) {
+				$fo_nodes = $dom->getElementsByTagName( 'foreignobject' );
+			}
+			if ( $fo_nodes->length > 0 ) {
+				return new \WP_Error( 'svg_has_foreign_object', __( 'SVG contains forbidden <foreignObject> elements.', 'full-elementor-mcp' ) );
+			}
+
+			// Inspect all elements and attributes for handlers, scripts, and external resource schemes:
 			$all_elements = $dom->getElementsByTagName( '*' );
 			foreach ( $all_elements as $elem ) {
+				$node_name  = strtolower( $elem->nodeName );
+				$local_name = strtolower( $elem->localName );
+
+				if ( 'foreignobject' === $node_name || 'foreignobject' === $local_name ) {
+					return new \WP_Error( 'svg_has_foreign_object', __( 'SVG contains forbidden <foreignObject> elements.', 'full-elementor-mcp' ) );
+				}
+
+				// Check <style> element textContent for @import and url():
+				if ( 'style' === $node_name || 'style' === $local_name ) {
+					$style_text = (string) $elem->textContent;
+					if ( preg_match( '/@import\b/i', $style_text ) ) {
+						return new \WP_Error( 'svg_external_resource_forbidden', __( 'SVG <style> contains forbidden @import rule.', 'full-elementor-mcp' ) );
+					}
+					if ( preg_match_all( '/url\s*\(\s*[\'"]?\s*(.*?)\s*[\'"]?\s*\)/i', $style_text, $matches ) ) {
+						foreach ( $matches[1] as $target ) {
+							$target = trim( $target );
+							if ( '' === $target || str_starts_with( $target, '#' ) || str_starts_with( strtolower( $target ), 'data:image/' ) ) {
+								continue;
+							}
+							return new \WP_Error(
+								'svg_external_resource_forbidden',
+								sprintf(
+									/* translators: %s: target URL */
+									__( 'SVG <style> contains forbidden external CSS url(): "%s".', 'full-elementor-mcp' ),
+									$target
+								)
+							);
+						}
+					}
+				}
+
 				if ( ! $elem->hasAttributes() ) {
 					continue;
 				}
-				foreach ( $elem->attributes as $attr ) {
-					$attr_name = strtolower( $attr->nodeName );
-					$attr_val  = strtolower( trim( $attr->nodeValue ) );
 
+				foreach ( $elem->attributes as $attr ) {
+					$attr_name      = strtolower( $attr->nodeName );
+					$attr_val       = trim( $attr->nodeValue );
+					$attr_val_lower = strtolower( $attr_val );
+
+					// Event handlers:
 					if ( str_starts_with( $attr_name, 'on' ) ) {
 						return new \WP_Error( 'svg_has_event_handler', sprintf( __( 'SVG contains event attribute "%s".', 'full-elementor-mcp' ), $attr_name ) );
 					}
 
-					if ( ( 'href' === $attr_name || 'xlink:href' === $attr_name || 'src' === $attr_name ) &&
-						( str_starts_with( $attr_val, 'javascript:' ) || str_starts_with( $attr_val, 'vbscript:' ) ) ) {
-						return new \WP_Error( 'svg_has_javascript_uri', __( 'SVG attribute contains executable javascript: URI.', 'full-elementor-mcp' ) );
+					// Style attribute inspection:
+					if ( 'style' === $attr_name ) {
+						if ( preg_match( '/@import\b/i', $attr_val ) ) {
+							return new \WP_Error( 'svg_external_resource_forbidden', __( 'SVG style attribute contains forbidden @import rule.', 'full-elementor-mcp' ) );
+						}
+						if ( preg_match_all( '/url\s*\(\s*[\'"]?\s*(.*?)\s*[\'"]?\s*\)/i', $attr_val, $matches ) ) {
+							foreach ( $matches[1] as $target ) {
+								$target = trim( $target );
+								if ( '' === $target || str_starts_with( $target, '#' ) || str_starts_with( strtolower( $target ), 'data:image/' ) ) {
+									continue;
+								}
+								return new \WP_Error(
+									'svg_external_resource_forbidden',
+									sprintf(
+										/* translators: %s: target URL */
+										__( 'SVG style attribute contains forbidden external CSS url(): "%s".', 'full-elementor-mcp' ),
+										$target
+									)
+								);
+							}
+						}
+					}
+
+					// Resource referencing attributes:
+					if ( 'href' === $attr_name || 'xlink:href' === $attr_name || 'src' === $attr_name || str_ends_with( $attr_name, ':href' ) ) {
+						if ( str_starts_with( $attr_val_lower, 'javascript:' ) || str_starts_with( $attr_val_lower, 'vbscript:' ) ) {
+							return new \WP_Error( 'svg_has_javascript_uri', __( 'SVG attribute contains executable javascript: URI.', 'full-elementor-mcp' ) );
+						}
+
+						// Allow safe local fragment references (e.g. #my-symbol, #gradient-1).
+						if ( str_starts_with( $attr_val, '#' ) ) {
+							continue;
+						}
+
+						// Allow safe embedded raster images.
+						if ( str_starts_with( $attr_val_lower, 'data:image/' ) ) {
+							continue;
+						}
+
+						// Reject any remote or external URL scheme (http, https, //, file, ftp, etc.).
+						return new \WP_Error(
+							'svg_external_resource_forbidden',
+							sprintf(
+								/* translators: 1: attribute, 2: URL */
+								__( 'SVG contains forbidden external resource reference in attribute "%1$s": "%2$s".', 'full-elementor-mcp' ),
+								$attr_name,
+								$attr_val
+							)
+						);
 					}
 				}
 			}
@@ -644,6 +925,7 @@ class Full_Elementor_MCP_Security_Strategies {
 
 		// External network access:
 		if ( in_array( $ability, array(
+			'full-elementor-mcp/add-stock-image',
 			'full-elementor-mcp/sideload-image',
 			'full-elementor-mcp/upload-svg-icon',
 			'full-elementor-mcp/search-images',
@@ -662,6 +944,105 @@ class Full_Elementor_MCP_Security_Strategies {
 			'has_external_network'     => $has_external_network,
 			'category'                 => $category,
 			'reasons'                  => $reasons,
+		);
+	}
+
+	/**
+	 * Authoritative security profile resolver combining static registry metadata and dynamic payload analysis.
+	 *
+	 * Single Phase 3 entrypoint for Phase 4 middleware.
+	 *
+	 * @param string               $ability Ability name (e.g. 'full-elementor-mcp/add-custom-js').
+	 * @param array<string, mixed> $args    Input arguments for dynamic classification.
+	 * @return array{
+	 *     ability: string,
+	 *     executable_content: bool,
+	 *     high_risk: bool,
+	 *     requires_unfiltered_html: bool,
+	 *     external_network_access: bool,
+	 *     irreversible: bool,
+	 *     protected_resource_possible: bool,
+	 *     tree_validation_required: bool,
+	 *     security_category: string,
+	 *     reasons: string[]
+	 * }
+	 */
+	public static function get_security_profile( string $ability, array $args = array() ): array {
+		$reasons = array();
+
+		// 1. Dynamic argument-based classification.
+		$dynamic                  = self::classify_ability_payload( $ability, $args );
+		$reasons                  = $dynamic['reasons'];
+		$executable_content       = $dynamic['is_executable'];
+		$high_risk                = $dynamic['is_high_risk'];
+		$requires_unfiltered_html = $dynamic['requires_unfiltered_html'];
+		$external_network_access  = $dynamic['has_external_network'];
+		$irreversible             = $dynamic['is_irreversible'];
+		$category                 = $dynamic['category'];
+
+		// 2. Static Mutation Registry metadata (if registered).
+		$strategy                 = null;
+		$tree_validation_required = false;
+
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) ) {
+			$strategy = Full_Elementor_MCP_Mutation_Registry::get( $ability );
+		}
+
+		if ( is_array( $strategy ) ) {
+			$tree_validation_required = ! empty( $strategy['requires_tree_validation'] );
+
+			if ( ! empty( $strategy['external_network_access'] ) ) {
+				$external_network_access = true;
+				if ( ! in_array( 'Ability is registered with external network access.', $reasons, true ) ) {
+					$reasons[] = 'Ability is registered with external network access.';
+				}
+			}
+
+			if ( ! empty( $strategy['executable_content'] ) ) {
+				$executable_content = true;
+				$high_risk          = true;
+			}
+
+			if ( ! empty( $strategy['requires_unfiltered_html'] ) ) {
+				$requires_unfiltered_html = true;
+			}
+
+			if ( 'standard' === $category && ! empty( $strategy['security_profile'] ) ) {
+				$category = (string) $strategy['security_profile'];
+			}
+		} elseif ( ! in_array( $ability, array( 'full-elementor-mcp/search-images', 'full-elementor-mcp/get-image-details' ), true ) ) {
+			// Unknown ability not registered in mutation registry and not known readonly tool:
+			// Fail closed conservatively.
+			$high_risk = true;
+			if ( 'standard' === $category ) {
+				$category = 'unknown';
+			}
+			$reasons[] = 'Ability profile is unknown or unregistered; failing closed.';
+		}
+
+		// 3. Protected resource check:
+		$protected_resource_possible = false;
+		$target_id                   = (int) ( $args['post_id'] ?? $args['page_id'] ?? $args['template_id'] ?? 0 );
+		if ( $target_id > 0 ) {
+			$prot_check = self::is_protected_asset( $target_id );
+			if ( $prot_check['protected'] ) {
+				$protected_resource_possible = true;
+				$high_risk                   = true;
+				$reasons[]                   = sprintf( 'Target resource (ID %d) is protected: %s', $target_id, $prot_check['reason'] ?? '' );
+			}
+		}
+
+		return array(
+			'ability'                     => $ability,
+			'executable_content'          => (bool) $executable_content,
+			'high_risk'                   => (bool) $high_risk,
+			'requires_unfiltered_html'    => (bool) $requires_unfiltered_html,
+			'external_network_access'     => (bool) $external_network_access,
+			'irreversible'                => (bool) $irreversible,
+			'protected_resource_possible' => (bool) $protected_resource_possible,
+			'tree_validation_required'    => (bool) $tree_validation_required,
+			'security_category'           => (string) $category,
+			'reasons'                     => $reasons,
 		);
 	}
 

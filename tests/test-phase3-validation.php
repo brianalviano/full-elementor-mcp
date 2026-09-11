@@ -267,14 +267,25 @@ if ( ! function_exists( 'remove_all_filters' ) ) {
 if ( ! function_exists( 'wp_safe_remote_get' ) ) {
 	function wp_safe_remote_get( string $url, array $args = array() ): array|\WP_Error {
 		if ( isset( $GLOBALS['mock_http_responses'][ $url ] ) ) {
-			return $GLOBALS['mock_http_responses'][ $url ];
+			$mock = $GLOBALS['mock_http_responses'][ $url ];
+			if ( is_wp_error( $mock ) ) {
+				return $mock;
+			}
+			if ( ! empty( $args['stream'] ) && ! empty( $args['filename'] ) && isset( $mock['body'] ) ) {
+				file_put_contents( $args['filename'], $mock['body'] );
+			}
+			return $mock;
 		}
 		// Default mock: return 200 OK with dummy body.
-		return array(
+		$resp = array(
 			'response' => array( 'code' => 200 ),
 			'headers'  => array( 'content-type' => 'image/png' ),
 			'body'     => 'PNG_MOCK_BYTES',
 		);
+		if ( ! empty( $args['stream'] ) && ! empty( $args['filename'] ) ) {
+			file_put_contents( $args['filename'], $resp['body'] );
+		}
+		return $resp;
 	}
 }
 if ( ! function_exists( 'wp_remote_retrieve_response_code' ) ) {
@@ -553,6 +564,15 @@ echo "=======================================================\n\n";
 // 1. Tree Structure Tests
 // =========================================================================
 
+Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+	'elementor'       => true,
+	'elementor_pro'   => true,
+	'classic_widgets' => true,
+	'containers'      => true,
+	'nested_elements' => true,
+	'atomic_elements' => true,
+) );
+
 run_test( 'Tree: valid empty document passes validation', function () {
 	$res = Full_Elementor_MCP_Tree_Validator::validate_document( array() );
 	assert_true( true === $res );
@@ -684,7 +704,7 @@ run_test( 'Tree: invalid children type is rejected', function () {
 
 	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
 	assert_is_wp_error( $res );
-	assert_equals( 'invalid_elementor_tree', $res->get_error_code() );
+	assert_equals( 'invalid_child_structure', $res->get_error_code() );
 } );
 
 run_test( 'Tree: widget node containing child elements is rejected', function () {
@@ -818,6 +838,451 @@ run_test( 'Tree: unknown third-party settings are preserved and accepted if JSON
 	assert_true( true === $res );
 } );
 
+run_test( 'Tree: container structure fails when containers capability is disabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'classic_widgets' => true,
+		'containers'      => false,
+	) );
+
+	$tree = array(
+		array(
+			'id'       => 'cnt_gate_test',
+			'elType'   => 'container',
+			'settings' => array(),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'unsupported_element_feature', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: container structure succeeds when containers capability is enabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'classic_widgets' => true,
+		'containers'      => true,
+	) );
+
+	$tree = array(
+		array(
+			'id'       => 'cnt_gate_pass',
+			'elType'   => 'container',
+			'settings' => array(),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_true( true === $res );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: atomic structure fails when atomic capability is disabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'classic_widgets' => true,
+		'atomic_elements' => false,
+	) );
+
+	$tree = array(
+		array(
+			'id'       => 'atomic_gate_test',
+			'elType'   => 'e-div-block',
+			'settings' => array(),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'unsupported_element_feature', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: atomic structure succeeds when atomic capability is enabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'classic_widgets' => true,
+		'atomic_elements' => true,
+	) );
+
+	$tree = array(
+		array(
+			'id'       => 'atomic_gate_pass',
+			'elType'   => 'e-div-block',
+			'settings' => array(),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_true( true === $res );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: classic section and column structure succeeds without container feature', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'classic_widgets' => true,
+		'containers'      => false,
+	) );
+
+	$tree = array(
+		array(
+			'id'       => 'classic_sec_1',
+			'elType'   => 'section',
+			'settings' => array(),
+			'elements' => array(
+				array(
+					'id'       => 'classic_col_1',
+					'elType'   => 'column',
+					'settings' => array(),
+					'elements' => array(
+						array(
+							'id'         => 'classic_wdg_1',
+							'elType'     => 'widget',
+							'widgetType' => 'heading',
+							'settings'   => array( 'title' => 'Classic' ),
+							'elements'   => array(),
+						),
+					),
+				),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_true( true === $res );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: mixed classic section and container document succeeds when containers enabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'classic_widgets' => true,
+		'containers'      => true,
+	) );
+
+	$tree = array(
+		array(
+			'id'       => 'mix_sec_1',
+			'elType'   => 'section',
+			'settings' => array(),
+			'elements' => array(
+				array(
+					'id'       => 'mix_col_1',
+					'elType'   => 'column',
+					'settings' => array(),
+					'elements' => array(
+						array(
+							'id'         => 'mix_wdg_1',
+							'elType'     => 'widget',
+							'widgetType' => 'heading',
+							'elements'   => array(),
+						),
+					),
+				),
+			),
+		),
+		array(
+			'id'       => 'mix_cnt_1',
+			'elType'   => 'container',
+			'settings' => array(),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_true( true === $res );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: nested widget (nested-tabs) allows container children when nested_elements is enabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'containers'      => true,
+		'nested_elements' => true,
+	) );
+
+	$tree = array(
+		array(
+			'id'         => 'tabs_widget_1',
+			'elType'     => 'widget',
+			'widgetType' => 'nested-tabs',
+			'settings'   => array(),
+			'elements'   => array(
+				array(
+					'id'       => 'tab_content_cnt_1',
+					'elType'   => 'container',
+					'settings' => array(),
+					'elements' => array(),
+				),
+				array(
+					'id'       => 'tab_content_cnt_2',
+					'elType'   => 'container',
+					'settings' => array(),
+					'elements' => array(),
+				),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_true( true === $res );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: nested widget fails when nested_elements capability is disabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'containers'      => true,
+		'nested_elements' => false,
+	) );
+
+	$tree = array(
+		array(
+			'id'         => 'tabs_widget_fail',
+			'elType'     => 'widget',
+			'widgetType' => 'nested-tabs',
+			'settings'   => array(),
+			'elements'   => array(
+				array(
+					'id'       => 'tab_child_cnt',
+					'elType'   => 'container',
+					'settings' => array(),
+					'elements' => array(),
+				),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'unsupported_element_feature', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: ordinary classic widget (heading) with children is rejected even if nested_elements is enabled', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'containers'      => true,
+		'nested_elements' => true,
+	) );
+
+	$tree = array(
+		array(
+			'id'         => 'heading_with_children',
+			'elType'     => 'widget',
+			'widgetType' => 'heading',
+			'settings'   => array(),
+			'elements'   => array(
+				array(
+					'id'       => 'illegal_child',
+					'elType'   => 'container',
+					'elements' => array(),
+				),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'invalid_child_structure', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: nested widget containing non-container child is rejected', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array(
+		'elementor'       => true,
+		'containers'      => true,
+		'nested_elements' => true,
+	) );
+
+	$tree = array(
+		array(
+			'id'         => 'nested_tabs_bad_child',
+			'elType'     => 'widget',
+			'widgetType' => 'nested-tabs',
+			'settings'   => array(),
+			'elements'   => array(
+				array(
+					'id'         => 'bad_direct_widget',
+					'elType'     => 'widget',
+					'widgetType' => 'heading',
+					'elements'   => array(),
+				),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'invalid_child_structure', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: unsupported structural elType is rejected', function () {
+	$tree = array(
+		array(
+			'id'       => 'unknown_elem',
+			'elType'   => 'unsupported_custom_layout',
+			'settings' => array(),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'invalid_element_type', $res->get_error_code() );
+} );
+
+run_test( 'Tree: top-level associative element map is rejected as invalid_child_structure', function () {
+	$bad_tree = array(
+		'first_block'  => array( 'id' => 'node_1', 'elType' => 'section', 'elements' => array() ),
+		'second_block' => array( 'id' => 'node_2', 'elType' => 'section', 'elements' => array() ),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $bad_tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'invalid_child_structure', $res->get_error_code() );
+} );
+
+run_test( 'Tree: top-level sparse non-sequential numeric keys rejected as invalid_child_structure', function () {
+	$bad_tree = array(
+		0 => array( 'id' => 'node_1', 'elType' => 'section', 'elements' => array() ),
+		2 => array( 'id' => 'node_2', 'elType' => 'section', 'elements' => array() ),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $bad_tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'invalid_child_structure', $res->get_error_code() );
+} );
+
+run_test( 'Tree: nested associative child elements collection is rejected as invalid_child_structure', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'containers' => true ) );
+
+	$bad_tree = array(
+		array(
+			'id'       => 'parent_cnt',
+			'elType'   => 'container',
+			'elements' => array(
+				'child_a' => array( 'id' => 'c_a', 'elType' => 'widget', 'widgetType' => 'heading', 'elements' => array() ),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $bad_tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'invalid_child_structure', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: valid sequential numeric ordered list passes and maintains exact ordering', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'containers' => true ) );
+
+	$valid_tree = array(
+		array( 'id' => 'node_alpha', 'elType' => 'container', 'elements' => array() ),
+		array( 'id' => 'node_beta', 'elType' => 'container', 'elements' => array() ),
+		array( 'id' => 'node_gamma', 'elType' => 'container', 'elements' => array() ),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $valid_tree );
+	assert_true( true === $res );
+
+	// Confirm keys are strictly 0, 1, 2
+	assert_equals( array( 0, 1, 2 ), array_keys( $valid_tree ) );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: stdClass object in settings is rejected as unsafe_setting_value', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'containers' => true ) );
+
+	$tree = array(
+		array(
+			'id'       => 'node_with_stdclass',
+			'elType'   => 'container',
+			'settings' => array(
+				'my_obj' => (object) array( 'foo' => 'bar' ),
+			),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'unsafe_setting_value', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: JsonSerializable object in settings is rejected as unsafe_setting_value', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'containers' => true ) );
+
+	$json_obj = new class implements \JsonSerializable {
+		public function jsonSerialize(): mixed {
+			return array( 'safe' => 'content' );
+		}
+	};
+
+	$tree = array(
+		array(
+			'id'       => 'node_with_jsonserializable',
+			'elType'   => 'container',
+			'settings' => array(
+				'serialized_obj' => $json_obj,
+			),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_is_wp_error( $res );
+	assert_equals( 'unsafe_setting_value', $res->get_error_code() );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Tree: JSON scalar types (null, bool, int, float, string, array) are accepted in settings', function () {
+	Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'containers' => true ) );
+
+	$tree = array(
+		array(
+			'id'       => 'node_scalars',
+			'elType'   => 'container',
+			'settings' => array(
+				'v_null'   => null,
+				'v_bool'   => true,
+				'v_int'    => 42,
+				'v_float'  => 3.14159,
+				'v_string' => 'hello world',
+				'v_array'  => array( 'sub_key' => 100, 'sub_list' => array( 1, 2, 3 ) ),
+			),
+			'elements' => array(),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Tree_Validator::validate_document( $tree );
+	assert_true( true === $res );
+
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
 // =========================================================================
 // 2. Element ID Validation Tests
 // =========================================================================
@@ -899,6 +1364,27 @@ run_test( 'Features: capability detector accurately reflects mock environments',
 	assert_true( Full_Elementor_MCP_Atomic_Props::is_atomic_supported() );
 
 	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+} );
+
+run_test( 'Features: runtime fail-closed when Elementor is absent', function () {
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+
+	// In test environment without Elementor classes or mocks:
+	assert_false( Full_Elementor_MCP_Elementor_Features::has_elementor() );
+	assert_false( Full_Elementor_MCP_Elementor_Features::has_elementor_pro() );
+	assert_false( Full_Elementor_MCP_Elementor_Features::supports_containers() );
+	assert_false( Full_Elementor_MCP_Elementor_Features::supports_nested_elements() );
+	assert_false( Full_Elementor_MCP_Elementor_Features::supports_atomic_elements() );
+	assert_false( Full_Elementor_MCP_Atomic_Props::is_atomic_supported() );
+} );
+
+run_test( 'Features: ELEMENTOR_VERSION constant alone CANNOT activate Atomic / Editor V4', function () {
+	Full_Elementor_MCP_Elementor_Features::reset_mocks();
+
+	// Even though ELEMENTOR_VERSION is defined as '4.0.0' in bootstrap,
+	// without centralized capability evidence it MUST remain false.
+	assert_false( Full_Elementor_MCP_Atomic_Props::is_atomic_supported() );
+	assert_false( Full_Elementor_MCP_Elementor_Features::supports_atomic_elements() );
 } );
 
 // =========================================================================
@@ -1100,48 +1586,208 @@ run_test( 'SSRF Redirect: redirect loop exceeding limit is blocked', function ()
 	unset( $GLOBALS['mock_http_responses']['https://loop.com/redirect'] );
 } );
 
+run_test( 'SSRF: Security_Guard::validate_remote_url delegates to Security_Strategies (single truth)', function () {
+	$res = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'http://127.0.0.1/admin' );
+	assert_is_wp_error( $res );
+	assert_equals( 'ssrf_blocked_ip', $res->get_error_code() );
+
+	$res2 = Full_Elementor_MCP_Security_Guard::validate_remote_url( 'file:///etc/passwd' );
+	assert_is_wp_error( $res2 );
+	assert_equals( 'invalid_protocol', $res2->get_error_code() );
+} );
+
+run_test( 'SSRF Redirect: relative redirect resolution normalizes relative, query, and scheme-relative URLs', function () {
+	$base = 'https://example.com/dir/page.html';
+
+	// Absolute path
+	assert_equals( 'https://example.com/new/path.jpg', Full_Elementor_MCP_Security_Strategies::resolve_redirect_url( '/new/path.jpg', $base ) );
+
+	// Relative path
+	assert_equals( 'https://example.com/dir/photo.jpg', Full_Elementor_MCP_Security_Strategies::resolve_redirect_url( 'photo.jpg', $base ) );
+
+	// Traversal
+	assert_equals( 'https://example.com/up.jpg', Full_Elementor_MCP_Security_Strategies::resolve_redirect_url( '../up.jpg', $base ) );
+
+	// Query only
+	assert_equals( 'https://example.com/dir/page.html?ref=1', Full_Elementor_MCP_Security_Strategies::resolve_redirect_url( '?ref=1', $base ) );
+
+	// Scheme-relative
+	assert_equals( 'https://other-cdn.com/asset.png', Full_Elementor_MCP_Security_Strategies::resolve_redirect_url( '//other-cdn.com/asset.png', $base ) );
+} );
+
+run_test( 'Safe Download: Content-Length exceeding limit is rejected before download', function () {
+	Full_Elementor_MCP_Security_Strategies::set_mock_dns( array( 'public-cdn.com' => array( '93.184.216.34' ) ) );
+
+	$GLOBALS['mock_http_responses']['https://public-cdn.com/huge.png'] = array(
+		'response' => array( 'code' => 200 ),
+		'headers'  => array( 'content-length' => '20000000', 'content-type' => 'image/png' ),
+		'body'     => 'CHUNK',
+	);
+
+	$res = Full_Elementor_MCP_Security_Strategies::safe_download_url( 'https://public-cdn.com/huge.png', 30, 5000000 );
+	assert_is_wp_error( $res );
+	assert_equals( 'remote_file_too_large', $res->get_error_code() );
+
+	Full_Elementor_MCP_Security_Strategies::reset_mock_dns();
+	unset( $GLOBALS['mock_http_responses']['https://public-cdn.com/huge.png'] );
+} );
+
+run_test( 'Safe Download: streamed body exceeding limit is rejected and temp file cleaned up', function () {
+	Full_Elementor_MCP_Security_Strategies::set_mock_dns( array( 'public-cdn.com' => array( '93.184.216.34' ) ) );
+
+	$GLOBALS['mock_http_responses']['https://public-cdn.com/stream-huge.png'] = array(
+		'response' => array( 'code' => 200 ),
+		'headers'  => array( 'content-type' => 'image/png' ),
+		'body'     => str_repeat( 'X', 6000 ),
+	);
+
+	$res = Full_Elementor_MCP_Security_Strategies::safe_download_url( 'https://public-cdn.com/stream-huge.png', 30, 2000 );
+	assert_is_wp_error( $res );
+	assert_equals( 'remote_file_too_large', $res->get_error_code() );
+
+	Full_Elementor_MCP_Security_Strategies::reset_mock_dns();
+	unset( $GLOBALS['mock_http_responses']['https://public-cdn.com/stream-huge.png'] );
+} );
+
+run_test( 'Safe Download: valid download within size limit succeeds and creates valid temp file', function () {
+	Full_Elementor_MCP_Security_Strategies::set_mock_dns( array( 'public-cdn.com' => array( '93.184.216.34' ) ) );
+
+	$payload = 'VALID_IMAGE_DATA_12345';
+	$GLOBALS['mock_http_responses']['https://public-cdn.com/valid.png'] = array(
+		'response' => array( 'code' => 200 ),
+		'headers'  => array( 'content-length' => (string) strlen( $payload ), 'content-type' => 'image/png' ),
+		'body'     => $payload,
+	);
+
+	$tmp = Full_Elementor_MCP_Security_Strategies::safe_download_url( 'https://public-cdn.com/valid.png', 30, 50000 );
+	assert_true( is_string( $tmp ) && file_exists( $tmp ) );
+	assert_equals( $payload, file_get_contents( $tmp ) );
+	@unlink( $tmp );
+
+	Full_Elementor_MCP_Security_Strategies::reset_mock_dns();
+	unset( $GLOBALS['mock_http_responses']['https://public-cdn.com/valid.png'] );
+} );
+
 // =========================================================================
 // 6. SVG XML Security Tests
 // =========================================================================
 
-run_test( 'SVG: valid SVG passes validation', function () {
+run_test( 'SVG: valid clean SVG passes validation', function () {
 	$clean_svg = '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="40" fill="green"/></svg>';
 	assert_true( true === Full_Elementor_MCP_Security_Strategies::validate_svg( $clean_svg ) );
 } );
 
-run_test( 'SVG: rejects embedded <script> tags', function () {
-	$bad_svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert("xss")</script><circle cx="50" cy="50" r="40"/></svg>';
-	$res     = Full_Elementor_MCP_Security_Strategies::validate_svg( $bad_svg );
+run_test( 'SVG: rejects foreignObject tag alone', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject width="100" height="100"><div>dangerous div</div></foreignObject></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_has_foreign_object', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects mixed-case ForeignObject variant alone', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><ForeignObject width="100" height="100"><p>test</p></ForeignObject></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_has_foreign_object', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects embedded script tag alone', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert("xss")</script><circle cx="50" cy="50" r="40"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
 	assert_is_wp_error( $res );
 	assert_equals( 'svg_has_script', $res->get_error_code() );
 } );
 
-run_test( 'SVG: rejects inline event handler attributes', function () {
-	$bad_svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="40" onload="alert(1)"/></svg>';
-	$res     = Full_Elementor_MCP_Security_Strategies::validate_svg( $bad_svg );
+run_test( 'SVG: rejects inline event handler attribute alone', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="40" onload="alert(1)"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
 	assert_is_wp_error( $res );
 	assert_equals( 'svg_has_event_handler', $res->get_error_code() );
 } );
 
-run_test( 'SVG: rejects javascript: href URIs', function () {
-	$bad_svg = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><a xlink:href="javascript:alert(1)"><circle cx="50" cy="50" r="40"/></a></svg>';
-	$res     = Full_Elementor_MCP_Security_Strategies::validate_svg( $bad_svg );
+run_test( 'SVG: rejects javascript: href URI alone', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><a xlink:href="javascript:alert(1)"><circle cx="50" cy="50" r="40"/></a></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
 	assert_is_wp_error( $res );
 	assert_equals( 'svg_has_javascript_uri', $res->get_error_code() );
 } );
 
-run_test( 'SVG: rejects dangerous foreignObject or iframe tags', function () {
-	$bad_svg = '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject width="100" height="100"><iframe src="http://evil.com"></iframe></foreignObject></svg>';
-	$res     = Full_Elementor_MCP_Security_Strategies::validate_svg( $bad_svg );
+run_test( 'SVG: rejects remote HTTPS href in a tag', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://attacker.com/evil"><circle cx="50" cy="50" r="40"/></a></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
 	assert_is_wp_error( $res );
-	assert_equals( 'svg_has_forbidden_tag', $res->get_error_code() );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
 } );
 
-run_test( 'SVG: rejects XXE DOCTYPE external entity declarations', function () {
-	$bad_svg = '<?xml version="1.0"?><!DOCTYPE svg SYSTEM "http://evil.com/xxe.dtd"><svg xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="40"/></svg>';
-	$res     = Full_Elementor_MCP_Security_Strategies::validate_svg( $bad_svg );
+run_test( 'SVG: rejects protocol-relative href in a tag', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><a href="//attacker.com/evil"><circle cx="50" cy="50" r="40"/></a></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
 	assert_is_wp_error( $res );
-	assert_equals( 'svg_xxe_detected', $res->get_error_code() );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects file URI in a tag', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><a href="file:///etc/passwd"><circle cx="50" cy="50" r="40"/></a></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects image tag with remote href', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://attacker.com/leak.png"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects use tag with remote href', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><use href="https://attacker.com/sprites.svg#icon"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects CSS url() referencing remote resource', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: url("https://attacker.com/bg.png"); }</style><rect width="10" height="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects CSS @import referencing remote stylesheet', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><style>@import "https://attacker.com/style.css";</style></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_external_resource_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects DOCTYPE declaration alone', function () {
+	$svg = '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"><circle r="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_equals( 'svg_doctype_forbidden', $res->get_error_code() );
+} );
+
+run_test( 'SVG: rejects ENTITY declaration alone', function () {
+	$svg = '<?xml version="1.0"?><!ENTITY xxe SYSTEM "file:///etc/passwd"><svg xmlns="http://www.w3.org/2000/svg"><circle r="10"/></svg>';
+	$res = Full_Elementor_MCP_Security_Strategies::validate_svg( $svg );
+	assert_is_wp_error( $res );
+	assert_true( in_array( $res->get_error_code(), array( 'svg_doctype_forbidden', 'svg_xxe_detected' ), true ) );
+} );
+
+run_test( 'SVG: accepts safe local fragment reference in use tag', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><defs><circle id="dot" r="5"/></defs><use href="#dot"/></svg>';
+	assert_true( true === Full_Elementor_MCP_Security_Strategies::validate_svg( $svg ) );
+} );
+
+run_test( 'SVG: accepts safe local gradient reference in fill', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="grad1"/></defs><rect fill="url(#grad1)" width="10" height="10"/></svg>';
+	assert_true( true === Full_Elementor_MCP_Security_Strategies::validate_svg( $svg ) );
+} );
+
+run_test( 'SVG: accepts safe embedded raster data image', function () {
+	$svg = '<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="/></svg>';
+	assert_true( true === Full_Elementor_MCP_Security_Strategies::validate_svg( $svg ) );
 } );
 
 // =========================================================================
@@ -1181,6 +1827,81 @@ run_test( 'Classification: permanent deletion identified as irreversible', funct
 	$class_force = Full_Elementor_MCP_Security_Strategies::classify_ability_payload( 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => true ) );
 	assert_true( $class_force['is_irreversible'] );
 	assert_true( $class_force['is_high_risk'] );
+} );
+
+run_test( 'Security Profile: add-custom-js is executable, high-risk, and requires unfiltered_html', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-custom-js', array( 'js' => 'alert(1);' ) );
+	assert_true( $prof['executable_content'] );
+	assert_true( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+	assert_equals( 'custom_code', $prof['security_category'] );
+} );
+
+run_test( 'Security Profile: add-code-snippet and update-code-snippet are executable and high-risk', function () {
+	$prof_add = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-code-snippet', array( 'code' => 'phpinfo();' ) );
+	assert_true( $prof_add['executable_content'] );
+	assert_true( $prof_add['high_risk'] );
+
+	$prof_up = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/update-code-snippet', array( 'snippet_id' => 5, 'code' => 'echo 1;' ) );
+	assert_true( $prof_up['executable_content'] );
+	assert_true( $prof_up['high_risk'] );
+} );
+
+run_test( 'Security Profile: add-custom-css requires unfiltered_html but is NOT executable', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-custom-css', array( 'css' => 'body { color: red; }' ) );
+	assert_false( $prof['executable_content'] );
+	assert_false( $prof['high_risk'] );
+	assert_true( $prof['requires_unfiltered_html'] );
+	assert_equals( 'custom_css', $prof['security_category'] );
+} );
+
+run_test( 'Security Profile: add-html dynamic classification detects executable script tags and handlers', function () {
+	$prof_safe = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-html', array( 'html' => '<p>Safe Text</p>' ) );
+	assert_false( $prof_safe['executable_content'] );
+
+	$prof_script = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-html', array( 'html' => '<script>alert(1);</script>' ) );
+	assert_true( $prof_script['executable_content'] );
+	assert_true( $prof_script['high_risk'] );
+
+	$prof_handler = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-html', array( 'html' => '<img src="x" onerror="alert(1)"/>' ) );
+	assert_true( $prof_handler['executable_content'] );
+	assert_true( $prof_handler['high_risk'] );
+} );
+
+run_test( 'Security Profile: remote network abilities have external_network_access = true', function () {
+	$net_abilities = array(
+		'full-elementor-mcp/add-stock-image',
+		'full-elementor-mcp/sideload-image',
+		'full-elementor-mcp/upload-svg-icon',
+		'full-elementor-mcp/search-images',
+		'full-elementor-mcp/get-image-details',
+	);
+
+	foreach ( $net_abilities as $ab ) {
+		$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile( $ab, array() );
+		assert_true( $prof['external_network_access'], "Ability {$ab} must have external_network_access = true" );
+	}
+} );
+
+run_test( 'Security Profile: irreversible permanent deletion identified when force = true', function () {
+	$prof_trash = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => false ) );
+	assert_false( $prof_trash['irreversible'] );
+
+	$prof_force = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/delete-page', array( 'post_id' => 10, 'force' => true ) );
+	assert_true( $prof_force['irreversible'] );
+	assert_true( $prof_force['high_risk'] );
+} );
+
+run_test( 'Security Profile: unknown ability fails closed with unknown category and high_risk', function () {
+	$prof = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/unregistered-secret-ability', array() );
+	assert_equals( 'unknown', $prof['security_category'] );
+	assert_true( $prof['high_risk'] );
+} );
+
+run_test( 'Security Profile: Mutation_Registry delegates to authoritative Security_Strategies profile', function () {
+	$reg_prof = Full_Elementor_MCP_Mutation_Registry::get_security_profile( 'full-elementor-mcp/add-custom-js', array() );
+	$sec_prof = Full_Elementor_MCP_Security_Strategies::get_security_profile( 'full-elementor-mcp/add-custom-js', array() );
+	assert_equals( $sec_prof, $reg_prof );
 } );
 
 run_test( 'Protected Assets: identifies front page, posts page, and active kit', function () {

@@ -366,103 +366,57 @@ class Full_Elementor_MCP_Security_Guard {
 	/**
 	 * Defense-in-depth URL and IP validation for remote downloads.
 	 *
-	 * Validates protocols (HTTP/HTTPS) and resolves host IPs to block:
-	 * - Loopback (127.0.0.0/8, ::1)
-	 * - Private RFC 1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-	 * - Link-local (169.254.0.0/16, fe80::/10)
-	 * - Cloud metadata (169.254.169.254)
-	 * - Blocked internal hostnames
+	 * Delegates directly to the authoritative Phase 3 Security Strategies layer.
 	 *
 	 * @param string $url External URL to validate.
 	 * @return true|\WP_Error True if valid, WP_Error if unsafe.
 	 */
 	public static function validate_remote_url( string $url ) {
-		$url = trim( $url );
-		if ( empty( $url ) ) {
-			return new \WP_Error( 'invalid_url', __( 'Remote URL cannot be empty.', 'full-elementor-mcp' ) );
-		}
-
-		$parsed = wp_parse_url( $url );
-		if ( ! $parsed || empty( $parsed['scheme'] ) || empty( $parsed['host'] ) ) {
-			return new \WP_Error( 'invalid_url', __( 'Malformed URL structure.', 'full-elementor-mcp' ) );
-		}
-
-		$scheme = strtolower( (string) $parsed['scheme'] );
-		if ( ! in_array( $scheme, array( 'http', 'https' ), true ) ) {
-			return new \WP_Error( 'invalid_protocol', __( 'Only HTTP and HTTPS URLs are allowed.', 'full-elementor-mcp' ) );
-		}
-
-		$host = strtolower( (string) $parsed['host'] );
-
-		// Check blocked hostnames.
-		foreach ( self::BLOCKED_HOSTNAMES as $blocked ) {
-			if ( $host === $blocked || str_ends_with( $host, '.' . $blocked ) ) {
-				return new \WP_Error( 'ssrf_blocked_host', __( 'Access to local or cloud metadata hostnames is forbidden.', 'full-elementor-mcp' ) );
+		if ( ! class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$file = __DIR__ . '/class-security-strategies.php';
+			if ( file_exists( $file ) ) {
+				require_once $file;
 			}
 		}
 
-		// Resolve host to IPs.
-		$ips = gethostbynamel( $host );
-		if ( false === $ips || empty( $ips ) ) {
-			// If gethostbynamel fails, check if the host itself is an IP literal.
-			if ( filter_var( $host, FILTER_VALIDATE_IP ) ) {
-				$ips = array( $host );
-			} else {
-				return new \WP_Error( 'dns_resolution_failed', __( 'Could not resolve host name.', 'full-elementor-mcp' ) );
-			}
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			return Full_Elementor_MCP_Security_Strategies::validate_url( $url );
 		}
 
-		foreach ( $ips as $ip ) {
-			if ( self::is_forbidden_ip( $ip ) ) {
-				return new \WP_Error(
-					'ssrf_blocked_ip',
-					sprintf(
-						/* translators: %s: blocked IP */
-						__( 'URL resolves to a forbidden private, loopback, or cloud-metadata IP address (%s).', 'full-elementor-mcp' ),
-						esc_html( $ip )
-					)
-				);
-			}
-		}
-
-		return true;
+		return new \WP_Error(
+			'security_infrastructure_unavailable',
+			__( 'Security strategies layer is unavailable.', 'full-elementor-mcp' )
+		);
 	}
 
 	/**
 	 * Checks if an IP address falls in loopback, private, link-local, or cloud metadata ranges.
 	 *
+	 * Delegates to authoritative Security Strategies validator.
+	 *
 	 * @param string $ip IPv4 or IPv6 address.
 	 * @return bool True if forbidden.
 	 */
 	public static function is_forbidden_ip( string $ip ): bool {
-		// Validate IP format.
+		if ( ! class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			$file = __DIR__ . '/class-security-strategies.php';
+			if ( file_exists( $file ) ) {
+				require_once $file;
+			}
+		}
+
+		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			return Full_Elementor_MCP_Security_Strategies::is_forbidden_ip( $ip );
+		}
+
+		// Fallback check if security strategies not loaded.
 		$flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
 		if ( false === filter_var( $ip, FILTER_VALIDATE_IP, $flags ) ) {
 			return true;
 		}
 
-		// Explicit cloud metadata check (169.254.169.254).
-		if ( '169.254.169.254' === $ip ) {
-			return true;
-		}
-
-		// IPv4 loopback (127.0.0.0/8).
-		if ( str_starts_with( $ip, '127.' ) ) {
-			return true;
-		}
-
-		// IPv4 link-local (169.254.0.0/16).
-		if ( str_starts_with( $ip, '169.254.' ) ) {
-			return true;
-		}
-
-		// IPv4 zero/broadcast.
-		if ( str_starts_with( $ip, '0.' ) || '255.255.255.255' === $ip ) {
-			return true;
-		}
-
-		// IPv6 loopback / unspecified.
-		if ( '::1' === $ip || '::' === $ip ) {
+		if ( '169.254.169.254' === $ip || str_starts_with( $ip, '127.' ) || str_starts_with( $ip, '169.254.' ) ||
+			str_starts_with( $ip, '0.' ) || '255.255.255.255' === $ip || '::1' === $ip || '::' === $ip ) {
 			return true;
 		}
 

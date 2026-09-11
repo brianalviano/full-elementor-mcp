@@ -45,6 +45,13 @@ class Full_Elementor_MCP_Elementor_Features {
 	}
 
 	/**
+	 * Alias for reset_mocks().
+	 */
+	public static function reset(): void {
+		self::reset_mocks();
+	}
+
+	/**
 	 * Checks if Elementor Core is loaded and operational.
 	 *
 	 * @return bool True if Elementor core is active.
@@ -75,7 +82,7 @@ class Full_Elementor_MCP_Elementor_Features {
 			return true;
 		}
 
-		return defined( 'ELEMENTOR_PRO_VERSION' );
+		return function_exists( 'did_action' ) && did_action( 'elementor_pro/init' ) > 0;
 	}
 
 	/**
@@ -88,19 +95,23 @@ class Full_Elementor_MCP_Elementor_Features {
 			return (bool) self::$mock_features['classic_widgets'];
 		}
 
+		if ( ! self::has_elementor() ) {
+			return false;
+		}
+
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->widgets_manager ) ) {
 			return true;
 		}
 
-		// Fallback: if Elementor is considered active, widgets are supported by default.
-		return self::has_elementor();
+		return class_exists( '\Elementor\Widget_Base' );
 	}
 
 	/**
 	 * Checks if flexbox / grid containers are supported and active.
 	 *
 	 * Checks Elementor's Experiments manager for the 'container' feature,
-	 * rather than guessing from version strings.
+	 * or registered container element classes. Fails closed if capability
+	 * cannot be proven.
 	 *
 	 * @return bool True if container feature is active.
 	 */
@@ -109,23 +120,41 @@ class Full_Elementor_MCP_Elementor_Features {
 			return (bool) self::$mock_features['containers'];
 		}
 
+		if ( ! self::has_elementor() ) {
+			return false;
+		}
+
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->experiments ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->experiments, 'is_feature_active' ) ) {
 					return (bool) \Elementor\Plugin::$instance->experiments->is_feature_active( 'container' );
 				}
 			} catch ( \Throwable $e ) {
-				// Fall through to class check.
+				return false;
 			}
 		}
 
-		// Fallback capability check: Container element class exists.
-		if ( class_exists( '\Elementor\Core\DocumentTypes\Page' ) && class_exists( '\Elementor\Includes\Elements\Container' ) ) {
+		// Check if container element class exists.
+		if ( class_exists( '\Elementor\Includes\Elements\Container' ) ) {
 			return true;
 		}
 
-		// Default safe assumption: containers are standard in modern Elementor (WordPress 6.9+ stack).
-		return true;
+		// Check elements_manager for container element type.
+		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->elements_manager ) ) {
+			try {
+				if ( method_exists( \Elementor\Plugin::$instance->elements_manager, 'get_element_types' ) ) {
+					$types = \Elementor\Plugin::$instance->elements_manager->get_element_types();
+					if ( is_array( $types ) && isset( $types['container'] ) ) {
+						return true;
+					}
+				}
+			} catch ( \Throwable $e ) {
+				return false;
+			}
+		}
+
+		// Fail closed: unknown capability != enabled capability.
+		return false;
 	}
 
 	/**
@@ -138,10 +167,67 @@ class Full_Elementor_MCP_Elementor_Features {
 			return (bool) self::$mock_features['nested_elements'];
 		}
 
+		if ( ! self::has_elementor() ) {
+			return false;
+		}
+
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->experiments ) ) {
 			try {
 				if ( method_exists( \Elementor\Plugin::$instance->experiments, 'is_feature_active' ) ) {
 					return (bool) \Elementor\Plugin::$instance->experiments->is_feature_active( 'nested-elements' );
+				}
+			} catch ( \Throwable $e ) {
+				return false;
+			}
+		}
+
+		// Check for NestedElements module class.
+		if ( class_exists( '\Elementor\Modules\NestedElements\Module' ) ) {
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Checks if a widget type is recognized as a nested element widget capable of containing child elements.
+	 *
+	 * @param string $widget_type Elementor widgetType (e.g. 'nested-tabs', 'nested-accordion').
+	 * @return bool True if recognized as nested element widget.
+	 */
+	public static function is_nested_element_widget( string $widget_type ): bool {
+		if ( null !== self::$mock_features && array_key_exists( 'nested_element_widgets', self::$mock_features ) ) {
+			$mock_list = self::$mock_features['nested_element_widgets'];
+			if ( is_array( $mock_list ) ) {
+				return in_array( $widget_type, $mock_list, true );
+			}
+			return (bool) $mock_list;
+		}
+
+		// Known core/pro nested element widget types in Elementor.
+		$known_nested_widgets = array(
+			'nested-tabs',
+			'nested-accordion',
+			'nested-carousel',
+			'mega-menu',
+			'off-canvas',
+		);
+
+		if ( in_array( $widget_type, $known_nested_widgets, true ) ) {
+			return true;
+		}
+
+		// Check runtime registered widget instance if available.
+		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->widgets_manager ) ) {
+			try {
+				if ( method_exists( \Elementor\Plugin::$instance->widgets_manager, 'get_widget_types' ) ) {
+					$widget = \Elementor\Plugin::$instance->widgets_manager->get_widget_types( $widget_type );
+					if ( is_object( $widget ) ) {
+						if ( class_exists( '\Elementor\Modules\NestedElements\Base\Widget_Nested_Base' ) &&
+							$widget instanceof \Elementor\Modules\NestedElements\Base\Widget_Nested_Base ) {
+							return true;
+						}
+					}
 				}
 			} catch ( \Throwable $e ) {
 				return false;
@@ -168,6 +254,10 @@ class Full_Elementor_MCP_Elementor_Features {
 			return (bool) self::$mock_features['atomic_elements'];
 		}
 
+		if ( ! self::has_elementor() ) {
+			return false;
+		}
+
 		// Check if atomic container types or modules are registered in Elementor runtime.
 		if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->elements_manager ) ) {
 			try {
@@ -178,7 +268,7 @@ class Full_Elementor_MCP_Elementor_Features {
 					}
 				}
 			} catch ( \Throwable $e ) {
-				// Fall through.
+				return false;
 			}
 		}
 
@@ -192,22 +282,13 @@ class Full_Elementor_MCP_Elementor_Features {
 					}
 				}
 			} catch ( \Throwable $e ) {
-				// Fall through.
+				return false;
 			}
 		}
 
 		// Check for atomic module namespace or class existence.
 		if ( class_exists( '\Elementor\Modules\AtomicWidgets\Module' ) || class_exists( '\Elementor\Core\Editor\Editor_V4' ) ) {
 			return true;
-		}
-
-		// Check if atomic props class is loaded and runtime signals atomic support.
-		if ( class_exists( 'Full_Elementor_MCP_Atomic_Props' ) ) {
-			// Check if runtime has active atomic widgets registered via filter or option.
-			$has_atomic_opt = get_option( 'elementor_atomic_widgets_active', false );
-			if ( ! empty( $has_atomic_opt ) ) {
-				return true;
-			}
 		}
 
 		return false;

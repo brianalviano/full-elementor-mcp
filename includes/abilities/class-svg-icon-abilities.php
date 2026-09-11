@@ -266,15 +266,22 @@ class Full_Elementor_MCP_Svg_Icon_Abilities {
 	 * @return array|\WP_Error Array with attachment_id and url on success.
 	 */
 	private function upload_from_url( string $url, string $title ): array|\WP_Error {
-		if ( class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
-			$val = Full_Elementor_MCP_Security_Strategies::validate_url( $url );
-			if ( is_wp_error( $val ) ) {
-				return $val;
-			}
-			$tmp_file = Full_Elementor_MCP_Security_Strategies::safe_download_url( $url, 30 );
-		} else {
-			$tmp_file = download_url( $url, 30 );
+		if ( ! class_exists( 'Full_Elementor_MCP_Security_Strategies' ) ) {
+			return new \WP_Error(
+				'security_infrastructure_unavailable',
+				__( 'Security strategies layer is unavailable for safe remote download.', 'full-elementor-mcp' )
+			);
 		}
+
+		$val = Full_Elementor_MCP_Security_Strategies::validate_url( $url );
+		if ( is_wp_error( $val ) ) {
+			return $val;
+		}
+		$tmp_file = Full_Elementor_MCP_Security_Strategies::safe_download_url(
+			$url,
+			30,
+			Full_Elementor_MCP_Security_Strategies::MAX_SVG_BYTES
+		);
 
 		if ( is_wp_error( $tmp_file ) ) {
 			return new \WP_Error(

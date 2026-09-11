@@ -248,6 +248,6 @@ class Full_Elementor_MCP_Atomic_Props {
 			return Full_Elementor_MCP_Elementor_Features::supports_atomic_elements();
 		}
 
-		return defined( 'ELEMENTOR_VERSION' ) && version_compare( ELEMENTOR_VERSION, '4.0.0', '>=' );
+		return false;
 	}
 }

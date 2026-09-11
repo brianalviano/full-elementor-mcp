@@ -37,14 +37,19 @@ class Full_Elementor_MCP_Tree_Validator {
 	public const MAX_SERIALIZED_BYTES = 8388608;
 
 	/**
-	 * Recognized valid elType identifiers.
+	 * Core recognized valid structural elType identifiers.
 	 */
-	private const VALID_EL_TYPES = array(
+	private const CORE_EL_TYPES = array(
 		'container',
 		'widget',
 		'section',
 		'column',
-		// Atomic element container types (Elementor 4.0+).
+	);
+
+	/**
+	 * Atomic element container types (Elementor 4.0+).
+	 */
+	private const ATOMIC_EL_TYPES = array(
 		'e-div-block',
 		'e-flexbox',
 		'e-tabs',
@@ -56,6 +61,29 @@ class Full_Elementor_MCP_Tree_Validator {
 		'e-form-success-message',
 		'e-form-error-message',
 	);
+
+	/**
+	 * Checks if an array is a sequential 0-indexed ordered list.
+	 *
+	 * PHP 8.0 compatible fallback for array_is_list().
+	 *
+	 * @param array $arr Array to inspect.
+	 * @return bool True if list array.
+	 */
+	public static function is_list_array( array $arr ): bool {
+		if ( function_exists( 'array_is_list' ) ) {
+			return array_is_list( $arr );
+		}
+
+		$i = 0;
+		foreach ( $arr as $k => $v ) {
+			if ( $k !== $i++ ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
 
 	/**
 	 * Validates an entire Elementor document tree before persistence or rollback.
@@ -70,6 +98,15 @@ class Full_Elementor_MCP_Tree_Validator {
 				'invalid_elementor_tree',
 				__( 'Elementor document tree must be an array of element nodes.', 'full-elementor-mcp' ),
 				array( 'actual_type' => gettype( $elements ) )
+			);
+		}
+
+		// Document tree must be a sequential numeric ordered list (no associative maps).
+		if ( ! self::is_list_array( $elements ) ) {
+			return new \WP_Error(
+				'invalid_child_structure',
+				__( 'Elementor document tree must be a sequential numeric ordered list of element nodes.', 'full-elementor-mcp' ),
+				array( 'actual_structure' => 'associative_map' )
 			);
 		}
 
@@ -318,8 +355,26 @@ class Full_Elementor_MCP_Tree_Validator {
 			);
 		}
 
-		$el_type = $node['elType'];
-		if ( ! in_array( $el_type, self::VALID_EL_TYPES, true ) ) {
+		$el_type       = $node['elType'];
+		$is_known_type = in_array( $el_type, self::CORE_EL_TYPES, true ) || in_array( $el_type, self::ATOMIC_EL_TYPES, true );
+
+		// Check runtime registered element types in Elementor if not in static list.
+		if ( ! $is_known_type ) {
+			if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->elements_manager ) ) {
+				try {
+					if ( method_exists( \Elementor\Plugin::$instance->elements_manager, 'get_element_types' ) ) {
+						$runtime_types = \Elementor\Plugin::$instance->elements_manager->get_element_types();
+						if ( is_array( $runtime_types ) && isset( $runtime_types[ $el_type ] ) ) {
+							$is_known_type = true;
+						}
+					}
+				} catch ( \Throwable $e ) {
+					// Fall through.
+				}
+			}
+		}
+
+		if ( ! $is_known_type ) {
 			return new \WP_Error(
 				'invalid_element_type',
 				sprintf(
@@ -332,7 +387,40 @@ class Full_Elementor_MCP_Tree_Validator {
 			);
 		}
 
-		// 7. Widget-specific invariants.
+		// Feature gating for structural element types:
+		if ( 'container' === $el_type ) {
+			$allow_containers = ! empty( $context['allow_containers'] ) ||
+				( isset( $context['operation'] ) && 'rollback_restore' === $context['operation'] ) ||
+				Full_Elementor_MCP_Elementor_Features::supports_containers();
+			if ( ! $allow_containers ) {
+				return new \WP_Error(
+					'unsupported_element_feature',
+					sprintf(
+						/* translators: %s: path */
+						__( 'Container elements at "%s" require the flexbox/grid container feature to be active in Elementor.', 'full-elementor-mcp' ),
+						$path
+					),
+					array( 'path' => $path, 'element_id' => $element_id, 'elType' => 'container' )
+				);
+			}
+		}
+
+		if ( in_array( $el_type, self::ATOMIC_EL_TYPES, true ) ) {
+			if ( ! Full_Elementor_MCP_Elementor_Features::supports_atomic_elements() ) {
+				return new \WP_Error(
+					'unsupported_element_feature',
+					sprintf(
+						/* translators: 1: type, 2: path */
+						__( 'Atomic element type "%1$s" at "%2$s" requires Elementor 4.0+ atomic elements capability.', 'full-elementor-mcp' ),
+						esc_html( $el_type ),
+						$path
+					),
+					array( 'path' => $path, 'element_id' => $element_id, 'elType' => $el_type )
+				);
+			}
+		}
+
+		// 7. Widget-specific invariants and nested element capability.
 		if ( 'widget' === $el_type ) {
 			if ( empty( $node['widgetType'] ) || ! is_string( $node['widgetType'] ) ) {
 				return new \WP_Error(
@@ -346,18 +434,59 @@ class Full_Elementor_MCP_Tree_Validator {
 				);
 			}
 
-			// Invariant: Widgets must NEVER contain child elements.
-			if ( isset( $node['elements'] ) && is_array( $node['elements'] ) && ! empty( $node['elements'] ) ) {
-				return new \WP_Error(
-					'invalid_child_structure',
-					sprintf(
-						/* translators: 1: widget type, 2: path */
-						__( 'Widget "%1$s" at path "%2$s" must not contain child elements.', 'full-elementor-mcp' ),
-						esc_html( $node['widgetType'] ),
-						$path
-					),
-					array( 'path' => $path, 'element_id' => $element_id, 'widgetType' => $node['widgetType'] )
-				);
+			$widget_type  = $node['widgetType'];
+			$has_children = isset( $node['elements'] ) && is_array( $node['elements'] ) && ! empty( $node['elements'] );
+
+			if ( $has_children ) {
+				$is_nested_widget = Full_Elementor_MCP_Elementor_Features::is_nested_element_widget( $widget_type );
+				$nested_active    = Full_Elementor_MCP_Elementor_Features::supports_nested_elements();
+
+				if ( ! $is_nested_widget ) {
+					// Ordinary classic widgets must NEVER contain child elements.
+					return new \WP_Error(
+						'invalid_child_structure',
+						sprintf(
+							/* translators: 1: widget type, 2: path */
+							__( 'Widget "%1$s" at path "%2$s" must not contain child elements.', 'full-elementor-mcp' ),
+							esc_html( $widget_type ),
+							$path
+						),
+						array( 'path' => $path, 'element_id' => $element_id, 'widgetType' => $widget_type )
+					);
+				}
+
+				if ( ! $nested_active ) {
+					// Nested element widget requires nested-elements feature to be active.
+					return new \WP_Error(
+						'unsupported_element_feature',
+						sprintf(
+							/* translators: 1: widget type, 2: path */
+							__( 'Nested element widget "%1$s" at path "%2$s" requires the nested-elements feature to be active in Elementor.', 'full-elementor-mcp' ),
+							esc_html( $widget_type ),
+							$path
+						),
+						array( 'path' => $path, 'element_id' => $element_id, 'widgetType' => $widget_type )
+					);
+				}
+
+				// Nested element widgets contain container children (or atomic elements if atomic active).
+				foreach ( $node['elements'] as $child_idx => $child_node ) {
+					$child_el_type         = is_array( $child_node ) ? ( $child_node['elType'] ?? '' ) : '';
+					$is_valid_nested_child = 'container' === $child_el_type || in_array( $child_el_type, self::ATOMIC_EL_TYPES, true );
+					if ( ! $is_valid_nested_child ) {
+						return new \WP_Error(
+							'invalid_child_structure',
+							sprintf(
+								/* translators: 1: widget type, 2: path, 3: child type */
+								__( 'Nested widget "%1$s" at "%2$s" can only contain container children, found "%3$s".', 'full-elementor-mcp' ),
+								esc_html( $widget_type ),
+								$path . '.elements[' . $child_idx . ']',
+								esc_html( (string) $child_el_type )
+							),
+							array( 'path' => $path, 'element_id' => $element_id, 'widgetType' => $widget_type )
+						);
+					}
+				}
 			}
 		}
 
@@ -402,12 +531,12 @@ class Full_Elementor_MCP_Tree_Validator {
 
 		// 10. Recursive child elements validation.
 		if ( isset( $node['elements'] ) ) {
-			if ( ! is_array( $node['elements'] ) ) {
+			if ( ! is_array( $node['elements'] ) || ! self::is_list_array( $node['elements'] ) ) {
 				return new \WP_Error(
-					'invalid_elementor_tree',
+					'invalid_child_structure',
 					sprintf(
 						/* translators: %s: path */
-						__( 'Child elements at path "%s.elements" must be an ordered array.', 'full-elementor-mcp' ),
+						__( 'Child elements at path "%s.elements" must be a sequential numeric ordered list.', 'full-elementor-mcp' ),
 						$path
 					),
 					array( 'path' => $path, 'element_id' => $element_id )
@@ -439,7 +568,8 @@ class Full_Elementor_MCP_Tree_Validator {
 	 * Recursively validates settings values for JSON serializability and dangerous PHP structures.
 	 *
 	 * Allowed types: null, bool, int, float, string, array.
-	 * Rejected: PHP resources, closures, arbitrary non-serializable objects.
+	 * Rejected: PHP resources, closures, and arbitrary PHP objects.
+	 * (Persisted Elementor trees must contain only JSON scalar and array values).
 	 *
 	 * Does NOT strip unknown third-party settings.
 	 *
@@ -477,16 +607,13 @@ class Full_Elementor_MCP_Tree_Validator {
 				);
 			}
 
-			// Reject arbitrary objects unless JSON-serializable stdClass.
+			// Reject all PHP objects (including stdClass and JsonSerializable) in settings.
 			if ( is_object( $val ) ) {
-				if ( $val instanceof \stdClass || $val instanceof \JsonSerializable ) {
-					continue;
-				}
 				return new \WP_Error(
 					'unsafe_setting_value',
 					sprintf(
 						/* translators: 1: path, 2: class */
-						__( 'Arbitrary PHP object (%2$s) detected in settings at "%1$s". Objects must implement JsonSerializable or be stdClass.', 'full-elementor-mcp' ),
+						__( 'PHP object (%2$s) detected in settings at "%1$s". Settings must contain only JSON scalar and array values.', 'full-elementor-mcp' ),
 						$val_path,
 						get_class( $val )
 					),

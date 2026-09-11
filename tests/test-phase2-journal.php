@@ -839,6 +839,10 @@ run_test( 'Registry: permanent deletion (force=true) is marked non-rollbackable'
 
 run_test( 'Registry Coverage Audit: every registered readonly=false ability in codebase has explicit strategy', function () {
 	$base = __DIR__ . '/..';
+	if ( file_exists( $base . '/includes/safety/class-elementor-features.php' ) ) {
+		require_once $base . '/includes/safety/class-elementor-features.php';
+		Full_Elementor_MCP_Elementor_Features::set_mock_features( array( 'atomic_elements' => true ) );
+	}
 	if ( ! class_exists( 'Full_Elementor_MCP_Data' ) ) {
 		require_once $base . '/includes/class-elementor-data.php';
 	}
@@ -904,6 +908,7 @@ run_test( 'Registry Coverage Audit: every registered readonly=false ability in c
 
 	assert_equals( 121, $mutating_count, 'Expected exactly 121 mutating abilities' );
 	assert_equals( array(), $missing_mutations, 'All mutating abilities must have a registered mutation strategy' );
+	Full_Elementor_MCP_Elementor_Features::reset();
 } );
 
 // =========================================================================

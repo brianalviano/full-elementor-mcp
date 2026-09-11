@@ -107,12 +107,14 @@ class Full_Elementor_MCP_Openverse_Client {
 	 * @return array|\WP_Error Decoded JSON response or WP_Error on failure.
 	 */
 	private function make_request( string $url ) {
-		$response = wp_remote_get(
+		$response = wp_safe_remote_get(
 			$url,
 			array(
-				'timeout'    => self::TIMEOUT,
-				'user-agent' => 'Full-Elementor-MCP/' . FULL_ELEMENTOR_MCP_VERSION . ' (WordPress/' . get_bloginfo( 'version' ) . ')',
-				'headers'    => array(
+				'timeout'             => self::TIMEOUT,
+				'redirection'         => 3,
+				'limit_response_size' => 1048576, // 1 MB JSON payload limit.
+				'user-agent'          => 'Full-Elementor-MCP/' . FULL_ELEMENTOR_MCP_VERSION . ' (WordPress/' . get_bloginfo( 'version' ) . ')',
+				'headers'             => array(
 					'Accept' => 'application/json',
 				),
 			)
