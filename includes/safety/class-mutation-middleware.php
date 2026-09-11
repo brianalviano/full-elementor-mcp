@@ -186,9 +186,18 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		}
 
 		// 5. Credential scope gate:
-		$scope = class_exists( 'Full_Elementor_MCP_Security_Guard' )
-			? Full_Elementor_MCP_Security_Guard::resolve_current_scope()
-			: array( 'mode' => 'full' );
+		if ( ! class_exists( 'Full_Elementor_MCP_Security_Guard' ) ) {
+			if ( ! $is_readonly ) {
+				return new \WP_Error(
+					'safety_dependency_missing',
+					__( 'Fatal safety error: required safety dependency "Full_Elementor_MCP_Security_Guard" is missing. Mutation rejected.', 'full-elementor-mcp' ),
+					array( 'dependency' => 'Full_Elementor_MCP_Security_Guard' )
+				);
+			}
+			$scope = array( 'mode' => 'read_only' );
+		} else {
+			$scope = Full_Elementor_MCP_Security_Guard::resolve_current_scope();
+		}
 
 		if ( ! $is_readonly && 'read_only' === ( $scope['mode'] ?? '' ) ) {
 			return new \WP_Error(
@@ -272,6 +281,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			'Full_Elementor_MCP_Lock_Manager',
 			'Full_Elementor_MCP_Journal',
 			'Full_Elementor_MCP_Mutation_Registry',
+			'Full_Elementor_MCP_Security_Guard',
 			'Full_Elementor_MCP_Security_Strategies',
 			'Full_Elementor_MCP_Tree_Validator',
 			'Full_Elementor_MCP_Confirmation_Manager',
@@ -372,6 +382,23 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			|| ! empty( $security_profile['protected_resource_possible'] )
 			|| ! empty( $security_profile['executable_content'] );
 
+		// 11. Dry-Run Handling (predictive execution analysis):
+		if ( $is_dry_run ) {
+			return array(
+				'dry_run'               => true,
+				'allowed'               => true,
+				'ability'               => $ability,
+				'resource_key'          => $resource_key,
+				'object_id'             => $object_id,
+				'security_profile'      => $security_profile,
+				'protected_resource'    => ! empty( $security_profile['protected_resource_possible'] ),
+				'confirmation_required' => $requires_confirmation,
+				'rollback_supported'    => Full_Elementor_MCP_Mutation_Registry::supports_rollback_for_args( $ability, $input ),
+				'reasons'               => $security_profile['reasons'] ?? array(),
+			);
+		}
+
+		// 12. High-Risk / Protected / Irreversible Confirmation Gate:
 		if ( $requires_confirmation ) {
 			if ( ! empty( $confirmation_token ) ) {
 				// Validate ONLY - do NOT consume yet. Consumption is deferred until after lock & WAL.
@@ -405,22 +432,6 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 					$challenge
 				);
 			}
-		}
-
-		// 12. Dry-Run Handling:
-		if ( $is_dry_run ) {
-			return array(
-				'dry_run'               => true,
-				'allowed'               => true,
-				'ability'               => $ability,
-				'resource_key'          => $resource_key,
-				'object_id'             => $object_id,
-				'security_profile'      => $security_profile,
-				'protected_resource'    => ! empty( $security_profile['protected_resource_possible'] ),
-				'confirmation_required' => $requires_confirmation,
-				'rollback_supported'    => Full_Elementor_MCP_Mutation_Registry::supports_rollback( $ability ),
-				'reasons'               => $security_profile['reasons'] ?? array(),
-			);
 		}
 
 		// 13. Server-Generated Execution UUID & Owner ID:
@@ -506,28 +517,15 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		$journal_id = (int) $journal_result;
 
+		// 17. Attach WAL Journal to Idempotency Claim:
 		if ( $idemp_token_key ) {
-			Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $idemp_token_key, $owner_id, $journal_id );
-		}
-
-		// 17. Deferred Confirmation Token Consumption:
-		// Atomically consume the token ONLY now that locks & WAL are secured, immediately before execution.
-		if ( $requires_confirmation && ! empty( $confirmation_token ) ) {
-			$consume_res = Full_Elementor_MCP_Confirmation_Manager::consume(
-				$confirmation_token,
-				$ability,
-				$input,
-				$user_id,
-				$cred_uuid,
-				$resource_key
-			);
-			if ( is_wp_error( $consume_res ) ) {
-				Full_Elementor_MCP_Journal::mark_failed( $journal_id, $consume_res->get_error_code(), $fencing_token );
+			$attach_res = Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $idemp_token_key, $owner_id, $journal_id );
+			if ( true !== $attach_res ) {
+				Full_Elementor_MCP_Journal::mark_failed( $journal_id, 'idempotency_journal_attachment_failed', $fencing_token );
 				Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
-				if ( $idemp_token_key ) {
-					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $consume_res->get_error_code() );
-				}
-				return $consume_res;
+				return is_wp_error( $attach_res )
+					? $attach_res
+					: new \WP_Error( 'idempotency_journal_binding_failed', __( 'Could not attach WAL journal to idempotency claim.', 'full-elementor-mcp' ) );
 			}
 		}
 
@@ -580,13 +578,35 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				return $fence_preflight;
 			}
 
+			// Atomically consume confirmation token ONLY immediately before execution:
+			if ( $requires_confirmation && ! empty( $confirmation_token ) ) {
+				$consume_res = Full_Elementor_MCP_Confirmation_Manager::consume(
+					$confirmation_token,
+					$ability,
+					$input,
+					$user_id,
+					$cred_uuid,
+					$resource_key
+				);
+				if ( is_wp_error( $consume_res ) ) {
+					Full_Elementor_MCP_Journal::mark_failed( $journal_id, $consume_res->get_error_code(), $fencing_token );
+					if ( $idemp_token_key ) {
+						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $consume_res->get_error_code() );
+					}
+					return $consume_res;
+				}
+			}
+
 			$result = call_user_func( $orig_execute_cb, $input );
 
 			if ( is_wp_error( $result ) ) {
 				$write_started = Full_Elementor_MCP_Mutation_Context::has_write_started();
+				$err_data      = $result->get_error_data();
+				$must_recover  = is_array( $err_data ) && ! empty( $err_data['recovery_required'] );
+
 				if ( $write_started ) {
 					$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
-					if ( is_wp_error( $rollback_res ) && $idemp_token_key ) {
+					if ( ( is_wp_error( $rollback_res ) || $must_recover ) && $idemp_token_key ) {
 						Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, $result->get_error_code() );
 					} elseif ( $idemp_token_key ) {
 						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $result->get_error_code() );
@@ -600,18 +620,40 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				return $result;
 			}
 
-			// 20. For CREATE mutations: record created object ID immediately and durably:
+			// 20. For CREATE mutations: verify created object ID against durable bound ID:
 			if ( $is_create ) {
-				// Check if ID was already bound by Safe_Writes::insert_post()
 				$current_ctx = Full_Elementor_MCP_Mutation_Context::current();
-				$created_id  = $current_ctx['created_object_id'] ?? null;
+				$bound_id    = absint( $current_ctx['created_object_id'] ?? 0 );
+				$callback_id = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( $ability, $result );
 
-				if ( empty( $created_id ) ) {
-					$created_id = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( $ability, $result );
-					if ( $created_id > 0 ) {
-						Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, $created_id, $fencing_token );
-						Full_Elementor_MCP_Mutation_Context::bind_created_object_id( $created_id );
+				if ( $bound_id > 0 && $callback_id > 0 && $bound_id !== $callback_id ) {
+					// Durable created ID vs callback result mismatch!
+					$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
+					if ( is_wp_error( $rollback_res ) && $idemp_token_key ) {
+						Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, 'created_object_result_mismatch' );
+					} elseif ( $idemp_token_key ) {
+						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'created_object_result_mismatch' );
 					}
+					return new \WP_Error(
+						'created_object_result_mismatch',
+						sprintf(
+							/* translators: 1: bound ID, 2: callback ID */
+							__( 'Durable created object ID (%1$d) does not match callback declared ID (%2$d).', 'full-elementor-mcp' ),
+							$bound_id,
+							$callback_id
+						),
+						array(
+							'bound_object_id'    => $bound_id,
+							'callback_object_id' => $callback_id,
+						)
+					);
+				}
+
+				$created_id = $bound_id > 0 ? $bound_id : $callback_id;
+
+				if ( empty( $bound_id ) && $callback_id > 0 ) {
+					Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, $callback_id, $fencing_token );
+					Full_Elementor_MCP_Mutation_Context::bind_created_object_id( $callback_id );
 				}
 
 				if ( empty( $created_id ) || $created_id < 1 ) {
@@ -637,38 +679,45 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			if ( ! empty( $strategy['requires_tree_validation'] ) ) {
 				$target_post_id = $object_id > 0 ? $object_id : ( $created_id ?? 0 );
 				if ( $target_post_id > 0 && function_exists( 'get_post_meta' ) ) {
-					$saved_raw = get_post_meta( $target_post_id, '_elementor_data', true );
-					if ( is_string( $saved_raw ) && '' !== $saved_raw ) {
-						$saved_tree = json_decode( $saved_raw, true );
-						if ( is_array( $saved_tree ) ) {
-							$post_tree_check = Full_Elementor_MCP_Tree_Validator::validate_document( $saved_tree );
-							if ( is_wp_error( $post_tree_check ) ) {
-								// Post-mutation validation failed! Attempt safe same-generation rollback while holding lock:
-								$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
-								if ( is_wp_error( $rollback_res ) ) {
-									if ( $idemp_token_key ) {
-										Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, 'post_mutation_validation_failed' );
-									}
-								} else {
-									if ( $idemp_token_key ) {
-										Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'post_mutation_validation_failed' );
-									}
-								}
-								return new \WP_Error(
-									'post_mutation_validation_failed',
-									sprintf(
-										/* translators: 1: error code, 2: rollback status */
-										__( 'Persistent Elementor tree validation failed after mutation (%1$s). Same-generation rollback executed: %2$s.', 'full-elementor-mcp' ),
-										$post_tree_check->get_error_code(),
-										is_wp_error( $rollback_res ) ? 'failed' : 'restored'
-									),
-									array(
-										'validation_error' => $post_tree_check->get_error_code(),
-										'rollback_status'  => is_wp_error( $rollback_res ) ? $rollback_res->get_error_code() : 'rolled_back',
-									)
-								);
+					$tree_read = self::read_persisted_elementor_tree( $target_post_id );
+
+					if ( is_wp_error( $tree_read ) ) {
+						// Malformed, scalar, or unreadable tree! Attempt same-generation rollback:
+						$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
+						if ( is_wp_error( $rollback_res ) && $idemp_token_key ) {
+							Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, $tree_read->get_error_code() );
+						} elseif ( $idemp_token_key ) {
+							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $tree_read->get_error_code() );
+						}
+						return $tree_read;
+					}
+
+					$post_tree_check = Full_Elementor_MCP_Tree_Validator::validate_document( $tree_read );
+					if ( is_wp_error( $post_tree_check ) ) {
+						// Post-mutation validation failed! Attempt safe same-generation rollback while holding lock:
+						$rollback_res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, $fencing_token );
+						if ( is_wp_error( $rollback_res ) ) {
+							if ( $idemp_token_key ) {
+								Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, 'post_mutation_validation_failed' );
+							}
+						} else {
+							if ( $idemp_token_key ) {
+								Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'post_mutation_validation_failed' );
 							}
 						}
+						return new \WP_Error(
+							'post_mutation_validation_failed',
+							sprintf(
+								/* translators: 1: error code, 2: rollback status */
+								__( 'Persistent Elementor tree validation failed after mutation (%1$s). Same-generation rollback executed: %2$s.', 'full-elementor-mcp' ),
+								$post_tree_check->get_error_code(),
+								is_wp_error( $rollback_res ) ? 'failed' : 'restored'
+							),
+							array(
+								'validation_error' => $post_tree_check->get_error_code(),
+								'rollback_status'  => is_wp_error( $rollback_res ) ? $rollback_res->get_error_code() : 'rolled_back',
+							)
+						);
 					}
 				}
 			}
@@ -735,6 +784,108 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 	}
 
 	/**
+	 * Authoritatively reads and decodes the persisted Elementor document tree for a post.
+	 *
+	 * Fails closed if the tree is malformed JSON, a scalar, not an array, or an unreadable type.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return array|\WP_Error Decoded array or WP_Error on unverifiable state.
+	 */
+	public static function read_persisted_elementor_tree( int $post_id ): array|\WP_Error {
+		if ( $post_id <= 0 || ! function_exists( 'get_post_meta' ) ) {
+			return new \WP_Error( 'post_mutation_state_unverifiable', __( 'Cannot read persisted tree: invalid post ID.', 'full-elementor-mcp' ) );
+		}
+
+		$saved_raw = get_post_meta( $post_id, '_elementor_data', true );
+
+		// Case 1: Already an array (e.g. cached/filtered memory representation):
+		if ( is_array( $saved_raw ) ) {
+			return $saved_raw;
+		}
+
+		// Case 2: Meta not set / null:
+		if ( null === $saved_raw ) {
+			return array(); // Explicitly valid empty tree.
+		}
+
+		// Case 3: String:
+		if ( is_string( $saved_raw ) ) {
+			$trimmed = trim( $saved_raw );
+			if ( '' === $trimmed || '[]' === $trimmed ) {
+				return array(); // Explicitly valid empty tree.
+			}
+
+			$decoded = json_decode( $saved_raw, true );
+			if ( json_last_error() !== JSON_ERROR_NONE ) {
+				return new \WP_Error(
+					'post_mutation_state_unverifiable',
+					sprintf(
+						/* translators: %s: json error */
+						__( 'Persistent _elementor_data contains malformed JSON (%s).', 'full-elementor-mcp' ),
+						json_last_error_msg()
+					),
+					array( 'json_error' => json_last_error() )
+				);
+			}
+
+			if ( ! is_array( $decoded ) ) {
+				return new \WP_Error(
+					'post_mutation_state_unverifiable',
+					__( 'Persistent _elementor_data is not an array structure (scalar JSON detected).', 'full-elementor-mcp' )
+				);
+			}
+
+			return $decoded;
+		}
+
+		// Case 3: Any other type (false, null, int, object, resource):
+		return new \WP_Error(
+			'post_mutation_state_unverifiable',
+			__( 'Persistent _elementor_data has unreadable or unexpected storage type.', 'full-elementor-mcp' )
+		);
+	}
+
+	/**
+	 * Handles unexpected PHP process shutdown while a mutation context is active.
+	 *
+	 * Preserves durable WAL journal row as 'pending' so that next-request
+	 * recovery can detect and recover it. Never transitions pending -> failed on uncertain state.
+	 */
+	public static function handle_shutdown(): void {
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) && Full_Elementor_MCP_Mutation_Context::has_active_context() ) {
+			$ctx = Full_Elementor_MCP_Mutation_Context::current();
+
+			// Do NOT transition journal pending -> failed.
+			// Preserve journal as 'pending' for next-request Full_Elementor_MCP_Journal::recover_pending().
+
+			if ( ! empty( $ctx['idempotency_key'] ) && class_exists( 'Full_Elementor_MCP_Idempotency_Manager' ) && ! empty( $ctx['owner_id'] ) && class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
+				$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key(
+					(string) $ctx['idempotency_key'],
+					(string) ( $ctx['ability'] ?? '' ),
+					(int) ( $ctx['user_id'] ?? 0 ),
+					$ctx['credential_uuid'] ?? null
+				);
+				if ( ! empty( $ctx['write_started'] ) ) {
+					Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required(
+						$token_key,
+						(string) $ctx['owner_id'],
+						(int) ( $ctx['journal_id'] ?? 0 ),
+						'unexpected_script_shutdown'
+					);
+				} else {
+					Full_Elementor_MCP_Idempotency_Manager::fail_safe(
+						$token_key,
+						(string) $ctx['owner_id'],
+						'unexpected_script_shutdown'
+					);
+				}
+			}
+
+			Full_Elementor_MCP_Mutation_Context::reset();
+		}
+	}
+
+	/**
 	 * Extracts the created object ID from the callback result.
 	 *
 	 * @param array<string, mixed> $strategy
@@ -750,8 +901,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			return absint( call_user_func( $strategy['created_object_id_resolver'], $result ) );
 		}
 
-		$id = $result['post_id'] ?? ( $result['template_id'] ?? ( $result['snippet_id'] ?? ( $result['attachment_id'] ?? ( $result['id'] ?? ( $result['page_id'] ?? 0 ) ) ) ) );
-		return absint( $id );
+		return 0;
 	}
 
 	/**

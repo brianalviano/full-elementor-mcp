@@ -252,38 +252,8 @@ function full_elementor_mcp_init(): void {
 
 	// Best-effort shutdown recovery handler for active mutation context:
 	register_shutdown_function( static function () {
-		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) && Full_Elementor_MCP_Mutation_Context::has_active_context() ) {
-			$ctx = Full_Elementor_MCP_Mutation_Context::current();
-			if ( ! empty( $ctx['journal_id'] ) && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
-				Full_Elementor_MCP_Journal::mark_failed(
-					(int) $ctx['journal_id'],
-					'unexpected_script_shutdown',
-					(int) ( $ctx['fencing_token'] ?? 0 )
-				);
-			}
-			if ( ! empty( $ctx['idempotency_key'] ) && class_exists( 'Full_Elementor_MCP_Idempotency_Manager' ) && ! empty( $ctx['owner_id'] ) && class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
-				$token_key = Full_Elementor_MCP_Lock_Manager::get_idempotency_token_key(
-					(string) $ctx['idempotency_key'],
-					(string) ( $ctx['ability'] ?? '' ),
-					(int) ( $ctx['user_id'] ?? 0 ),
-					$ctx['credential_uuid'] ?? null
-				);
-				if ( ! empty( $ctx['write_started'] ) ) {
-					Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required(
-						$token_key,
-						(string) $ctx['owner_id'],
-						(int) ( $ctx['journal_id'] ?? 0 ),
-						'unexpected_script_shutdown'
-					);
-				} else {
-					Full_Elementor_MCP_Idempotency_Manager::fail_safe(
-						$token_key,
-						(string) $ctx['owner_id'],
-						'unexpected_script_shutdown'
-					);
-				}
-			}
-			Full_Elementor_MCP_Mutation_Context::reset();
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
+			Full_Elementor_MCP_Mutation_Middleware::handle_shutdown();
 		}
 	} );
 

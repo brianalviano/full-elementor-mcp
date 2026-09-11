@@ -98,11 +98,23 @@ if ( ! function_exists( 'get_current_user_id' ) ) {
 }
 if ( ! function_exists( 'current_user_can' ) ) {
 	function current_user_can( string $cap, ...$args ): bool {
+		if ( ( 'edit_post' === $cap || 'edit_page' === $cap || 'publish_page' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['edit_posts'] ) ) {
+			return true;
+		}
+		if ( ( 'delete_post' === $cap || 'delete_page' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['delete_posts'] ) ) {
+			return true;
+		}
 		return ! empty( $GLOBALS['wp_test_caps'][ $cap ] );
 	}
 }
 if ( ! function_exists( 'user_can' ) ) {
 	function user_can( int $user_id, string $cap ): bool {
+		if ( ( 'edit_post' === $cap || 'edit_page' === $cap || 'publish_page' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['edit_posts'] ) ) {
+			return true;
+		}
+		if ( ( 'delete_post' === $cap || 'delete_page' === $cap ) && ! empty( $GLOBALS['wp_test_caps']['delete_posts'] ) ) {
+			return true;
+		}
 		return ! empty( $GLOBALS['wp_test_caps'][ $cap ] );
 	}
 }
@@ -149,8 +161,8 @@ if ( ! function_exists( 'get_post_meta' ) ) {
 		if ( '' === $key ) {
 			return $GLOBALS['mock_post_meta'][ $post_id ] ?? array();
 		}
-		$val = $GLOBALS['mock_post_meta'][ $post_id ][ $key ] ?? null;
-		return $single ? $val : ( null !== $val ? array( $val ) : array() );
+		$val = $GLOBALS['mock_post_meta'][ $post_id ][ $key ] ?? '';
+		return $single ? $val : ( '' !== $val ? array( $val ) : array() );
 	}
 }
 if ( ! function_exists( 'update_post_meta' ) ) {
@@ -499,6 +511,15 @@ require_once __DIR__ . '/../includes/safety/class-idempotency-manager.php';
 require_once __DIR__ . '/../includes/safety/class-mutation-middleware.php';
 require_once __DIR__ . '/../includes/safety/class-safe-writes.php';
 require_once __DIR__ . '/../includes/class-elementor-data.php';
+require_once __DIR__ . '/../includes/class-id-generator.php';
+require_once __DIR__ . '/../includes/class-element-factory.php';
+require_once __DIR__ . '/../includes/abilities/class-page-abilities.php';
+
+if ( ! function_exists( 'full_elementor_mcp_register_ability' ) ) {
+	function full_elementor_mcp_register_ability( string $name, array $args ) {
+		return Full_Elementor_MCP_Mutation_Middleware::wrap_ability( $name, $args );
+	}
+}
 
 function setup_phase4_test_db(): void {
 	global $wpdb;
@@ -556,6 +577,7 @@ function run_test( string $name, callable $test ): void {
 			'manage_options'  => true,
 			'edit_posts'      => true,
 			'publish_posts'   => true,
+			'delete_posts'    => true,
 			'unfiltered_html' => true,
 		);
 		$GLOBALS['wp_test_user_id'] = 1;
@@ -1647,7 +1669,7 @@ run_test( 'Destructive: delete-page with force => true (boolean) IS irreversible
 // 22. Missing Safety Dependencies Fail Closed
 // -----------------------------------------------------------------------------
 
-run_test( 'Dependencies: all 10 required safety classes are present and enforced', function () {
+run_test( 'Dependencies: all 11 required safety classes are present and enforced', function () {
 	assert_true( class_exists( 'Full_Elementor_MCP_Safe_Writes' ) );
 	assert_true( class_exists( 'Full_Elementor_MCP_Database_Installer' ) );
 	assert_true( class_exists( 'Full_Elementor_MCP_Lock_Manager' ) );
@@ -1658,6 +1680,470 @@ run_test( 'Dependencies: all 10 required safety classes are present and enforced
 	assert_true( class_exists( 'Full_Elementor_MCP_Confirmation_Manager' ) );
 	assert_true( class_exists( 'Full_Elementor_MCP_Idempotency_Manager' ) );
 	assert_true( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) );
+	assert_true( class_exists( 'Full_Elementor_MCP_Security_Guard' ) );
+} );
+
+// -----------------------------------------------------------------------------
+// 23. Final Phase 4 Correctness Gate & Regression Tests
+// -----------------------------------------------------------------------------
+
+run_test( 'Import Template: real execute_import_template operates on existing post under post:<id> and rollback restores exact tree', function () {
+	global $wpdb;
+	$post_id = 123;
+	$tree_a = array(
+		array(
+			'id'       => 'sec_a1',
+			'elType'   => 'section',
+			'settings' => array(),
+			'elements' => array(
+				array(
+					'id'         => 'col_a1',
+					'elType'     => 'column',
+					'settings'   => array(),
+					'elements'   => array(
+						array(
+							'id'         => 'wid_a1',
+							'elType'     => 'widget',
+							'widgetType' => 'heading',
+							'settings'   => array( 'title' => 'Original Heading' ),
+							'elements'   => array(),
+						),
+					),
+				),
+			),
+		),
+	);
+	update_post_meta( $post_id, '_elementor_data', wp_json_encode( $tree_a ) );
+	update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+
+	$page_abilities = new Full_Elementor_MCP_Page_Abilities( new Full_Elementor_MCP_Data(), new Full_Elementor_MCP_Element_Factory() );
+	$page_abilities->register();
+
+	$template_to_import = array(
+		array(
+			'id'       => 'imp_sec_1',
+			'elType'   => 'section',
+			'settings' => array(),
+			'elements' => array(
+				array(
+					'id'         => 'imp_col_1',
+					'elType'     => 'column',
+					'settings'   => array(),
+					'elements'   => array(
+						array(
+							'id'         => 'imp_wid_1',
+							'elType'     => 'widget',
+							'widgetType' => 'text-editor',
+							'settings'   => array( 'editor' => '<p>Imported Content</p>' ),
+							'elements'   => array(),
+						),
+					),
+				),
+			),
+		),
+	);
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/import-template', array(
+		'post_id'       => $post_id,
+		'template_json' => $template_to_import,
+	) );
+
+	assert_false( is_wp_error( $res ), 'import-template should execute successfully: ' . ( is_wp_error( $res ) ? $res->get_error_message() : '' ) );
+	assert_true( ! empty( $res['success'] ), 'Success flag must be true' );
+	assert_equals( 3, $res['elements_count'], 'Imported elements count should be 3 (section + column + widget)' );
+
+	// Verify journal state:
+	$journal_rows = $wpdb->get_results( "SELECT * FROM {$wpdb->prefix}elementor_mcp_journal ORDER BY id DESC LIMIT 1", ARRAY_A );
+	assert_equals( 1, count( $journal_rows ), 'Journal entry must exist' );
+	$j_row = $journal_rows[0];
+	assert_equals( 'post:123', $j_row['resource_key'], 'Journal canonical resource must be post:123' );
+	assert_equals( 123, (int) $j_row['object_id'], 'Journal object ID must be 123' );
+	assert_equals( 'committed', $j_row['status'], 'Journal status must be committed' );
+
+	// Journal BEFORE must contain Tree A:
+	$before_decoded = json_decode( $j_row['before_state'], true );
+	assert_equals( 'sec_a1', $before_decoded[0]['id'], 'Journal BEFORE must be tree A' );
+
+	// Persisted tree on post 123 must now have 2 sections:
+	$persisted = json_decode( get_post_meta( $post_id, '_elementor_data', true ), true );
+	assert_equals( 2, count( $persisted ), 'Persisted tree must have 2 sections' );
+
+	// Now verify rollback restores exact Tree A:
+	$owner_id = 'rollback-worker-1';
+	$lock     = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:123', $owner_id, 60 );
+	assert_true( ! empty( $lock['fencing_token'] ), 'Must acquire lock for rollback' );
+	$rb_res = Full_Elementor_MCP_Journal::rollback( (int) $j_row['id'], $owner_id, (int) $lock['fencing_token'] );
+	assert_false( is_wp_error( $rb_res ), 'Rollback must succeed: ' . ( is_wp_error( $rb_res ) ? $rb_res->get_error_message() : '' ) );
+
+	$restored = json_decode( get_post_meta( $post_id, '_elementor_data', true ), true );
+	assert_equals( 1, count( $restored ), 'Restored tree must have 1 section' );
+	assert_equals( 'sec_a1', $restored[0]['id'], 'Restored tree must have original section id' );
+	assert_equals( 'wid_a1', $restored[0]['elements'][0]['elements'][0]['id'], 'Restored widget must match exact original tree A' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:123', $owner_id, (int) $lock['fencing_token'] );
+} );
+
+run_test( 'Idempotency CAS: only one worker succeeds in stale takeover and callback runs once', function () {
+	global $wpdb;
+	$token_key = 'idem_cas_stale_' . wp_generate_uuid4();
+	$owner_a   = 'worker_A';
+	$claim_a   = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), $owner_a );
+	assert_equals( 'claimed', $claim_a['status'] );
+
+	// Expire the lease and set payload status to failed_safe:
+	$past    = gmdate( 'Y-m-d H:i:s', time() - 3600 );
+	$table   = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$row     = $wpdb->get_row( $wpdb->prepare( "SELECT payload FROM {$table} WHERE token_key = %s", $claim_a['token_key'] ), ARRAY_A );
+	$payload = json_decode( (string) $row['payload'], true );
+	$payload['status'] = 'failed_safe';
+	$wpdb->query( $wpdb->prepare(
+		"UPDATE {$table} SET payload = %s, expires_at = %s WHERE token_key = %s",
+		wp_json_encode( $payload ),
+		$past,
+		$claim_a['token_key']
+	) );
+
+	// Worker B attempts takeover and CAS succeeds:
+	$owner_b = 'worker_B';
+	$claim_b = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), $owner_b );
+	assert_false( is_wp_error( $claim_b ), 'Worker B should succeed in CAS takeover' );
+	assert_equals( 'claimed', $claim_b['status'], 'Worker B should succeed in CAS takeover' );
+
+	// Worker C attempts takeover:
+	$owner_c = 'worker_C';
+	$claim_c = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), $owner_c );
+	assert_true( is_wp_error( $claim_c ), 'Worker C MUST NOT receive claimed' );
+	assert_equals( 'idempotency_in_progress', $claim_c->get_error_code(), 'Worker C must receive in_progress after losing CAS' );
+} );
+
+run_test( 'Idempotency: attach_journal_id has strict write-once owner-bound CAS semantics', function () {
+	$token_key = 'idem_attach_' . wp_generate_uuid4();
+	$owner_id  = 'owner_1';
+	$claim     = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), $owner_id );
+	assert_equals( 'claimed', $claim['status'] );
+	$db_key = $claim['token_key'];
+
+	// 0 -> 17 succeeds
+	$res1 = Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $db_key, $owner_id, 17 );
+	assert_true( true === $res1, 'Initial journal attachment 0 -> 17 must succeed' );
+
+	// 17 -> 17 succeeds idempotently
+	$res2 = Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $db_key, $owner_id, 17 );
+	assert_true( true === $res2, 'Same journal attachment 17 -> 17 must succeed idempotently' );
+
+	// 17 -> 18 fails
+	$res3 = Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $db_key, $owner_id, 18 );
+	assert_error_code( 'idempotency_journal_conflict', $res3, 'Attachment 17 -> 18 must be rejected as conflict' );
+
+	// wrong owner fails
+	$res4 = Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $db_key, 'wrong_owner', 17 );
+	assert_error_code( 'idempotency_owner_mismatch', $res4, 'Wrong owner must be rejected' );
+} );
+
+run_test( 'Idempotency: journal attachment failure prevents mutation callback execution', function () {
+	$token_key = 'idem_attach_fail_' . wp_generate_uuid4();
+	$owner_id  = 'owner_prebound';
+	$claim     = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), $owner_id );
+	Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $claim['token_key'], $owner_id, 999 );
+
+	$callback_executed = 0;
+	register_mock_ability( 'full-elementor-mcp/update-element', false, function () use ( &$callback_executed ) {
+		$callback_executed++;
+		return array( 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-element', array(
+		'post_id'          => 10,
+		'element_id'       => 'sec1',
+		'settings'         => array(),
+		'idempotency_key'  => $token_key,
+	) );
+
+	assert_true( is_wp_error( $res ), 'Middleware must return error on journal attach failure' );
+	assert_equals( 0, $callback_executed, 'Callback must never execute if journal attachment fails' );
+} );
+
+run_test( 'Media CREATE: journal binding failure becomes recovery_required and prevents duplicate on retry', function () {
+	global $wpdb;
+	$token_key        = 'idem_media_fail_' . wp_generate_uuid4();
+	$created_attempts = 0;
+
+	if ( ! function_exists( 'media_handle_sideload' ) ) {
+		function media_handle_sideload( $file, $post_id, $desc = null, $data = array() ) {
+			return 777;
+		}
+	}
+
+	register_mock_ability( 'full-elementor-mcp/sideload-image', false, function ( $input ) use ( &$created_attempts, $wpdb ) {
+		$created_attempts++;
+		$ctx = Full_Elementor_MCP_Mutation_Context::current();
+		// Delete the journal entry so record_created_object_id fails with journal_not_found:
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->prefix}elementor_mcp_journal WHERE id = %d", (int) $ctx['journal_id'] ) );
+
+		$file   = array( 'name' => 'test.jpg', 'tmp_name' => '/tmp/test.jpg' );
+		$att_id = Full_Elementor_MCP_Safe_Writes::media_handle_sideload( $file, 0 );
+		if ( is_wp_error( $att_id ) ) {
+			return $att_id;
+		}
+		return array( 'attachment_id' => $att_id );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/sideload-image', array(
+		'url'             => 'https://example.com/test.jpg',
+		'idempotency_key' => $token_key,
+	) );
+
+	assert_error_code( 'created_media_journal_binding_failed', $res, 'Must fail with created_media_journal_binding_failed' );
+	assert_equals( 1, $created_attempts, 'First attempt ran' );
+
+	// Verify idempotency record is marked recovery_required:
+	$idem_res = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/sideload-image', 1, null, array( 'url' => 'https://example.com/test.jpg' ), 'retry_worker' );
+	assert_true( is_wp_error( $idem_res ), 'Idempotency claim must return WP_Error for recovery_required' );
+	assert_equals( 'idempotency_recovery_required', $idem_res->get_error_code(), 'Idempotency must be recovery_required' );
+
+	// Execute again with same idempotency key:
+	$retry_res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/sideload-image', array(
+		'url'             => 'https://example.com/test.jpg',
+		'idempotency_key' => $token_key,
+	) );
+
+	assert_error_code( 'idempotency_recovery_required', $retry_res, 'Retry must be blocked by idempotency' );
+	assert_equals( 1, $created_attempts, 'Second attachment MUST NOT have been created' );
+} );
+
+run_test( 'CREATE verification: durable created ID vs callback result mismatch is rejected', function () {
+	register_mock_ability( 'full-elementor-mcp/create-page', false, function ( $input ) {
+		$post_id = Full_Elementor_MCP_Safe_Writes::insert_post( array(
+			'post_title' => 'Created Page',
+			'post_type'  => 'page',
+		) );
+		return array(
+			'post_id' => $post_id + 1,
+			'success' => true,
+		);
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/create-page', array(
+		'title' => 'Mismatch Test',
+	) );
+
+	assert_error_code( 'created_object_result_mismatch', $res, 'Must reject created ID mismatch: ' . ( is_wp_error( $res ) ? $res->get_error_message() . ' Data: ' . json_encode( $res->get_error_data() ) : '' ) );
+} );
+
+run_test( 'CREATE verification: explicit per-strategy create result fields reject arbitrary id fallback', function () {
+	$id1 = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/create-page', array( 'id' => 123 ) );
+	assert_equals( 0, $id1, 'Generic id must not resolve for create-page' );
+	$id1_ok = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/create-page', array( 'post_id' => 123 ) );
+	assert_equals( 123, $id1_ok, 'post_id must resolve for create-page' );
+
+	$id2 = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/save-as-template', array( 'id' => 456 ) );
+	assert_equals( 0, $id2, 'Generic id must not resolve for save-as-template' );
+	$id2_ok = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/save-as-template', array( 'template_id' => 456 ) );
+	assert_equals( 456, $id2_ok, 'template_id must resolve for save-as-template' );
+
+	$id3 = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/add-code-snippet', array( 'id' => 789 ) );
+	assert_equals( 0, $id3, 'Generic id must not resolve for add-code-snippet' );
+	$id3_ok = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/add-code-snippet', array( 'snippet_id' => 789 ) );
+	assert_equals( 789, $id3_ok, 'snippet_id must resolve for add-code-snippet' );
+
+	$id4 = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/sideload-image', array( 'id' => 999 ) );
+	assert_equals( 0, $id4, 'Generic id must not resolve for sideload-image' );
+	$id4_ok = Full_Elementor_MCP_Mutation_Registry::resolve_created_object_id( 'full-elementor-mcp/sideload-image', array( 'attachment_id' => 999 ) );
+	assert_equals( 999, $id4_ok, 'attachment_id must resolve for sideload-image' );
+} );
+
+run_test( 'Tree verification: malformed persistent JSON {bad json triggers failure and rollback', function () {
+	$initial_tree = array(
+		array(
+			'id'       => 'sec_good_1',
+			'elType'   => 'section',
+			'elements' => array(),
+		),
+	);
+	update_post_meta( 10, '_elementor_data', wp_json_encode( $initial_tree ) );
+
+	register_mock_ability( 'full-elementor-mcp/update-element', false, function ( $input ) {
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( 10, '_elementor_data', '{bad json' );
+		return array( 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-element', array(
+		'post_id'    => 10,
+		'element_id' => 'sec_good_1',
+		'settings'   => array(),
+	) );
+
+	assert_error_code( 'post_mutation_state_unverifiable', $res, 'Must fail closed on malformed JSON' );
+
+	$restored = json_decode( get_post_meta( 10, '_elementor_data', true ), true );
+	assert_equals( 'sec_good_1', $restored[0]['id'], 'Rollback must have restored initial tree' );
+} );
+
+run_test( 'Tree verification: scalar persistent JSON triggers failure and rollback', function () {
+	$initial_tree = array(
+		array(
+			'id'       => 'sec_scalar_1',
+			'elType'   => 'section',
+			'elements' => array(),
+		),
+	);
+	update_post_meta( 10, '_elementor_data', wp_json_encode( $initial_tree ) );
+
+	register_mock_ability( 'full-elementor-mcp/update-element', false, function ( $input ) {
+		Full_Elementor_MCP_Safe_Writes::update_post_meta( 10, '_elementor_data', '"a scalar string value"' );
+		return array( 'success' => true );
+	} );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/update-element', array(
+		'post_id'    => 10,
+		'element_id' => 'sec_scalar_1',
+		'settings'   => array(),
+	) );
+
+	assert_error_code( 'post_mutation_state_unverifiable', $res, 'Must fail closed on scalar JSON' );
+
+	$restored = json_decode( get_post_meta( 10, '_elementor_data', true ), true );
+	assert_equals( 'sec_scalar_1', $restored[0]['id'], 'Rollback must have restored initial tree' );
+} );
+
+run_test( 'Shutdown: unexpected shutdown preserves pending journal and later recover_pending sees it', function () {
+	global $wpdb;
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/update-element',
+		'fencing_token' => 1,
+		'resource_key'  => 'post:10',
+		'object_id'     => 10,
+		'before_state'  => array(),
+		'owner_id'      => 'owner-shut-1',
+		'user_id'       => 1,
+	) );
+	assert_true( $journal_id > 0 );
+
+	$token_key = 'idem_shutdown_' . wp_generate_uuid4();
+	$claim     = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), 'owner-shut-1' );
+	Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $claim['token_key'], 'owner-shut-1', $journal_id );
+
+	$ctx_token = Full_Elementor_MCP_Mutation_Context::enter( array(
+		'resource_key'    => 'post:10',
+		'owner_id'        => 'owner-shut-1',
+		'fencing_token'   => 1,
+		'journal_id'      => $journal_id,
+		'ability'         => 'full-elementor-mcp/update-element',
+		'idempotency_key' => $token_key,
+		'user_id'         => 1,
+	) );
+	Full_Elementor_MCP_Mutation_Context::mark_write_started( true );
+
+	Full_Elementor_MCP_Mutation_Middleware::handle_shutdown();
+
+	// Invariant: Journal MUST REMAIN 'pending' so next-request recovery sees it:
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_equals( 'pending', $entry['status'], 'Journal must remain pending after uncertain shutdown' );
+
+	// Invariant: Idempotency is recovery_required:
+	$idem = Full_Elementor_MCP_Idempotency_Manager::claim( $token_key, 'full-elementor-mcp/update-element', 1, null, array(), 'new_worker' );
+	assert_true( is_wp_error( $idem ), 'Idempotency claim must return WP_Error for recovery_required' );
+	assert_equals( 'idempotency_recovery_required', $idem->get_error_code() );
+
+	// Age the journal entry beyond lease TTL + grace so recover_pending identifies it as abandoned:
+	$wpdb->query( $wpdb->prepare(
+		"UPDATE {$wpdb->prefix}elementor_mcp_journal SET created_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 300 SECOND) WHERE id = %d",
+		$journal_id
+	) );
+
+	// Next-request recover_pending(10) sees the pending journal:
+	$recovered = Full_Elementor_MCP_Journal::recover_pending( 10 );
+	assert_true( count( $recovered ) >= 1, 'recover_pending must see and process the pending journal' );
+} );
+
+run_test( 'Confirmation token: context initialization failure does not consume confirmation token', function () {
+	register_mock_ability( 'full-elementor-mcp/delete-page-content', false, fn() => array( 'success' => true ) );
+
+	$challenge = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/delete-page-content',
+		array( 'post_id' => 10 ),
+		1,
+		null,
+		'post:10'
+	);
+	assert_false( is_wp_error( $challenge ) );
+	$token = $challenge['confirmation_token'];
+
+	$dummy_token = Full_Elementor_MCP_Mutation_Context::enter( array(
+		'resource_key'  => 'post:999',
+		'owner_id'      => 'nested-worker',
+		'fencing_token' => 1,
+		'journal_id'    => 1,
+	) );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page-content', array(
+		'post_id'            => 10,
+		'confirmation_token' => $token,
+	) );
+
+	assert_error_code( 'nested_mutation_not_supported', $res );
+
+	Full_Elementor_MCP_Mutation_Context::leave( $dummy_token );
+
+	$valid = Full_Elementor_MCP_Confirmation_Manager::validate( $token, 'full-elementor-mcp/delete-page-content', array( 'post_id' => 10 ), 1, null, 'post:10' );
+	assert_true( true === $valid, 'Confirmation token must remain unused and valid' );
+} );
+
+run_test( 'Confirmation token: stale final fence preflight does not consume confirmation token', function () {
+	global $wpdb;
+	$test_ability = 'full-elementor-mcp/delete-page-content';
+	register_mock_ability( $test_ability, false, fn() => array( 'success' => true ) );
+
+	$challenge = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		$test_ability,
+		array( 'post_id' => 10 ),
+		1,
+		null,
+		'post:10'
+	);
+	assert_false( is_wp_error( $challenge ) );
+	$token = $challenge['confirmation_token'];
+
+	$orig_strategy     = Full_Elementor_MCP_Mutation_Registry::get( $test_ability );
+	$modified_strategy = $orig_strategy;
+	$modified_strategy['capture_before'] = function ( $post_id, $input ) {
+		global $wpdb;
+		$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( 'post:' . $post_id );
+		$wpdb->query( "UPDATE {$wpdb->prefix}elementor_mcp_tokens SET fencing_token = fencing_token + 50 WHERE token_key = '{$lock_key}'" );
+		return array();
+	};
+	Full_Elementor_MCP_Mutation_Registry::register( $modified_strategy );
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute( $test_ability, array(
+		'post_id'            => 10,
+		'confirmation_token' => $token,
+	) );
+
+	Full_Elementor_MCP_Mutation_Registry::register( $orig_strategy );
+
+	assert_error_code( 'stale_writer_conflict', $res, 'Preflight must fail with stale_writer_conflict' );
+
+	$valid = Full_Elementor_MCP_Confirmation_Manager::validate( $token, $test_ability, array( 'post_id' => 10 ), 1, null, 'post:10' );
+	assert_true( true === $valid, 'Confirmation token must remain unused after stale fencing preflight failure' );
+} );
+
+run_test( 'Dry-run: delete-page reports accurate argument-level rollback_supported', function () {
+	register_mock_ability( 'full-elementor-mcp/delete-page', false, fn() => array( 'deleted' => true ) );
+
+	$res_perm = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page', array(
+		'post_id' => 10,
+		'force'   => true,
+		'dry_run' => true,
+	) );
+	assert_false( is_wp_error( $res_perm ) );
+	assert_false( $res_perm['rollback_supported'], 'Permanent delete dry-run must report rollback_supported = false' );
+
+	$res_trash = Full_Elementor_MCP_Mutation_Middleware::execute( 'full-elementor-mcp/delete-page', array(
+		'post_id' => 10,
+		'force'   => false,
+		'dry_run' => true,
+	) );
+	assert_false( is_wp_error( $res_trash ) );
+	assert_true( $res_trash['rollback_supported'], 'Trashing dry-run must report rollback_supported = true' );
 } );
 
 echo "\n=======================================================\n";

@@ -395,11 +395,20 @@ class Full_Elementor_MCP_Safe_Writes {
 			return new \WP_Error( 'mutation_context_missing', __( 'Active mutation context missing for media sideload.', 'full-elementor-mcp' ) );
 		}
 
-		// Check write boundary:
-		$resource_key = (string) ( $ctx['resource_key'] ?? '' );
-		$guard        = self::assert_write_boundary( $resource_key );
-		if ( is_wp_error( $guard ) ) {
-			return $guard;
+		// Check fencing assertion:
+		$resource_key  = (string) ( $ctx['resource_key'] ?? '' );
+		$owner_id      = (string) ( $ctx['owner_id'] ?? '' );
+		$fencing_token = (int) ( $ctx['fencing_token'] ?? 0 );
+		if ( ! class_exists( 'Full_Elementor_MCP_Lock_Manager' ) ) {
+			return new \WP_Error( 'write_fencing_unavailable', __( 'Lock Manager unavailable for write fencing.', 'full-elementor-mcp' ) );
+		}
+		$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership(
+			$resource_key,
+			$owner_id,
+			$fencing_token
+		);
+		if ( is_wp_error( $fence_check ) ) {
+			return $fence_check;
 		}
 
 		if ( ! function_exists( 'media_handle_sideload' ) ) {
@@ -423,7 +432,23 @@ class Full_Elementor_MCP_Safe_Writes {
 			$journal_id    = (int) ( $ctx['journal_id'] ?? 0 );
 			$fencing_token = (int) ( $ctx['fencing_token'] ?? 0 );
 			if ( $journal_id > 0 && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
-				Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, $att_id, $fencing_token );
+				$bound = Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, $att_id, $fencing_token );
+				if ( is_wp_error( $bound ) || true !== $bound ) {
+					$error_data = array(
+						'attachment_id'     => $att_id,
+						'journal_id'        => $journal_id,
+						'recovery_required' => true,
+					);
+					if ( is_wp_error( $bound ) ) {
+						$error_data['cause']      = $bound->get_error_message();
+						$error_data['cause_code'] = $bound->get_error_code();
+					}
+					return new \WP_Error(
+						'created_media_journal_binding_failed',
+						__( 'Attachment created but durable journal record failed. Recovery required.', 'full-elementor-mcp' ),
+						$error_data
+					);
+				}
 			}
 			Full_Elementor_MCP_Mutation_Context::bind_created_object_id( $att_id );
 		}

@@ -484,9 +484,6 @@ class Full_Elementor_MCP_Mutation_Registry {
 		if ( ! empty( $strategy['created_object_id_resolver'] ) && is_callable( $strategy['created_object_id_resolver'] ) ) {
 			return absint( ( $strategy['created_object_id_resolver'] )( $result ) );
 		}
-		if ( is_array( $result ) ) {
-			return absint( $result['id'] ?? ( $result['post_id'] ?? ( $result['template_id'] ?? ( $result['attachment_id'] ?? ( $result['snippet_id'] ?? ( $result['page_id'] ?? 0 ) ) ) ) ) );
-		}
 		return 0;
 	}
 
@@ -642,8 +639,9 @@ class Full_Elementor_MCP_Mutation_Registry {
 			'full-elementor-mcp/add-atomic-video'         => array( 'action' => 'add_atomic_video', 'destructive' => false ),
 			'full-elementor-mcp/add-atomic-divider'       => array( 'action' => 'add_atomic_divider', 'destructive' => false ),
 
-			// Template Application (1)
+			// Template Application (2)
 			'full-elementor-mcp/apply-template'           => array( 'action' => 'apply_template', 'destructive' => false ),
+			'full-elementor-mcp/import-template'          => array( 'action' => 'import_template', 'destructive' => false ),
 
 			// Convenience Widgets (62)
 			'full-elementor-mcp/add-accordion'            => array( 'action' => 'add_accordion', 'destructive' => false ),
@@ -820,15 +818,14 @@ class Full_Elementor_MCP_Mutation_Registry {
 		);
 
 		// ---------------------------------------------------------------------
-		// 4. WordPress Object Creation (7 abilities)
+		// 4. WordPress Object Creation (6 abilities)
 		// ---------------------------------------------------------------------
 		$create_abilities = array(
-			'full-elementor-mcp/create-page'           => array( 'action' => 'create_page', 'object_type' => 'page', 'key' => 'id' ),
-			'full-elementor-mcp/duplicate-page'        => array( 'action' => 'duplicate_page', 'object_type' => 'page', 'key' => 'id' ),
-			'full-elementor-mcp/import-template'       => array( 'action' => 'import_template', 'object_type' => 'template', 'key' => 'template_id' ),
-			'full-elementor-mcp/create-theme-template' => array( 'action' => 'create_theme_template', 'object_type' => 'template', 'key' => 'template_id' ),
-			'full-elementor-mcp/create-popup'          => array( 'action' => 'create_popup', 'object_type' => 'popup', 'key' => 'template_id' ),
-			'full-elementor-mcp/build-page'            => array( 'action' => 'build_page', 'object_type' => 'page', 'key' => 'id' ),
+			'full-elementor-mcp/create-page'           => array( 'action' => 'create_page', 'object_type' => 'page', 'key' => 'post_id' ),
+			'full-elementor-mcp/duplicate-page'        => array( 'action' => 'duplicate_page', 'object_type' => 'page', 'key' => 'post_id' ),
+			'full-elementor-mcp/create-theme-template' => array( 'action' => 'create_theme_template', 'object_type' => 'template', 'key' => 'post_id', 'secondary_key' => 'template_id' ),
+			'full-elementor-mcp/create-popup'          => array( 'action' => 'create_popup', 'object_type' => 'popup', 'key' => 'post_id', 'secondary_key' => 'template_id' ),
+			'full-elementor-mcp/build-page'            => array( 'action' => 'build_page', 'object_type' => 'page', 'key' => 'post_id' ),
 			'full-elementor-mcp/save-as-template'      => array( 'action' => 'save_as_template', 'object_type' => 'template', 'key' => 'template_id' ),
 		);
 
@@ -856,8 +853,14 @@ class Full_Elementor_MCP_Mutation_Registry {
 						if ( ! is_array( $result ) ) {
 							return 0;
 						}
-						$primary = $meta['key'] ?? 'id';
-						return absint( $result[ $primary ] ?? ( $result['id'] ?? ( $result['page_id'] ?? ( $result['post_id'] ?? ( $result['template_id'] ?? 0 ) ) ) ) );
+						$primary = $meta['key'] ?? 'post_id';
+						if ( isset( $result[ $primary ] ) && absint( $result[ $primary ] ) > 0 ) {
+							return absint( $result[ $primary ] );
+						}
+						if ( ! empty( $meta['secondary_key'] ) && isset( $result[ $meta['secondary_key'] ] ) && absint( $result[ $meta['secondary_key'] ] ) > 0 ) {
+							return absint( $result[ $meta['secondary_key'] ] );
+						}
+						return 0;
 					},
 					'capture_before'                 => static function ( int $object_id, array $args = array() ) {
 						return array( 'exists' => false );
@@ -866,8 +869,8 @@ class Full_Elementor_MCP_Mutation_Registry {
 						return self::restore_created_object_callback( $before_state, $context );
 					},
 					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) use ( $meta ) {
-						$primary   = $meta['key'] ?? 'id';
-						$target_id = $object_id > 0 ? $object_id : absint( is_array( $result ) ? ( $result[ $primary ] ?? ( $result['id'] ?? ( $result['page_id'] ?? ( $result['post_id'] ?? ( $result['template_id'] ?? 0 ) ) ) ) ) : 0 );
+						$primary   = $meta['key'] ?? 'post_id';
+						$target_id = $object_id > 0 ? $object_id : ( is_array( $result ) ? absint( $result[ $primary ] ?? ( ! empty( $meta['secondary_key'] ) ? ( $result[ $meta['secondary_key'] ] ?? 0 ) : 0 ) ) : 0 );
 						return self::capture_created_object_callback( $target_id );
 					},
 					'supports_rollback'              => true,
@@ -1015,8 +1018,8 @@ class Full_Elementor_MCP_Mutation_Registry {
 						if ( ! is_array( $result ) ) {
 							return 0;
 						}
-						$primary = $meta['key'] ?? 'id';
-						return absint( $result[ $primary ] ?? ( $result['id'] ?? ( $result['post_id'] ?? ( $result['attachment_id'] ?? ( $result['snippet_id'] ?? 0 ) ) ) ) );
+						$primary = $meta['key'] ?? 'attachment_id';
+						return absint( $result[ $primary ] ?? 0 );
 					},
 					'capture_before'                 => static function ( int $object_id, array $args = array() ) {
 						return null;
@@ -1028,8 +1031,8 @@ class Full_Elementor_MCP_Mutation_Registry {
 						);
 					},
 					'capture_after'                  => static function ( int $object_id, array $args = array(), mixed $result = null ) use ( $meta ) {
-						$primary   = $meta['key'] ?? 'id';
-						$target_id = $object_id > 0 ? $object_id : absint( is_array( $result ) ? ( $result[ $primary ] ?? ( $result['id'] ?? ( $result['post_id'] ?? ( $result['attachment_id'] ?? ( $result['snippet_id'] ?? 0 ) ) ) ) ) : 0 );
+						$primary   = $meta['key'] ?? 'attachment_id';
+						$target_id = $object_id > 0 ? $object_id : ( is_array( $result ) ? absint( $result[ $primary ] ?? 0 ) : 0 );
 						return self::capture_created_object_callback( $target_id );
 					},
 					'supports_rollback'              => false,
