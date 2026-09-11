@@ -216,7 +216,7 @@ if ( ! function_exists( 'delete_post_meta' ) ) {
 
 if ( ! function_exists( 'wp_trash_post' ) ) {
 	function wp_trash_post( int $post_id ): mixed {
-		$GLOBALS['mock_created_objects'][ $post_id ] = 'trashed';
+		$GLOBALS['mock_created_objects'][ $post_id ] = 'trash';
 		return true;
 	}
 }
@@ -690,7 +690,34 @@ run_test( 'Registry: separate rollback resource key resolver for created objects
 	);
 
 	$rollback_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key( 'full-elementor-mcp/create-page', $entry );
-	assert_equals( 'page:789', $rollback_key, 'Rollback resource key for created object must lock the created entity' );
+	assert_equals( 'post:789', $rollback_key, 'Rollback resource key for created object must lock the created entity' );
+} );
+
+run_test( 'Registry: WordPress post-backed objects share ONE canonical post lock identity', function () {
+	// Page mutation vs delete-page
+	$k_add_widget   = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( 'full-elementor-mcp/add-widget', array( 'post_id' => 123 ) );
+	$k_delete_page  = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( 'full-elementor-mcp/delete-page', array( 'post_id' => 123 ) );
+	$k_update_set   = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( 'full-elementor-mcp/update-page-settings', array( 'post_id' => 123 ) );
+	assert_equals( 'post:123', $k_add_widget );
+	assert_equals( 'post:123', $k_delete_page );
+	assert_equals( 'post:123', $k_update_set );
+
+	// Template mutation vs delete-template
+	$k_apply_tpl   = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( 'full-elementor-mcp/apply-template', array( 'post_id' => 456 ) );
+	$k_del_tpl     = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( 'full-elementor-mcp/delete-template', array( 'template_id' => 456 ) );
+	assert_equals( 'post:456', $k_apply_tpl );
+	assert_equals( 'post:456', $k_del_tpl );
+
+	// Popup mutation
+	$k_popup = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( 'full-elementor-mcp/set-popup-settings', array( 'popup_id' => 789 ) );
+	assert_equals( 'post:789', $k_popup );
+
+	// Create-page rollback resource key
+	$k_create_rollback = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
+		'full-elementor-mcp/create-page',
+		array( 'ability' => 'full-elementor-mcp/create-page', 'created_object_id' => 123 )
+	);
+	assert_equals( 'post:123', $k_create_rollback );
 } );
 
 run_test( 'Registry: core strategies initialize with proper rollback classifications', function () {
@@ -732,6 +759,11 @@ run_test( 'Registry: set-featured-image captures and restores actual thumbnail a
 
 	// Restore empty thumbnail (removal).
 	Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( array( 'thumbnail_id' => 0 ), array( 'post_id' => 501 ) );
+	assert_equals( 0, (int) ( $GLOBALS['mock_thumbnails'][501] ?? 0 ) );
+
+	// Idempotent restoration when already having no thumbnail:
+	$idemp = Full_Elementor_MCP_Mutation_Registry::restore_featured_image_callback( array( 'thumbnail_id' => 0 ), array( 'post_id' => 501 ) );
+	assert_true( true === $idemp, 'Restoring no-thumbnail when already no thumbnail must succeed idempotently' );
 	assert_equals( 0, (int) ( $GLOBALS['mock_thumbnails'][501] ?? 0 ) );
 } );
 
@@ -878,6 +910,7 @@ run_test( 'Journal: begin stores durable row before mutation with deterministic 
 	assert_equals( '101', (string) $entry['object_id'] );
 	assert_equals( '1', (string) $entry['fencing_token'] );
 	assert_equals( '5', (string) $entry['user_id'] );
+	assert_equals( '1', (string) $entry['rollback_supported'] );
 
 	$expected_hash = Full_Elementor_MCP_Journal::hash_state( $state );
 	assert_equals( $expected_hash, $entry['before_hash'] );
@@ -905,6 +938,48 @@ run_test( 'Journal: begin enforces strategy contract and rejects mismatches', fu
 	) );
 	assert_is_wp_error( $res2 );
 	assert_equals( 'missing_before_state', $res2->get_error_code() );
+
+	// Caller supplied mismatched resource key.
+	$res3 = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 102,
+		'resource_key'  => 'post:999',
+		'fencing_token' => 1,
+		'before_state'  => array(),
+	) );
+	assert_is_wp_error( $res3 );
+	assert_equals( 'strategy_resource_mismatch', $res3->get_error_code() );
+} );
+
+run_test( 'Journal: rollback_supported decision is durably persisted and cannot be bypassed', function () {
+	// Trash delete: rollback_supported = 1
+	$j1 = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/delete-page',
+		'object_id'     => 405,
+		'fencing_token' => 1,
+		'args'          => array( 'post_id' => 405, 'force' => false ),
+		'before_state'  => array( 'id' => 405, 'force' => false, 'status' => 'publish' ),
+	) );
+	$e1 = Full_Elementor_MCP_Journal::get_entry( $j1 );
+	assert_equals( '1', (string) $e1['rollback_supported'] );
+
+	// Permanent delete: rollback_supported = 0
+	$j2 = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/delete-page',
+		'object_id'     => 406,
+		'fencing_token' => 1,
+		'args'          => array( 'post_id' => 406, 'force' => true ),
+		'before_state'  => array( 'id' => 406, 'force' => true ),
+	) );
+	$e2 = Full_Elementor_MCP_Journal::get_entry( $j2 );
+	assert_equals( '0', (string) $e2['rollback_supported'] );
+
+	// Rollback attempt on permanent delete journal MUST be rejected even with active lock:
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:406', 'perm-worker', 30 );
+	$res  = Full_Elementor_MCP_Journal::rollback( $j2, 'perm-worker', (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'mutation_not_rollbackable', $res->get_error_code() );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:406', 'perm-worker', (int) $lock['fencing_token'] );
 } );
 
 run_test( 'Journal: canonical state hashing is order-independent for associative keys', function () {
@@ -1028,15 +1103,136 @@ run_test( 'Rollback: created object rollback locks created resource and trashes 
 	Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, 999, 1 );
 	Full_Elementor_MCP_Journal::commit( $journal_id, array( 'post_id' => 999 ), 1 );
 
-	// Acquire lock on created object resource (page:999).
-	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'page:999', $owner_id, 30 );
+	// Acquire lock on created object resource (post:999).
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:999', $owner_id, 30 );
 	assert_true( $lock['acquired'] );
 
 	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
 	assert_true( is_array( $res ) && ! empty( $res['success'] ) );
-	assert_equals( 'trashed', $GLOBALS['mock_created_objects'][999] );
+	assert_true( in_array( $GLOBALS['mock_created_objects'][999], array( 'trash', 'trashed' ), true ) );
 
-	Full_Elementor_MCP_Lock_Manager::release_lock( 'page:999', $owner_id, (int) $lock['fencing_token'] );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:999', $owner_id, (int) $lock['fencing_token'] );
+} );
+
+run_test( 'Rollback: page-settings rollback is exact and removes newly introduced keys', function () {
+	$resource_key = 'post:401';
+	$owner_id     = 'settings-worker';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$before_settings = array( 'a' => 1 );
+	$GLOBALS['mock_post_meta'][401]['_elementor_page_settings'] = array( 'a' => 2, 'new_key' => 99 );
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/update-page-settings',
+		'object_id'     => 401,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => $before_settings,
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, array( 'a' => 2, 'new_key' => 99 ), (int) $lock['fencing_token'] );
+
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_true( is_array( $res ) && ! empty( $res['success'] ) );
+
+	$final_settings = $GLOBALS['mock_post_meta'][401]['_elementor_page_settings'];
+	assert_equals( array( 'a' => 1 ), $final_settings );
+	assert_false( isset( $final_settings['new_key'] ), 'Keys introduced by mutation must not survive rollback' );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
+} );
+
+run_test( 'Rollback: race condition between conflict-check and restore blocks persistent write', function () {
+	$resource_key = 'post:402';
+	$owner_id     = 'worker-race';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$orig_state = array( 'elements' => array( 'orig' ) );
+	$mut_state  = array( 'elements' => array( 'mutated' ) );
+	$GLOBALS['mock_post_storage'][402] = $mut_state;
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 402,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => $orig_state,
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, $mut_state, (int) $lock['fencing_token'] );
+
+	// Simulate takeover occurring right before restore executes:
+	add_filter( 'full_elementor_mcp_restore_page_data', function ( $null, $state, $context ) use ( $resource_key, $owner_id, $lock ) {
+		Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
+		Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, 'new-owner', 30 );
+		return null;
+	}, 10, 3 );
+
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	remove_all_filters( 'full_elementor_mcp_restore_page_data' );
+
+	assert_equals( $mut_state, $GLOBALS['mock_post_storage'][402] );
+} );
+
+run_test( 'Rollback: verification against BEFORE state rejects corrupted or mismatched restore', function () {
+	$resource_key = 'post:403';
+	$owner_id     = 'worker-verify';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$orig_state = array( 'elements' => array( 'correct_orig' ) );
+	$mut_state  = array( 'elements' => array( 'modified' ) );
+	$GLOBALS['mock_post_storage'][403] = $mut_state;
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 403,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => $orig_state,
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, $mut_state, (int) $lock['fencing_token'] );
+
+	// Filter simulates corrupted restore that leaves diverged data:
+	add_filter( 'full_elementor_mcp_restore_page_data', function () {
+		$GLOBALS['mock_post_storage'][403] = array( 'elements' => array( 'corrupted_restore' ) );
+		return true;
+	} );
+
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'rollback_verification_failed', $res->get_error_code() );
+
+	$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+	assert_true( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK !== $entry['status'] );
+
+	remove_all_filters( 'full_elementor_mcp_restore_page_data' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
+} );
+
+run_test( 'Rollback: slug collision during set-page-slug fails rollback verification', function () {
+	$post_id = 404;
+	$GLOBALS['mock_posts'][404] = array( 'ID' => 404, 'post_name' => 'target-slug' );
+	$resource_key = 'post:404';
+	$owner_id     = 'slug-worker';
+	$lock         = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/set-page-slug',
+		'object_id'     => 404,
+		'fencing_token' => (int) $lock['fencing_token'],
+		'before_state'  => array( 'post_name' => 'target-slug' ),
+	) );
+	Full_Elementor_MCP_Journal::commit( $journal_id, array( 'post_name' => 'new-slug' ), (int) $lock['fencing_token'] );
+	$GLOBALS['mock_posts'][404]['post_name'] = 'new-slug';
+
+	// Simulate WP adding suffix on collision:
+	add_filter( 'full_elementor_mcp_restore_page_slug', function () {
+		$GLOBALS['mock_posts'][404]['post_name'] = 'target-slug-2';
+		return true;
+	} );
+
+	$res = Full_Elementor_MCP_Journal::rollback( $journal_id, $owner_id, (int) $lock['fencing_token'] );
+	assert_is_wp_error( $res );
+	assert_equals( 'rollback_verification_failed', $res->get_error_code() );
+
+	remove_all_filters( 'full_elementor_mcp_restore_page_slug' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, (int) $lock['fencing_token'] );
 } );
 
 run_test( 'Rollback: conflict detection fails closed when live state diverged', function () {
@@ -1166,7 +1362,59 @@ run_test( 'Recovery: stale journal generation (fence 1 vs current fence 2) is ne
 	assert_equals( 'abandoned_pending_stale_generation', $entry['error_message'] );
 } );
 
-run_test( 'Recovery: expired abandoned row with active fencing recovery succeeds', function () {
+run_test( 'Recovery: abandoned create never auto-trashes created object and never compares cross-resource fences', function () {
+	global $wpdb;
+	$tokens_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+	$GLOBALS['mock_created_objects'][500] = 'active_page';
+
+	// Create journal with fence = 8 on create:create-page:...
+	$create_res_key  = Full_Elementor_MCP_Mutation_Registry::build_create_resource_key( 'full-elementor-mcp/create-page', array( 'title' => 'Important Page' ) );
+	$create_lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $create_res_key );
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/create-page',
+		'fencing_token' => 8,
+		'args'          => array( 'title' => 'Important Page' ),
+	) );
+	Full_Elementor_MCP_Journal::record_created_object_id( $journal_id, 500, 8 );
+
+	// Expire the creation lock (> 60s grace).
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$tokens_table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
+			VALUES (%s, 'lock', 'creator-died', 8, NULL, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 150 SECOND), DATE_SUB(UTC_TIMESTAMP(), INTERVAL 120 SECOND), 0)",
+			$create_lock_key
+		)
+	);
+
+	// Meanwhile, later post:500 has lock with fence = 1 and is active/modified.
+	$post_lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( 'post:500' );
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$tokens_table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
+			VALUES (%s, 'lock', 'editor-worker', 1, NULL, UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL 60 SECOND), 0)",
+			$post_lock_key
+		)
+	);
+
+	$reports = Full_Elementor_MCP_Journal::recover_pending( 60 );
+	$matched_report = null;
+	foreach ( $reports as $r ) {
+		if ( $r['journal_id'] === $journal_id ) {
+			$matched_report = $r;
+			break;
+		}
+	}
+	assert_true( null !== $matched_report, 'Must find recovery report for journal_id' );
+	assert_equals( Full_Elementor_MCP_Journal::STATUS_FAILED, $matched_report['status'] );
+	assert_equals( 'abandoned_create_requires_manual_recovery', $matched_report['reason'] );
+
+	// CRITICAL: object 500 MUST NOT be trashed!
+	assert_equals( 'active_page', $GLOBALS['mock_created_objects'][500] );
+} );
+
+run_test( 'Recovery: pending existing-resource with divergent live state is NOT speculatively overwritten', function () {
 	global $wpdb;
 	$tokens_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 	$resource_key = 'post:306';
@@ -1202,9 +1450,53 @@ run_test( 'Recovery: expired abandoned row with active fencing recovery succeeds
 		}
 	}
 	assert_true( null !== $matched_report, 'Must find recovery report for journal_id' );
-	assert_equals( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK, $matched_report['status'] );
-	assert_equals( 'recovered', $matched_report['reason'] );
-	assert_equals( $orig_state, $GLOBALS['mock_post_storage'][306] );
+	assert_equals( Full_Elementor_MCP_Journal::STATUS_FAILED, $matched_report['status'] );
+	assert_equals( 'manual_recovery_required', $matched_report['reason'] );
+
+	// Live content remains untouched!
+	assert_equals( array( 'elements' => array( 'stuck_intermediate' ) ), $GLOBALS['mock_post_storage'][306] );
+} );
+
+run_test( 'Recovery: pending existing-resource with clean live state resolves cleanly as clean_noop', function () {
+	global $wpdb;
+	$tokens_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$resource_key = 'post:307';
+	$lock_key     = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $resource_key );
+
+	$GLOBALS['mock_post_storage'][307] = array( 'elements' => array( 'clean_state' ) );
+	$orig_state = array( 'elements' => array( 'clean_state' ) );
+
+	$journal_id = Full_Elementor_MCP_Journal::begin( array(
+		'ability'       => 'full-elementor-mcp/add-widget',
+		'object_id'     => 307,
+		'fencing_token' => 1,
+		'before_state'  => $orig_state,
+	) );
+
+	// Insert lock generation 1 that expired 120s ago (> 60s grace).
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$tokens_table} (token_key, token_type, owner_id, fencing_token, payload, created_at, expires_at, used)
+			VALUES (%s, 'lock', 'dead-worker-2', 1, NULL, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 150 SECOND), DATE_SUB(UTC_TIMESTAMP(), INTERVAL 120 SECOND), 0)",
+			$lock_key
+		)
+	);
+
+	$reports = Full_Elementor_MCP_Journal::recover_pending( 60 );
+	assert_true( count( $reports ) > 0 );
+
+	$matched_report = null;
+	foreach ( $reports as $r ) {
+		if ( $r['journal_id'] === $journal_id ) {
+			$matched_report = $r;
+			break;
+		}
+	}
+	assert_true( null !== $matched_report, 'Must find recovery report for journal_id' );
+	assert_equals( Full_Elementor_MCP_Journal::STATUS_FAILED, $matched_report['status'] );
+	assert_equals( 'clean_noop', $matched_report['reason'] );
+
+	assert_equals( $orig_state, $GLOBALS['mock_post_storage'][307] );
 } );
 
 // =========================================================================

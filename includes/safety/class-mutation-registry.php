@@ -387,9 +387,27 @@ class Full_Elementor_MCP_Mutation_Registry {
 	public static function build_create_resource_key( string $ability, array $args ): string {
 		$clean_ability = sanitize_key( str_replace( array( 'full-elementor-mcp/', '/' ), array( '', '_' ), $ability ) );
 
-		// Strip transient runtime tokens / lock fields.
+		// If arguments are nested under 'args', unwrap them.
+		if ( isset( $args['args'] ) && is_array( $args['args'] ) ) {
+			$args = $args['args'];
+		}
+
+		// Strip transient runtime tokens / lock fields and journal control metadata.
 		$filtered_args = $args;
-		$runtime_keys  = array( 'fencing_token', 'owner_id', 'user_id', 'credential_uuid', '_wpnonce', 'nonce' );
+		$runtime_keys  = array(
+			'fencing_token',
+			'owner_id',
+			'user_id',
+			'credential_uuid',
+			'_wpnonce',
+			'nonce',
+			'ability',
+			'action',
+			'object_type',
+			'resource_key',
+			'before_state',
+			'after_state',
+		);
 		foreach ( $runtime_keys as $rk ) {
 			unset( $filtered_args[ $rk ] );
 		}
@@ -666,8 +684,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'rollback_resource_key_resolver' => static function ( array $entry, array $args = array() ): string {
 						$created_id = absint( $entry['created_object_id'] ?? ( $args['created_object_id'] ?? 0 ) );
 						if ( $created_id > 0 ) {
-							$type = (string) ( $entry['object_type'] ?? 'post' );
-							return self::build_resource_key( $type, $created_id );
+							return self::build_resource_key( 'post', $created_id );
 						}
 						return (string) ( $entry['resource_key'] ?? '' );
 					},
@@ -705,9 +722,9 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'action'                     => $meta['action'],
 					'object_type'                => $meta['object_type'],
 					'category'                   => self::CATEGORY_WP_OBJECT_DELETE,
-					'resource_key_resolver'      => static function ( array $args = array() ) use ( $meta ): string {
-						$id = absint( $args['post_id'] ?? ( $args['template_id'] ?? ( $args['object_id'] ?? 0 ) ) );
-						return self::build_resource_key( $meta['object_type'], $id );
+					'resource_key_resolver'      => static function ( array $args = array() ): string {
+						$id = absint( $args['post_id'] ?? ( $args['template_id'] ?? ( $args['object_id'] ?? ( $args['page_id'] ?? 0 ) ) ) );
+						return self::build_resource_key( 'post', $id );
 					},
 					'object_id_resolver'         => static function ( array $args = array() ): int {
 						return absint( $args['post_id'] ?? ( $args['template_id'] ?? ( $args['object_id'] ?? 0 ) ) );
@@ -778,9 +795,9 @@ class Full_Elementor_MCP_Mutation_Registry {
 					'action'                  => $meta['action'],
 					'object_type'             => $meta['object_type'],
 					'category'                => $meta['category'],
-					'resource_key_resolver'   => static function ( array $args = array() ) use ( $meta ): string {
+					'resource_key_resolver'   => static function ( array $args = array() ): string {
 						$id = absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) ) ) );
-						return self::build_resource_key( $meta['object_type'], $id );
+						return self::build_resource_key( 'post', $id );
 					},
 					'object_id_resolver'      => static function ( array $args = array() ): int {
 						return absint( $args['kit_id'] ?? ( $args['id'] ?? ( $args['snippet_id'] ?? ( $args['template_id'] ?? ( $args['popup_id'] ?? ( $args['object_id'] ?? ( $args['post_id'] ?? 0 ) ) ) ) ) ) );
@@ -850,6 +867,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
+		// Defensive fencing re-assertion immediately before persistent write.
+		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
+		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
+		}
+
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $post_id < 1 ) {
 			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for page data restoration.', 'full-elementor-mcp' ) );
@@ -912,6 +940,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
+		// Defensive fencing re-assertion immediately before persistent write.
+		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
+		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
+		}
+
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $post_id < 1 ) {
 			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for page settings restoration.', 'full-elementor-mcp' ) );
@@ -921,12 +960,31 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return new \WP_Error( 'invalid_before_state', __( 'Before-state must be an array of settings.', 'full-elementor-mcp' ) );
 		}
 
-		if ( class_exists( 'Full_Elementor_MCP_Data' ) ) {
-			$data_layer = new \Full_Elementor_MCP_Data();
-			return $data_layer->save_page_settings( $post_id, $before_state );
+		// EXACT REPLACEMENT:
+		// Directly update _elementor_page_settings to guarantee no keys introduced by the mutation survive.
+		update_post_meta( $post_id, '_elementor_page_settings', $before_state );
+
+		// Invalidate Elementor CSS cache.
+		delete_post_meta( $post_id, '_elementor_css' );
+		$upload_dir = function_exists( 'wp_get_upload_dir' ) ? wp_get_upload_dir() : null;
+		if ( ! empty( $upload_dir['basedir'] ) ) {
+			$css_path = $upload_dir['basedir'] . '/elementor/css/post-' . $post_id . '.css';
+			if ( file_exists( $css_path ) && function_exists( 'wp_delete_file' ) ) {
+				wp_delete_file( $css_path );
+			}
 		}
 
-		update_post_meta( $post_id, '_elementor_page_settings', $before_state );
+		// Update in-memory Elementor document settings model if active.
+		if ( class_exists( '\\Elementor\\Plugin' ) && isset( \Elementor\Plugin::$instance->documents ) ) {
+			$doc = \Elementor\Plugin::$instance->documents->get( $post_id );
+			if ( $doc && method_exists( $doc, 'get_settings_model' ) ) {
+				$model = $doc->get_settings_model();
+				if ( $model && method_exists( $model, 'set_settings' ) ) {
+					$model->set_settings( $before_state );
+				}
+			}
+		}
+
 		return true;
 	}
 
@@ -958,6 +1016,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
+		// Defensive fencing re-assertion immediately before persistent write.
+		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
+		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
+		}
+
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $post_id < 1 ) {
 			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for featured image restoration.', 'full-elementor-mcp' ) );
@@ -967,17 +1036,33 @@ class Full_Elementor_MCP_Mutation_Registry {
 
 		if ( $thumb_id > 0 ) {
 			if ( function_exists( 'set_post_thumbnail' ) ) {
-				$res = set_post_thumbnail( $post_id, $thumb_id );
-				return false !== $res;
+				set_post_thumbnail( $post_id, $thumb_id );
+			} else {
+				update_post_meta( $post_id, '_thumbnail_id', $thumb_id );
 			}
-			return false !== update_post_meta( $post_id, '_thumbnail_id', $thumb_id );
+		} else {
+			if ( function_exists( 'delete_post_thumbnail' ) ) {
+				delete_post_thumbnail( $post_id );
+			} else {
+				delete_post_meta( $post_id, '_thumbnail_id' );
+			}
 		}
 
-		if ( function_exists( 'delete_post_thumbnail' ) ) {
-			return delete_post_thumbnail( $post_id );
+		// Verify restoration after write:
+		$recaptured = self::capture_featured_image_callback( $post_id );
+		if ( (int) $recaptured['thumbnail_id'] !== $thumb_id ) {
+			return new \WP_Error(
+				'rollback_verification_failed',
+				sprintf(
+					/* translators: 1: expected thumbnail ID, 2: actual thumbnail ID */
+					__( 'Featured image restoration failed verification: expected thumbnail ID %1$d, got %2$d.', 'full-elementor-mcp' ),
+					$thumb_id,
+					$recaptured['thumbnail_id']
+				)
+			);
 		}
 
-		return delete_post_meta( $post_id, '_thumbnail_id' );
+		return true;
 	}
 
 	/**
@@ -1010,6 +1095,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return $filtered;
 		}
 
+		// Defensive fencing re-assertion immediately before persistent write.
+		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
+		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
+		}
+
 		$post_id = absint( $context['object_id'] ?? ( $context['post_id'] ?? 0 ) );
 		if ( $post_id < 1 ) {
 			return new \WP_Error( 'invalid_post_id', __( 'Invalid post ID for page slug restoration.', 'full-elementor-mcp' ) );
@@ -1025,7 +1121,23 @@ class Full_Elementor_MCP_Mutation_Registry {
 				),
 				true
 			);
-			return ! is_wp_error( $res );
+			if ( is_wp_error( $res ) ) {
+				return $res;
+			}
+		}
+
+		// Verify restoration after write:
+		$recaptured = self::capture_page_slug_callback( $post_id );
+		if ( (string) $recaptured['post_name'] !== $slug ) {
+			return new \WP_Error(
+				'rollback_verification_failed',
+				sprintf(
+					/* translators: 1: expected slug, 2: actual slug */
+					__( 'Page slug restoration failed verification (slug collision or modification): expected "%1$s", got "%2$s".', 'full-elementor-mcp' ),
+					$slug,
+					$recaptured['post_name']
+				)
+			);
 		}
 
 		return true;
@@ -1042,6 +1154,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$filtered = apply_filters( 'full_elementor_mcp_restore_created_object', null, $before_state, $context );
 		if ( null !== $filtered ) {
 			return $filtered;
+		}
+
+		// Defensive fencing re-assertion immediately before persistent write.
+		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
+		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
 		}
 
 		$created_id = absint( $context['created_object_id'] ?? 0 );
@@ -1070,6 +1193,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$filtered = apply_filters( 'full_elementor_mcp_restore_deleted_object', null, $before_state, $context );
 		if ( null !== $filtered ) {
 			return $filtered;
+		}
+
+		// Defensive fencing re-assertion immediately before persistent write.
+		$resource_key = (string) ( $context['rollback_resource_key'] ?? ( $context['resource_key'] ?? '' ) );
+		$owner_id     = (string) ( $context['current_owner_id'] ?? ( $context['owner_id'] ?? '' ) );
+		$token        = (int) ( $context['caller_fencing_token'] ?? ( $context['fencing_token'] ?? 0 ) );
+		if ( '' !== $resource_key && '' !== $owner_id && $token > 0 ) {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
 		}
 
 		if ( is_array( $before_state ) && ! empty( $before_state['force'] ) ) {

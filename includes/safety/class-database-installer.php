@@ -26,9 +26,9 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Current database schema version.
 	 *
-	 * 1.0.2: Safety-schema enhancement adding canonical resource_key column and index to WAL journal.
+	 * 1.0.3: Safety-schema enhancement adding persistent rollback_supported column to WAL journal.
 	 */
-	public const DB_VERSION = '1.0.2';
+	public const DB_VERSION = '1.0.3';
 
 	/**
 	 * Option key storing installed schema version.
@@ -99,6 +99,7 @@ class Full_Elementor_MCP_Database_Installer {
 				object_id bigint(20) unsigned NOT NULL default 0,
 				created_object_id bigint(20) unsigned default NULL,
 				resource_key varchar(128) NOT NULL default '',
+				rollback_supported tinyint(1) NOT NULL default 0,
 				fencing_token bigint(20) unsigned NOT NULL default 0,
 				before_state longtext default NULL,
 				before_hash varchar(64) default NULL,
@@ -260,6 +261,7 @@ class Full_Elementor_MCP_Database_Installer {
 					'object_id',
 					'created_object_id',
 					'resource_key',
+					'rollback_supported',
 					'fencing_token',
 					'before_state',
 					'before_hash',

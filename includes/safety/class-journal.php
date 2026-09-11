@@ -391,22 +391,34 @@ class Full_Elementor_MCP_Journal {
 			);
 		}
 
-		// Resolve or validate canonical resource key.
-		$resource_key = trim( (string) ( $params['resource_key'] ?? '' ) );
-		if ( '' === $resource_key ) {
-			$resolved_key = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( $ability, $params );
-			if ( is_wp_error( $resolved_key ) ) {
-				return $resolved_key;
-			}
-			$resource_key = $resolved_key;
+		// Always resolve the expected canonical resource key from strategy and args.
+		$actual_args  = isset( $params['args'] ) && is_array( $params['args'] ) ? $params['args'] : $params;
+		$expected_key = Full_Elementor_MCP_Mutation_Registry::resolve_resource_key( $ability, $actual_args );
+		if ( is_wp_error( $expected_key ) ) {
+			return $expected_key;
 		}
 
-		// Enforce before_state contract.
-		$is_create = Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
+		$provided_key = trim( (string) ( $params['resource_key'] ?? '' ) );
+		if ( '' !== $provided_key && $provided_key !== $expected_key ) {
+			return new \WP_Error(
+				'strategy_resource_mismatch',
+				sprintf(
+					/* translators: 1: provided key, 2: expected key */
+					__( 'Caller-provided resource key "%1$s" does not match expected canonical resource key "%2$s".', 'full-elementor-mcp' ),
+					esc_html( $provided_key ),
+					esc_html( $expected_key )
+				)
+			);
+		}
+		$resource_key = $expected_key;
+
+		// Enforce before_state contract and derive durable rollback capability.
+		$is_create         = Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
+		$supports_rollback = Full_Elementor_MCP_Mutation_Registry::supports_rollback_for_args( $ability, $actual_args );
+
 		if ( $is_create ) {
 			$before_state_raw = array( 'exists' => false );
 		} else {
-			$supports_rollback = Full_Elementor_MCP_Mutation_Registry::supports_rollback_for_args( $ability, $params );
 			if ( $supports_rollback ) {
 				if ( ! array_key_exists( 'before_state', $params ) || null === $params['before_state'] ) {
 					return new \WP_Error(
@@ -439,11 +451,11 @@ class Full_Elementor_MCP_Journal {
 		$sql = $wpdb->prepare(
 			"INSERT INTO {$table} (
 				created_at, updated_at, ability, action, object_type, object_id,
-				created_object_id, resource_key, fencing_token, before_state, before_hash,
+				created_object_id, resource_key, rollback_supported, fencing_token, before_state, before_hash,
 				after_hash, status, error_message, user_id, credential_uuid
 			) VALUES (
 				UTC_TIMESTAMP(), UTC_TIMESTAMP(), %s, %s, %s, %d,
-				NULL, %s, %d, %s, %s,
+				NULL, %s, %d, %d, %s, %s,
 				NULL, %s, NULL, %d, %s
 			)",
 			$ability,
@@ -451,6 +463,7 @@ class Full_Elementor_MCP_Journal {
 			$object_type,
 			$object_id,
 			$resource_key,
+			$supports_rollback ? 1 : 0,
 			$fencing_token,
 			$before_state_str,
 			$before_hash,
@@ -874,6 +887,18 @@ class Full_Elementor_MCP_Journal {
 			);
 		}
 
+		// Verify durable persisted rollback capability.
+		if ( array_key_exists( 'rollback_supported', $entry ) && empty( $entry['rollback_supported'] ) ) {
+			return new \WP_Error(
+				'mutation_not_rollbackable',
+				sprintf(
+					/* translators: %d: journal ID */
+					__( 'Cannot rollback: journal entry #%d was recorded as non-rollbackable.', 'full-elementor-mcp' ),
+					$journal_id
+				)
+			);
+		}
+
 		// Resolve target object ID.
 		$is_create = Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
 		if ( $is_create ) {
@@ -967,11 +992,27 @@ class Full_Elementor_MCP_Journal {
 		$restore_context = array_merge(
 			$entry,
 			array(
-				'object_id'         => $target_id,
-				'created_object_id' => $target_id,
-				'post_id'           => $target_id,
+				'object_id'             => $target_id,
+				'created_object_id'     => $target_id,
+				'post_id'               => $target_id,
+				'rollback_resource_key' => $rollback_resource_key,
+				'resource_key'          => $rollback_resource_key,
+				'current_owner_id'      => $current_owner_id,
+				'owner_id'              => $current_owner_id,
+				'caller_fencing_token'  => $caller_fencing_token,
+				'fencing_token'         => $caller_fencing_token,
 			)
 		);
+
+		// Re-assert fencing immediately before actual restore to close any race window.
+		$fencing_recheck = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership(
+			$rollback_resource_key,
+			$current_owner_id,
+			$caller_fencing_token
+		);
+		if ( is_wp_error( $fencing_recheck ) ) {
+			return $fencing_recheck;
+		}
 
 		if ( $is_create ) {
 			$restore_result = $restore_fn( null, $restore_context );
@@ -1008,6 +1049,49 @@ class Full_Elementor_MCP_Journal {
 					$error_text
 				)
 			);
+		}
+
+		// Requirement 5: Verify rollback result against BEFORE state.
+		if ( $is_create ) {
+			// For created objects, verify the post is trashed or no longer active.
+			$status = function_exists( 'get_post_status' ) ? get_post_status( $target_id ) : false;
+			if ( false !== $status && 'trash' !== $status && 'trashed' !== $status ) {
+				$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+				$err   = 'Created object rollback verification failed: post is still active (' . $status . ')';
+				$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET error_message = %s, updated_at = UTC_TIMESTAMP() WHERE id = %d", $err, $journal_id ) );
+				return new \WP_Error( 'rollback_verification_failed', $err );
+			}
+		} else {
+			// For existing objects, capture actual live state and verify hash matches before_hash.
+			$capture_fn = $strategy['capture_before'] ?? ( $strategy['capture_after'] ?? null );
+			if ( is_callable( $capture_fn ) ) {
+				$restored_state = $capture_fn( $target_id, $resolver_args, null );
+				if ( is_wp_error( $restored_state ) || null === $restored_state ) {
+					return new \WP_Error(
+						'journal_state_unverifiable',
+						sprintf(
+							/* translators: %s: failure detail */
+							__( 'Rollback state capture failed during post-restore verification: %s', 'full-elementor-mcp' ),
+							is_wp_error( $restored_state ) ? $restored_state->get_error_message() : 'State returned null'
+						)
+					);
+				}
+
+				$restored_hash = self::hash_state( $restored_state );
+				if ( is_wp_error( $restored_hash ) || '' === $restored_hash ) {
+					return new \WP_Error(
+						'journal_state_unverifiable',
+						__( 'Rollback state hashing failed during post-restore verification.', 'full-elementor-mcp' )
+					);
+				}
+
+				if ( ! hash_equals( (string) $entry['before_hash'], $restored_hash ) ) {
+					$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+					$err   = 'Rollback verification failed: restored state hash does not match expected before_hash.';
+					$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET error_message = %s, updated_at = UTC_TIMESTAMP() WHERE id = %d", $err, $journal_id ) );
+					return new \WP_Error( 'rollback_verification_failed', $err );
+				}
+			}
 		}
 
 		// Mark rolled back conditionally.
@@ -1107,26 +1191,10 @@ class Full_Elementor_MCP_Journal {
 			$journal_id    = (int) $row['id'];
 			$ability       = (string) $row['ability'];
 			$journal_fence = (int) $row['fencing_token'];
-			$target_id     = (int) ( $row['created_object_id'] ?: $row['object_id'] );
+			$resource_key  = (string) ( $row['resource_key'] ?? '' );
+			$strategy      = Full_Elementor_MCP_Mutation_Registry::get( $ability );
 
-			$resolver_args = array(
-				'object_id'         => $target_id,
-				'id'                => $target_id,
-				'post_id'           => $target_id,
-				'page_id'           => $target_id,
-				'kit_id'            => $target_id,
-				'snippet_id'        => $target_id,
-				'created_object_id' => $target_id,
-			);
-
-			$rollback_resource_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
-				$ability,
-				$row,
-				$resolver_args
-			);
-
-			if ( is_wp_error( $rollback_resource_key ) || '' === trim( (string) $rollback_resource_key ) ) {
-				// Cannot resolve deterministic rollback key -> fail closed.
+			if ( '' === trim( $resource_key ) ) {
 				self::mark_failed( $journal_id, 'abandoned_pending_unresolvable_key', $journal_fence );
 				$results[] = array(
 					'journal_id' => $journal_id,
@@ -1137,7 +1205,8 @@ class Full_Elementor_MCP_Journal {
 				continue;
 			}
 
-			$lock_key  = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $rollback_resource_key );
+			// Check abandonment of the original mutation lock lease.
+			$lock_key  = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $resource_key );
 			$lock_info = $wpdb->get_row(
 				$wpdb->prepare(
 					"SELECT fencing_token, expires_at, used,
@@ -1153,14 +1222,11 @@ class Full_Elementor_MCP_Journal {
 			);
 
 			$is_abandoned = false;
-
 			if ( ! empty( $lock_info ) ) {
-				// Lock row exists. Check if expired + grace period passed.
 				if ( ! empty( $lock_info['is_abandoned'] ) ) {
 					$is_abandoned = true;
 				}
 			} else {
-				// No lock row exists in tokens table. Check journal row age.
 				$min_age_seconds = Full_Elementor_MCP_Lock_Manager::DEFAULT_LEASE_TTL + $grace;
 				$age_check       = $wpdb->get_var(
 					$wpdb->prepare(
@@ -1175,14 +1241,47 @@ class Full_Elementor_MCP_Journal {
 				}
 			}
 
-			// If not abandoned (still active or within grace period), do not touch.
+			// If lease is still active or within grace period, do not touch.
 			if ( ! $is_abandoned ) {
 				continue;
 			}
 
-			// STALE GENERATION PROTECTION:
-			// If a newer lock generation exists in the tokens table, a newer request
-			// took over the resource. Stale journal A MUST NOT overwrite generation 2 work!
+			// Requirement 3: Conservative Abandoned CREATE Recovery.
+			$is_create = $strategy && Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
+			if ( $is_create ) {
+				$created_id = absint( $row['created_object_id'] ?? 0 );
+				if ( $created_id > 0 ) {
+					// Object was created! Do NOT automatically trash it. Report and transition to safe failure.
+					self::mark_failed(
+						$journal_id,
+						'abandoned_create_requires_manual_recovery',
+						$journal_fence
+					);
+					$results[] = array(
+						'journal_id'        => $journal_id,
+						'ability'           => $ability,
+						'status'            => self::STATUS_FAILED,
+						'reason'            => 'abandoned_create_requires_manual_recovery',
+						'created_object_id' => $created_id,
+					);
+				} else {
+					// No object was created. Resolve bookkeeping without deleting anything.
+					self::mark_failed(
+						$journal_id,
+						'abandoned_create_no_object_created',
+						$journal_fence
+					);
+					$results[] = array(
+						'journal_id' => $journal_id,
+						'ability'    => $ability,
+						'status'     => self::STATUS_FAILED,
+						'reason'     => 'abandoned_create_no_object_created',
+					);
+				}
+				continue;
+			}
+
+			// Requirement 10: Compare generations ONLY on the same canonical resource key.
 			if ( ! empty( $lock_info ) ) {
 				$current_lock_fence = (int) $lock_info['fencing_token'];
 				if ( $current_lock_fence > $journal_fence ) {
@@ -1201,8 +1300,22 @@ class Full_Elementor_MCP_Journal {
 				}
 			}
 
-			// Verify strategy supports rollback.
-			$strategy = Full_Elementor_MCP_Mutation_Registry::get( $ability );
+			// Verify durable rollback capability.
+			if ( array_key_exists( 'rollback_supported', $row ) && empty( $row['rollback_supported'] ) ) {
+				self::mark_failed(
+					$journal_id,
+					'abandoned_pending_unsupported_strategy',
+					$journal_fence
+				);
+				$results[] = array(
+					'journal_id' => $journal_id,
+					'ability'    => $ability,
+					'status'     => self::STATUS_FAILED,
+					'reason'     => 'unsupported_strategy',
+				);
+				continue;
+			}
+
 			if ( ! $strategy || empty( $strategy['supports_rollback'] ) ) {
 				self::mark_failed(
 					$journal_id,
@@ -1218,56 +1331,59 @@ class Full_Elementor_MCP_Journal {
 				continue;
 			}
 
-			// SAFE RECOVERY EXECUTION:
-			// 1. Acquire NEW recovery lock generation.
-			// 2. Obtain NEW fencing token.
-			// 3. Perform fenced rollback.
-			// 4. Release recovery lock.
-			$recovery_owner = 'recovery_' . hash( 'sha256', $journal_id . '_' . ( $row['created_at'] ?? '' ) );
-			$lock_res       = Full_Elementor_MCP_Lock_Manager::acquire_lock( $rollback_resource_key, $recovery_owner, 30 );
+			// Requirement 11: Conservative Pending Existing-Resource Recovery.
+			// Pending operations have no committed after_hash. Verify live state.
+			$capture_fn = $strategy['capture_before'] ?? ( $strategy['capture_after'] ?? null );
+			$target_id  = (int) $row['object_id'];
+			$args       = array( 'object_id' => $target_id, 'post_id' => $target_id );
 
-			if ( is_wp_error( $lock_res ) || empty( $lock_res['acquired'] ) ) {
-				// Lock acquisition failed (e.g. concurrent acquisition). Do not force; leave for next scan.
-				continue;
-			}
+			if ( is_callable( $capture_fn ) ) {
+				$live_state = $capture_fn( $target_id, $args, null );
+				$live_hash  = is_wp_error( $live_state ) || null === $live_state ? '' : self::hash_state( $live_state );
 
-			$recovery_fencing_token = (int) $lock_res['fencing_token'];
+				if ( ! is_wp_error( $live_hash ) && '' !== $live_hash && hash_equals( (string) $row['before_hash'], $live_hash ) ) {
+					// Live state matches before_state: mutation left no changes. Safe clean resolution without write.
+					self::mark_failed(
+						$journal_id,
+						'abandoned_pending_clean_noop',
+						$journal_fence
+					);
+					$results[] = array(
+						'journal_id' => $journal_id,
+						'ability'    => $ability,
+						'status'     => self::STATUS_FAILED,
+						'reason'     => 'clean_noop',
+					);
+					continue;
+				}
 
-			// Execute fenced rollback under the newly acquired recovery ownership.
-			$rollback_result = self::rollback(
-				$journal_id,
-				$recovery_owner,
-				$recovery_fencing_token,
-				array( 'force' => false )
-			);
-
-			// Always release the recovery lock afterward.
-			Full_Elementor_MCP_Lock_Manager::release_lock(
-				$rollback_resource_key,
-				$recovery_owner,
-				$recovery_fencing_token
-			);
-
-			if ( is_wp_error( $rollback_result ) ) {
+				// Live state diverged or unverifiable: fail closed; do not speculatively overwrite.
 				self::mark_failed(
 					$journal_id,
-					sprintf( 'Recovery rollback failed: %s', $rollback_result->get_error_message() ),
+					'abandoned_pending_divergent_state_manual_recovery_required',
 					$journal_fence
 				);
 				$results[] = array(
 					'journal_id' => $journal_id,
 					'ability'    => $ability,
 					'status'     => self::STATUS_FAILED,
-					'reason'     => $rollback_result->get_error_code(),
+					'reason'     => 'manual_recovery_required',
 				);
-			} else {
-				$results[] = array(
-					'journal_id' => $journal_id,
-					'ability'    => $ability,
-					'status'     => self::STATUS_ROLLED_BACK,
-					'reason'     => 'recovered',
-				);
+				continue;
 			}
+
+			// Unverifiable live state.
+			self::mark_failed(
+				$journal_id,
+				'abandoned_pending_unverifiable_live_state',
+				$journal_fence
+			);
+			$results[] = array(
+				'journal_id' => $journal_id,
+				'ability'    => $ability,
+				'status'     => self::STATUS_FAILED,
+				'reason'     => 'unverifiable_live_state',
+			);
 		}
 
 		return $results;
