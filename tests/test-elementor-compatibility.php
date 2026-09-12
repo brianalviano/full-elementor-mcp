@@ -34,7 +34,61 @@ if ( ! defined( 'FULL_ELEMENTOR_MCP_DIR' ) ) {
 	define( 'FULL_ELEMENTOR_MCP_DIR', dirname( __DIR__ ) . DIRECTORY_SEPARATOR );
 }
 
-require_once __DIR__ . '/test-mysql-safety.php';
+if ( ! class_exists( 'WP_Error' ) ) {
+	class WP_Error {
+		public string $code;
+		public string $message;
+		public mixed $data;
+		public function __construct( string $code = '', string $message = '', mixed $data = null ) {
+			$this->code    = $code;
+			$this->message = $message;
+			$this->data    = $data;
+		}
+		public function get_error_code(): string { return $this->code; }
+		public function get_error_message(): string { return $this->message; }
+		public function get_error_data(): mixed { return $this->data; }
+	}
+}
+if ( ! function_exists( 'is_wp_error' ) ) {
+	function is_wp_error( mixed $thing ): bool {
+		return $thing instanceof WP_Error;
+	}
+}
+if ( ! function_exists( '__' ) ) {
+	function __( string $text, string $domain = 'default' ): string {
+		return $text;
+	}
+}
+if ( ! function_exists( 'esc_html' ) ) {
+	function esc_html( string $text ): string {
+		return htmlspecialchars( $text, ENT_QUOTES, 'UTF-8' );
+	}
+}
+if ( ! function_exists( 'sanitize_text_field' ) ) {
+	function sanitize_text_field( string $str ): string {
+		return trim( strip_tags( $str ) );
+	}
+}
+if ( ! function_exists( 'apply_filters' ) ) {
+	function apply_filters( string $tag, mixed $value, ...$args ): mixed {
+		return $value;
+	}
+}
+if ( ! function_exists( 'did_action' ) ) {
+	function did_action( string $tag ): int {
+		return 0;
+	}
+}
+if ( ! function_exists( 'has_action' ) ) {
+	function has_action( string $tag, callable|string|bool $callback = false ): bool|int {
+		return false;
+	}
+}
+if ( ! function_exists( 'get_option' ) ) {
+	function get_option( string $name, mixed $default = false ): mixed {
+		return $default;
+	}
+}
 
 $inc_dir = FULL_ELEMENTOR_MCP_DIR . 'includes/';
 require_once $inc_dir . 'class-compatibility-checker.php';
