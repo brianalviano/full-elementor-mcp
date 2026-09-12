@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-test:
+    name: Test PHP ${{ matrix.php-version }} on ubuntu-latest
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: [ '8.0', '8.1', '8.2', '8.3', '8.4' ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: curl, mbstring, json, sodium, openssl, pdo_sqlite, sqlite3, zip
+          coverage: none
+
+      - name: Lint PHP files
+        run: |
+          find . -name "*.php" ! -path "./vendor/*" ! -path "./node_modules/*" -exec php -l {} +
+
+      - name: Run Phase 1 Foundation Tests
+        run: php tests/test-phase1-foundation.php
+
+      - name: Run Phase 2 Journal Tests
+        run: php tests/test-phase2-journal.php
+
+      - name: Run Phase 3 Validation Tests
+        run: php tests/test-phase3-validation.php
+
+      - name: Run Phase 4 Middleware Tests
+        run: php tests/test-phase4-middleware.php
+
+      - name: Run Phase 5 Checkpoint Tests
+        run: php tests/test-phase5-checkpoints.php
+
+      - name: Run Phase 6 Audit & Recovery Tests
+        run: php tests/test-phase6-audit-tools.php
+
+      - name: Run Phase 7 Release & Concurrency Tests
+        run: php tests/test-phase7-release-concurrency.php
+
+  package-smoke:
+    name: Release Packaging Smoke Test
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.0
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.0'
+          extensions: json, hash, zip
+
+      - name: Execute Release Build Script
+        run: php scripts/build-release.php
+
+      - name: Verify Release Artifacts
+        run: |
+          test -f dist/manifest.json || { echo "Missing manifest.json"; exit 1; }
+          ls -la dist/*.zip
+          cat dist/manifest.json

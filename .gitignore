@@ -23,3 +23,5 @@ composer.lock
 # WordPress / build artefacts
 *.zip
 *.tar.gz
+dist/
+scratch/

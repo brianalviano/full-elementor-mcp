@@ -1,14 +1,14 @@
 <?php
 /**
- * Plugin Name:       Full Elementor MCP
- * Plugin URI:        https://github.com/Zainulabidin90/full-elementor-mcp
- * Description:       A WordPress MCP server that exposes the full surface of Elementor and Elementor Pro (131+ tools) to AI agents over the Model Context Protocol.
- * Version:           1.7.1
+ * Plugin Name:       Safe Elementor MCP
+ * Plugin URI:        https://github.com/brianalviano/full-elementor-mcp
+ * Description:       A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
+ * Version:           1.8.0
  * Requires at least: 6.9
  * Tested up to:      6.9
  * Requires PHP:      8.0
- * Author:            Zain Ul Abidin
- * Author URI:        https://www.progressiverobot.com
+ * Author:            Brian Alviano
+ * Author URI:        https://github.com/brianalviano
  * License:           GPL-3.0-or-later
  * License URI:       https://www.gnu.org/licenses/gpl-3.0.html
  * Text Domain:       full-elementor-mcp
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Plugin constants.
-define( 'FULL_ELEMENTOR_MCP_VERSION', '1.7.1' );
+define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.0' );
 define( 'FULL_ELEMENTOR_MCP_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_URL', plugin_dir_url( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_BASENAME', plugin_basename( __FILE__ ) );
@@ -122,22 +122,8 @@ function full_elementor_mcp_register_ability( string $name, array $args ) {
  * @return bool True if all dependencies are met.
  */
 function full_elementor_mcp_check_dependencies(): bool {
-	$missing = array();
-
-	// Elementor must be active.
-	if ( ! did_action( 'elementor/loaded' ) ) {
-		$missing[] = 'Elementor';
-	}
-
-	// MCP Adapter must be active.
-	if ( ! class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
-		$missing[] = 'WordPress MCP Adapter';
-	}
-
-	// WordPress Abilities API must be available.
-	if ( ! function_exists( 'wp_register_ability' ) ) {
-		$missing[] = 'WordPress Abilities API (requires WordPress 6.9+)';
-	}
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/class-compatibility-checker.php';
+	$missing = Full_Elementor_MCP_Compatibility_Checker::get_missing_dependencies();
 
 	if ( ! empty( $missing ) ) {
 		add_action( 'admin_notices', function () use ( $missing ) {
@@ -146,7 +132,7 @@ function full_elementor_mcp_check_dependencies(): bool {
 				'<div class="notice notice-error"><p>%s</p></div>',
 				sprintf(
 					/* translators: %s: comma-separated list of missing dependencies */
-					esc_html__( 'Full Elementor MCP requires the following to be installed and active: %s', 'full-elementor-mcp' ),
+					esc_html__( 'Safe Elementor MCP requires the following to be installed and active: %s', 'full-elementor-mcp' ),
 					'<strong>' . esc_html( $list ) . '</strong>'
 				)
 			);
@@ -273,9 +259,35 @@ function full_elementor_mcp_init(): void {
 add_action( 'plugins_loaded', 'full_elementor_mcp_init', 20 );
 
 /**
- * Plugin activation hook to install safety database tables.
+ * Plugin activation hook to validate hard prerequisites and install safety database tables.
  */
 register_activation_hook( __FILE__, function () {
+	require_once plugin_dir_path( __FILE__ ) . 'includes/class-compatibility-checker.php';
+	$compat = Full_Elementor_MCP_Compatibility_Checker::check_activation_prerequisites();
+	if ( is_wp_error( $compat ) ) {
+		if ( function_exists( 'deactivate_plugins' ) ) {
+			deactivate_plugins( plugin_basename( __FILE__ ) );
+		}
+		if ( function_exists( 'wp_die' ) ) {
+			wp_die(
+				esc_html( $compat->get_error_message() ),
+				esc_html__( 'Plugin Activation Error', 'full-elementor-mcp' ),
+				array( 'back_link' => true )
+			);
+		}
+		return;
+	}
+
 	require_once plugin_dir_path( __FILE__ ) . 'includes/safety/class-database-installer.php';
 	Full_Elementor_MCP_Database_Installer::install();
+} );
+
+/**
+ * Plugin deactivation hook.
+ *
+ * Deactivation is strictly non-destructive. Preserves safety WAL journal,
+ * encrypted checkpoints, audit logs, and recovery tokens.
+ */
+register_deactivation_hook( __FILE__, function () {
+	// Intentionally non-destructive: safety data preserved for operational recovery.
 } );

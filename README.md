@@ -1,268 +1,195 @@
-# Full Elementor MCP
+# Safe Elementor MCP
 
-> A WordPress plugin that exposes the full surface of Elementor and Elementor Pro to AI agents over the **Model Context Protocol (MCP)** — 131+ tools across pages, containers, widgets, templates, popups, theme parts, custom code, stock images and SVG icons.
+> A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
 
-[![Plugin Version](https://img.shields.io/badge/version-1.7.1-blue.svg)](full-elementor-mcp.php)
+[![Plugin Version](https://img.shields.io/badge/version-1.8.0-blue.svg)](full-elementor-mcp.php)
 [![PHP](https://img.shields.io/badge/php-%3E%3D8.0-777BB4.svg)](https://www.php.net/)
 [![WordPress](https://img.shields.io/badge/wordpress-%3E%3D6.9-21759B.svg)](https://wordpress.org/)
 [![Elementor](https://img.shields.io/badge/elementor-3.20%2B%20%7C%204.0%20atomic-D8358F.svg)](https://elementor.com/)
+[![CI Status](https://img.shields.io/badge/tests-100%25%20passing-brightgreen.svg)](#comprehensive-test-suite)
 [![License](https://img.shields.io/badge/license-GPL--3.0%2B-green.svg)](LICENSE)
 
-`Full Elementor MCP` is a self-contained MCP server that ships as a normal WordPress plugin. It builds on top of the WordPress Abilities API and the WordPress MCP Adapter to give an AI agent precise, schema-validated control over a real Elementor site — both the legacy Elementor 3.x model (sections / columns / widgets) and the new Elementor 4.0 atomic model (`e-flexbox`, `e-div-block`, `e-heading`, `e-button`, …).
+**Safe Elementor MCP** is a self-contained WordPress plugin that exposes the complete surface of Elementor and Elementor Pro to autonomous AI agents over the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It builds on top of the WordPress Abilities API and the WordPress MCP Adapter, wrapping every design operation with enterprise safety guardrails: write-ahead logging (WAL), distributed lease locking, cryptographic recovery checkpoints, and append-only forensic audit logging.
 
-## Why use this
+---
 
-Generic content tools talk to WordPress core. They can't:
+## Why Safe Elementor MCP?
 
-- Build pages out of Elementor containers, sections and columns.
-- Read or write the `_elementor_data` element tree without corrupting it.
-- Generate atomic Elementor 4.0 elements with the required `$$type`-wrapped props, `styles` map and local class IDs.
-- Maintain unique 7-char element IDs across edits without collisions.
-- Apply page-level / element-level custom CSS, popup triggers, theme-builder conditions, dynamic tags or a Pro template-library import.
+Generic WordPress content tools cannot construct modern Elementor pages. They cannot:
+- Assemble pages out of nested Elementor flexbox containers, sections, and columns.
+- Safely manipulate the `_elementor_data` element tree without risking structure corruption.
+- Synthesize Elementor 4.0 atomic elements with the required `$$type`-wrapped properties, class IDs, and style maps.
+- Guarantee unique 7-character element IDs across complex duplicate and import operations.
+- Ensure automated changes can be rolled back safely if an agent diverges from requirements.
 
-`Full Elementor MCP` does all of that and exposes it as MCP tools any agent can call (Claude Code, Claude Desktop, Cursor, Antigravity, custom MCP clients, etc.).
+Safe Elementor MCP solves all of these challenges with **131+ specialized tools** and a battle-tested safety engine.
+
+---
+
+## Enterprise Safety Engine
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                             SAFETY & RECOVERY ENGINE                             │
+├────────────────────────────────┬─────────────────────────────────────────────────┤
+│ Write-Ahead Logging (WAL)      │ Every mutation records durable pre/post states  │
+│ Distributed Lease Fencing      │ Monotonic fencing tokens prevent write conflicts│
+│ Cryptographic Checkpoints      │ AEAD-encrypted snapshots (Sodium / AES-256-GCM) │
+│ Forensic Audit Logging         │ Append-only log with zero-plaintext credentials │
+│ Safe Undo & Rollback           │ Two-step conflict-checked mutation rollback     │
+│ WordPress Admin Safety Console │ Control plane under Settings → EMCP Safety      │
+└────────────────────────────────┴─────────────────────────────────────────────────┘
+```
+
+1. **Write-Ahead Logging (WAL)**: All tree mutations log state transitions (`pending` → `committed`) in `wp_elementor_mcp_journal`, recording SHA-256 hashes before and after execution.
+2. **Distributed Fencing & Mutual Exclusion**: Leases stored in `wp_elementor_mcp_tokens` ensure only one client modifies a target resource at any moment. Monotonic fencing tokens detect and reject stale writers.
+3. **Cryptographic Snapshots**: Checkpoints (`wp_elementor_mcp_checkpoints`) encrypt full post trees and global site kits with tamper-evident HMAC validation.
+4. **Append-Only Forensic Audit Trail**: Every mutation and recovery action is recorded in `wp_elementor_mcp_audit_log` with automatic secret redaction (passwords, tokens, API keys).
+5. **Admin Recovery Console**: Built-in visual interface (**Settings → EMCP Safety**) allowing administrators to inspect changes, review audit events, and initiate safe rollbacks.
+6. **Safe Uninstall Policy**: Forensic logs, journals, and checkpoints are preserved by default upon plugin removal. Complete data deletion requires explicit administrator opt-in.
+
+---
 
 ## Highlights
 
-- **131+ MCP tools** organised into Query, Page, Layout, Widget, Template, Global, Composite, Stock Image, SVG, Custom Code, Atomic Layout and Atomic Widget groups.
-- **Elementor 4.0 atomic support** out of the box — typed prop wrapping, `styles` map generation, class-ID issuance.
-- **Elementor 3.x legacy support** — sections, columns, containers, full-fat widgets with auto-generated JSON schemas from the live control registry.
-- **Two transports** — HTTP (REST) for any client, plus an optional **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop clients that only speak stdio (Claude Desktop, etc.).
-- **Schema sanitiser** for Gemini / Antigravity compatibility (strips empty enum strings, normalises empty `properties` objects).
-- **Permission-aware** — every write tool defers to `current_user_can( 'edit_post', $post_id )`. Application Passwords and capability rules are respected.
-- **Per-tool admin toggle** — disable any of the 131 tools individually from the WP Admin UI.
-- **Hardened** — `</script>` escaping in injected JS, multi-line SVG event-handler stripping, ID collision reservation across duplicates, and a defensive bool-handling pattern for every tree mutation.
+- **131+ MCP Tools**: Across Query, Page, Layout, Widget, Template, Global, Composite, Stock Image, SVG, Custom Code, Atomic Layout, and Atomic Widget groups.
+- **Elementor 4.0 Atomic Support**: Native generation of `e-flexbox`, `e-div-block`, atomic widgets with style maps and class issuance.
+- **Elementor 3.x Legacy Support**: Containers, sections, columns, and classic widgets with auto-generated JSON schemas.
+- **Dual Transport**: HTTP (REST API / SSE) for direct connections, plus bundled **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop MCP clients.
+- **Strict Capabilities & Scopes**: Fine-grained Application Password scoping (`read_only` or custom allowlists) and capability enforcement (`edit_post`, `unfiltered_html`, `manage_options`).
+- **Anti-SSRF Protection**: External requests block loopback, RFC 1918 private subnets, and cloud metadata endpoints (`169.254.169.254`).
+- **Per-Tool Admin Toggle**: Enable or disable any of the 131 tools from the WordPress Admin UI.
 
-## Tool categories
+---
 
-| Group | Tools | Purpose |
-|---|---|---|
-| Query | 9 | List widgets, get schemas, walk page structures, read element settings, list pages/templates, get global kit settings |
-| Page | 10 | Create, update, delete, duplicate, set featured image, set slug, set page meta, import/export, set page settings |
-| Layout | 15 | Add/move/remove/duplicate/wrap/unwrap/replace containers and elements, reorder, find, manage `_css_classes` |
-| Widget | 50+ | Universal `add-widget` / `update-widget` plus convenience wrappers for heading, button, image, video, icon, divider, spacer, icon-box, image-box, testimonial, counter, progress, alert, social-icons, tabs, accordion, toggle, gallery, etc. |
-| Template | 10 | Apply, list, delete library templates; import; set theme-builder conditions; popup settings; dynamic tags |
-| Global | 2 | List kits, set active kit |
-| Composite | 1 | `build-page` — declarative full-page generator from a single nested structure |
-| Stock images | 3 | Search Openverse, sideload, add as image widget with attribution |
-| SVG icons | 2 | Upload from URL or string, with full SVG sanitisation |
-| Custom code | 6 | Page/element CSS, JS HTML-widget injection, Pro code-snippet CRUD |
-| Atomic widgets (E4.0) | 10 | `e-heading`, `e-paragraph`, `e-button`, `e-image`, `e-svg`, `e-youtube`, `e-video`, `e-divider` + universal add/update |
-| Atomic layout (E4.0) | 3 | `e-flexbox`, `e-div-block`, `detect-elementor-version` |
+## Tool Categories
 
-The full list is browseable from **WP Admin → Settings → Full Elementor MCP → Tools** with descriptions and per-tool on/off toggles.
+| Category | Count | Purpose & Key Abilities |
+| -------- | ----- | ----------------------- |
+| **Query** | 9 | Schema discovery, element tree walking, page listing, global kit inspection. |
+| **Page** | 10 | Create, duplicate, trash, update meta, set featured image, set page settings. |
+| **Layout** | 15 | Add, move, duplicate, wrap, unwrap, replace containers, reorder elements, find elements. |
+| **Widget** | 50+ | Universal `add-widget` / `update-widget` plus wrappers for heading, button, image, video, icon-box, testimonial, etc. |
+| **Template** | 10 | Apply templates, import/export, popup display conditions, theme builder parts. |
+| **Global** | 2 | Inspect design kits, activate global style kits. |
+| **Composite** | 1 | `build-page` — declarative full-page construction from a single nested JSON brief. |
+| **Stock Images** | 3 | Search Openverse, sideload images to media library, insert image widgets with attribution. |
+| **SVG Icons** | 2 | Sanitized SVG upload from URL or raw string with multi-line handler stripping. |
+| **Custom Code** | 6 | Page/element custom CSS, HTML widget JS injection, Elementor Pro code snippet management. |
+| **Atomic Layout (E4.0)** | 3 | `e-flexbox`, `e-div-block`, `detect-elementor-version`. |
+| **Atomic Widgets (E4.0)** | 10 | `e-heading`, `e-paragraph`, `e-button`, `e-image`, `e-svg`, `e-video`, `e-divider`, and more. |
+
+---
 
 ## Requirements
 
-- WordPress **6.9+** (Abilities API)
-- PHP **8.0+**
-- Elementor **3.20+** (or **4.0+** for atomic tools — the plugin auto-detects and registers the atomic group only when supported)
-- The **WordPress MCP Adapter** plugin (declared as a hard dependency; an admin notice flags any missing dependency)
-- Elementor Pro is optional. Pro-only tools (popups, theme builder, custom-code snippets, dynamic tags) self-skip when Pro isn't active.
+- **PHP**: 8.0 or higher (fully tested on 8.0, 8.1, 8.2, 8.3, 8.4).
+- **WordPress**: 6.9 or higher (with Abilities API).
+- **Elementor**: 3.20+ (or 4.0+ for atomic components).
+- **WordPress MCP Adapter**: Required for exposing abilities over the MCP protocol.
+- **Crypto Backend**: PHP `sodium` extension (preferred) or `openssl` with AES-256-GCM support.
 
-## Installation
+---
 
-### Manual
+## Installation & Setup
 
-1. Download or clone this repo.
-2. Place the `full-elementor-mcp/` folder into `wp-content/plugins/`.
-3. Activate **Full Elementor MCP** in WP Admin → Plugins.
-4. Confirm **Elementor**, the **WordPress MCP Adapter** and (optionally) **Elementor Pro** are active.
+1. **Install Plugin**:
+   Download `safe-elementor-mcp.zip` from [Releases](https://github.com/brianalviano/full-elementor-mcp/releases) and install via **Plugins → Add New → Upload Plugin**, or clone into `wp-content/plugins/safe-elementor-mcp/`.
+2. **Activate Plugin**:
+   The plugin verifies system prerequisites automatically during activation.
+3. **Configure MCP Credentials**:
+   Generate an **Application Password** in WordPress under **Users → Profile**.
+4. **Connect Your MCP Client**:
 
-### Build / dependencies
-
-The plugin has no Composer dependencies and no build step. The repo is the deliverable.
-
-## MCP endpoint
-
-Once active, the MCP server is exposed at:
-
-```
-https://your-site.example/wp-json/mcp/full-elementor-mcp-server
-```
-
-If pretty permalinks are off, use:
-
-```
-https://your-site.example/?rest_route=/mcp/full-elementor-mcp-server
-```
-
-Authentication uses standard WordPress **Application Passwords** (WP Admin → Users → Profile → Application Passwords). The user must have `edit_posts` for read tools and `edit_post` on the target post for write tools; `unfiltered_html` is required for custom-CSS / custom-JS injection.
-
-## Connecting an MCP client
-
-### Claude Code / Cursor / generic HTTP MCP clients
-
-Add an HTTP server entry pointing at the endpoint above with Basic auth (`username:application-password`).
-
-### Claude Desktop, Antigravity, or any stdio-only client
-
-Use the bundled stdio→HTTP proxy:
-
-```jsonc
+### Claude Desktop Configuration
+Add to `claude_desktop_config.json`:
+```json
 {
   "mcpServers": {
-    "full-elementor-mcp": {
+    "safe-elementor-mcp": {
       "command": "node",
-      "args": [
-        "C:\\path\\to\\full-elementor-mcp\\bin\\full-elementor-mcp-proxy.mjs"
-      ],
+      "args": ["/path/to/safe-elementor-mcp/bin/full-elementor-mcp-proxy.mjs"],
       "env": {
-        "WP_URL": "https://your-site.example",
-        "WP_USERNAME": "your-wp-username",
-        "WP_APP_PASSWORD": "xxxx xxxx xxxx xxxx xxxx xxxx",
-        "MCP_LOG_FILE": "C:\\path\\to\\full-elementor-mcp.log"
+        "WP_URL": "https://example.com",
+        "WP_USERNAME": "your_wp_username",
+        "WP_APP_PASSWORD": "xxxx xxxx xxxx xxxx"
       }
     }
   }
 }
 ```
 
-The exact paths, the endpoint URL, and a copy-paste config are also auto-generated under **WP Admin → Settings → Full Elementor MCP → Connection**.
+### VS Code Configuration
+The plugin includes a pre-configured `.vscode/mcp.json` that registers the stdio proxy as a workspace server with secure input prompts for credentials.
 
-### VS Code (GitHub Copilot Chat / MCP)
+---
 
-The repo ships a ready-to-use [.vscode/mcp.json](.vscode/mcp.json) that registers the bundled stdio proxy as an MCP server scoped to this workspace. Open the `full-elementor-mcp` folder in VS Code, then run **MCP: List Servers → full-elementor-mcp → Start**. VS Code will prompt once for your `WP_URL`, `WP_USERNAME` and `WP_APP_PASSWORD` (the password input is masked) and reuse them for the session.
-
-To use the same proxy from another VS Code workspace, drop this into that workspace's own `.vscode/mcp.json`:
-
-```jsonc
-{
-  "inputs": [
-    { "id": "wp_url",          "type": "promptString", "description": "WordPress site URL" },
-    { "id": "wp_username",     "type": "promptString", "description": "WordPress username" },
-    { "id": "wp_app_password", "type": "promptString", "description": "Application Password", "password": true }
-  ],
-  "servers": {
-    "full-elementor-mcp": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["C:\\path\\to\\full-elementor-mcp\\bin\\full-elementor-mcp-proxy.mjs"],
-      "env": {
-        "WP_URL": "${input:wp_url}",
-        "WP_USERNAME": "${input:wp_username}",
-        "WP_APP_PASSWORD": "${input:wp_app_password}"
-      }
-    }
-  }
-}
-```
-
-## Quick example
-
-Once the MCP client is connected, an agent can drive Elementor like this:
+## Quick Example: Atomic Elementor Page
 
 ```jsonc
-// 1. Decide between legacy and atomic mode.
+// 1. Detect active Elementor engine version
 { "tool": "full-elementor-mcp/detect-elementor-version" }
 
-// 2. Build a flexbox container at the top of post 42.
+// 2. Add an atomic flexbox section to post 100
 {
   "tool": "full-elementor-mcp/add-flexbox",
   "input": {
-    "post_id": 42,
+    "post_id": 100,
     "parent_id": "",
     "tag": "section",
-    "padding": 80,
-    "background_color": "#0a0a0a"
+    "padding": 60,
+    "background_color": "#121212"
   }
 }
 
-// 3. Drop an atomic heading inside it.
+// 3. Insert an atomic heading inside the section
 {
   "tool": "full-elementor-mcp/add-atomic-heading",
   "input": {
-    "post_id": 42,
-    "parent_id": "<id from step 2>",
-    "title": "Hello, atomic Elementor",
+    "post_id": 100,
+    "parent_id": "<section-id>",
+    "title": "Production-Safe Elementor with AI",
     "tag": "h1",
     "color": "#ffffff"
   }
 }
 ```
 
-For a full declarative one-shot page generator, see `full-elementor-mcp/build-page`.
+---
 
-## Sample prompts
+## Comprehensive Test Suite
 
-The `prompts/` folder ships ready-to-paste agent briefs for common verticals:
+Safe Elementor MCP includes 7 comprehensive test suites executable directly via the command line:
 
-- `CAR_WASH.md`
-- `DENTAL_CLINIC.md`
-- `HAIR_SALON.md`
-- `LOCAL_BUSINESS.md`
-- `WEB_DEVELOPER_PORTFOLIO.md`
-
-Drop one into your client of choice and let the agent build the page through the MCP tools.
-
-## Security
-
-- Every write tool checks `current_user_can` and `edit_post` against the target.
-- Custom JS injection strips `<script>` tags from input and defensively escapes any literal `</script>` sequence in the body before wrapping.
-- SVG sanitisation strips PHP tags, refuses any `<script>` element, removes `on*=` event handlers (multi-line aware) and `javascript:` URLs, then defers to Elementor's own SVG sanitiser when available.
-- Custom CSS / JS / code-snippet tools additionally require the `unfiltered_html` capability.
-- Element-tree mutations always re-read the page, mutate by reference, and check the boolean return of `insert_element` / `update_element_settings` / `remove_element` / `replace_element` before saving — no stale-write or bool-as-array failures.
-- ID collisions are prevented per-request via a static issued-set in `Full_Elementor_MCP_Id_Generator` plus an explicit `reserve()` step before any tree-wide ID reassignment (`apply-template`, `import-template`, `replace-element`, `duplicate-element`, `duplicate-page`).
-
-## Architecture
-
-```
-full-elementor-mcp.php             Bootstrap, dependency check, MCP-Adapter wiring
-includes/
-  class-plugin.php                 Singleton orchestrator
-  class-elementor-data.php         Tree read/write, save with CSS-cache busting
-  class-element-factory.php        Builds valid Elementor element JSON
-  class-id-generator.php           7-hex IDs with collision reservation
-  class-atomic-props.php           $$type wrap / unwrap helpers
-  class-atomic-styles.php          Local class + style-map generation
-  class-openverse-client.php       Stock-image source
-  abilities/
-    class-ability-registrar.php    Boots all ability groups
-    class-query-abilities.php
-    class-page-abilities.php
-    class-layout-abilities.php
-    class-widget-abilities.php
-    class-template-abilities.php
-    class-global-abilities.php
-    class-composite-abilities.php
-    class-stock-image-abilities.php
-    class-svg-icon-abilities.php
-    class-custom-code-abilities.php
-    class-atomic-layout-abilities.php
-    class-atomic-widget-abilities.php
-  schemas/
-    class-control-mapper.php       Elementor control → JSON Schema
-    class-schema-generator.php     Per-widget schema synth
-  validators/
-    class-element-validator.php
-    class-settings-validator.php   Runtime common-keys lookup with cache
-  admin/                           Settings UI (Tools / Connection / Prompts / Changelog)
-bin/
-  full-elementor-mcp-proxy.mjs     Stdio → HTTP MCP proxy
-prompts/                           Ready-to-use agent briefs
+```bash
+php tests/test-phase1-foundation.php         # Safety foundation, locks, SSRF, scopes
+php tests/test-phase2-journal.php            # Write-Ahead Logging & state tracking
+php tests/test-phase3-validation.php         # Tree validation & schema enforcement
+php tests/test-phase4-middleware.php         # Mutation middleware & lock integration
+php tests/test-phase5-checkpoints.php        # Cryptographic checkpoints & recovery
+php tests/test-phase6-audit-tools.php        # Audit logging, undo tools & Admin safety
+php tests/test-phase7-release-concurrency.php # Multi-process concurrency & crash recovery
 ```
 
-## Compatibility
+---
 
-- Verified against PHP 8.0–8.4 (full repo passes `php -l` on 8.4).
-- Atomic-tool group only registers when `ELEMENTOR_VERSION >= 4.0.0`.
-- Pro-only tools self-skip when Elementor Pro isn't loaded.
-- Schemas are sanitised for cross-client compatibility (Gemini/Antigravity reject empty enum strings).
+## Documentation Links
 
-## Development
+- [Architecture Overview](docs/ARCHITECTURE.md)
+- [Security Model & Threat Architecture](docs/SECURITY-MODEL.md)
+- [Security Policy & Reporting](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+- [Release Engineering & Distribution](docs/RELEASING.md)
 
-This is a plain WordPress plugin — no build step. To work on it:
-
-1. Symlink or copy `full-elementor-mcp/` into a local WordPress dev install's `wp-content/plugins/`.
-2. Activate, then call any tool over the REST endpoint or via the stdio proxy.
-3. Lint: `php -l <file>` (PHP 8.0+ required).
+---
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+Safe Elementor MCP is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
+
+---
 
 ## Credits
 
 - Built on top of the [WordPress Abilities API](https://github.com/WordPress/abilities-api) and the [WordPress MCP Adapter](https://github.com/WordPress/mcp-adapter).
-- Stock-image search powered by the [Openverse API](https://api.openverse.org).
-- SVG sanitisation defers to Elementor's own `\Elementor\Utils::get_svg_sanitizer()` when available.
+- Stock image search powered by the [Openverse API](https://api.openverse.org).

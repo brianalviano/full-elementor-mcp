@@ -208,7 +208,7 @@ class Full_Elementor_MCP_Admin {
 
 		?>
 		<div class="wrap full-elementor-mcp-admin">
-			<h1><?php esc_html_e( 'Full Elementor MCP', 'full-elementor-mcp' ); ?></h1>
+			<h1><?php esc_html_e( 'Safe Elementor MCP', 'full-elementor-mcp' ); ?></h1>
 
 			<!-- Header -->
 			<div class="full-elementor-mcp-header">
@@ -217,17 +217,13 @@ class Full_Elementor_MCP_Admin {
 				</span>
 				<div class="full-elementor-mcp-header-info">
 					<h2 class="full-elementor-mcp-header-title">
-						<?php esc_html_e( 'Full Elementor MCP', 'full-elementor-mcp' ); ?>
+						<?php esc_html_e( 'Safe Elementor MCP', 'full-elementor-mcp' ); ?>
 						<span class="full-elementor-mcp-header-version">v<?php echo esc_html( FULL_ELEMENTOR_MCP_VERSION ); ?></span>
 					</h2>
-					<p class="full-elementor-mcp-header-subtitle"><?php esc_html_e( 'AI-powered page building tools for Elementor via Model Context Protocol.', 'full-elementor-mcp' ); ?></p>
+					<p class="full-elementor-mcp-header-subtitle"><?php esc_html_e( 'A production-safe MCP server for AI-powered Elementor development.', 'full-elementor-mcp' ); ?></p>
 				</div>
 				<div class="full-elementor-mcp-header-actions">
-					<a href="https://www.progressiverobot.com/contact/" class="full-elementor-mcp-header-btn full-elementor-mcp-header-btn--secondary" target="_blank" rel="noopener noreferrer">
-						<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"/><path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"/></svg>
-						<?php esc_html_e( 'Contact', 'full-elementor-mcp' ); ?>
-					</a>
-					<a href="https://github.com/Zainulabidin90/full-elementor-mcp" class="full-elementor-mcp-header-btn full-elementor-mcp-header-btn--primary" target="_blank" rel="noopener noreferrer">
+					<a href="https://github.com/brianalviano/full-elementor-mcp" class="full-elementor-mcp-header-btn full-elementor-mcp-header-btn--primary" target="_blank" rel="noopener noreferrer">
 						<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M10 0C4.477 0 0 4.484 0 10.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0110 4.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.378.203 2.397.1 2.65.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.942.359.31.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0020 10.017C20 4.484 15.522 0 10 0z" clip-rule="evenodd"/></svg>
 						<?php esc_html_e( 'View on GitHub', 'full-elementor-mcp' ); ?>
 					</a>

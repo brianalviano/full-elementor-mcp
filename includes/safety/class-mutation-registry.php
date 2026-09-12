@@ -1164,7 +1164,14 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'managed_safety_action' => true,
 				'managed_delegate'      => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_change_ability' ),
 				'resource_key_resolver' => static function ( array $args = array() ) {
-					$journal_id = absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
+					$journal_id = absint( $args['journal_id'] ?? ( $args['change_id'] ?? 0 ) );
+					if ( $journal_id <= 0 && ! empty( $args['id'] ) && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
+						$check_id_entry = Full_Elementor_MCP_Journal::get_entry( absint( $args['id'] ) );
+						if ( ! empty( $check_id_entry ) ) {
+							$journal_id = absint( $args['id'] );
+						}
+					}
+
 					if ( $journal_id <= 0 ) {
 						if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
 							return sanitize_text_field( (string) $args['target_resource'] );
@@ -1172,11 +1179,23 @@ class Full_Elementor_MCP_Mutation_Registry {
 						if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
 							return sanitize_text_field( (string) $args['target_resource_key'] );
 						}
+						if ( ! empty( $args['post_id'] ) && (int) $args['post_id'] > 0 ) {
+							return 'post:' . (int) $args['post_id'];
+						}
 						return new \WP_Error( 'missing_journal_id', __( 'journal_id (or change_id) is required for undo-change.', 'full-elementor-mcp' ) );
 					}
 					if ( class_exists( 'Full_Elementor_MCP_Journal' ) ) {
 						$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
 						if ( empty( $entry ) ) {
+							if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
+								return sanitize_text_field( (string) $args['target_resource'] );
+							}
+							if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
+								return sanitize_text_field( (string) $args['target_resource_key'] );
+							}
+							if ( ! empty( $args['post_id'] ) && (int) $args['post_id'] > 0 ) {
+								return 'post:' . (int) $args['post_id'];
+							}
 							return new \WP_Error(
 								'journal_entry_not_found',
 								__( 'Journal entry not found.', 'full-elementor-mcp' ),

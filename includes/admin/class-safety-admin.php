@@ -1,6 +1,6 @@
 <?php
 /**
- * Admin Safety Console for Full Elementor MCP.
+ * Admin Safety Console for Safe Elementor MCP.
  *
  * Provides a classic WordPress Admin Control Plane for inspecting WAL journal
  * changes, encrypted checkpoints, forensic audit logs, and triggering safe recovery/undo operations.
@@ -64,7 +64,7 @@ class Full_Elementor_MCP_Safety_Admin {
 	 */
 	public static function register_menu(): void {
 		add_options_page(
-			__( 'Full Elementor MCP Safety', 'full-elementor-mcp' ),
+			__( 'Safe Elementor MCP Safety', 'full-elementor-mcp' ),
 			__( 'EMCP Safety', 'full-elementor-mcp' ),
 			'manage_options',
 			self::MENU_SLUG,
@@ -410,7 +410,7 @@ class Full_Elementor_MCP_Safety_Admin {
 
 		?>
 		<div class="wrap full-elementor-mcp-admin full-elementor-mcp-safety-admin">
-			<h1><?php esc_html_e( 'Full Elementor MCP — Safety & Recovery Console', 'full-elementor-mcp' ); ?></h1>
+			<h1><?php esc_html_e( 'Safe Elementor MCP — Safety & Recovery Console', 'full-elementor-mcp' ); ?></h1>
 
 			<?php foreach ( self::$notices as $notice ) : ?>
 				<div class="notice notice-<?php echo esc_attr( $notice['type'] ); ?> is-dismissible">

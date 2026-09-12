@@ -1,18 +1,18 @@
-=== Full Elementor MCP ===
-Contributors: zainulabidin
+=== Safe Elementor MCP ===
+Contributors: brianalviano
 Tags: elementor, mcp, ai, model-context-protocol, page-builder, claude, ai-agent, openai, gemini
 Requires at least: 6.9
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.7.1
+Stable tag: 1.8.0
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
-Exposes the full surface of Elementor and Elementor Pro to AI agents over the Model Context Protocol (MCP) — 131+ tools.
+A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
 
 == Description ==
 
-**Full Elementor MCP** turns any WordPress + Elementor site into a Model Context Protocol (MCP) server that AI agents (Claude Code, Claude Desktop, Cursor, Antigravity, custom MCP clients) can drive end-to-end.
+**Safe Elementor MCP** turns any WordPress + Elementor site into a production-safe Model Context Protocol (MCP) server that AI agents (Claude Code, Claude Desktop, Cursor, Antigravity, custom MCP clients) can drive end-to-end.
 
 It builds on top of the WordPress Abilities API and the WordPress MCP Adapter and adds **131+ Elementor-specific MCP tools** covering the legacy Elementor 3.x model (sections / columns / widgets) **and** the new Elementor 4.0 atomic model (`e-flexbox`, `e-div-block`, `e-heading`, `e-button`, …).
 
@@ -127,6 +127,12 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 
 == Changelog ==
 
+= 1.8.0 =
+* Major release: Enterprise-grade safety engine with WAL mutations, cryptographic checkpoints, lock fencing, audit logging, and Admin recovery console.
+* Pre-flight compatibility diagnostics with strict activation/deactivation guards.
+* Safe uninstall policy: audit and safety data preserved by default.
+* Rebrand to Safe Elementor MCP with backward-compatible machine interfaces.
+
 = 1.7.1 =
 * Added bundled `.vscode/mcp.json` that registers the stdio proxy as a workspace MCP server for VS Code (Copilot Chat / MCP), with masked prompts for `WP_URL`, `WP_USERNAME` and `WP_APP_PASSWORD`.
 * Updated README with a VS Code connection section.
@@ -161,6 +167,9 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 * Initial release with the legacy Elementor 3.x tool set.
 
 == Upgrade Notice ==
+
+= 1.8.0 =
+Enterprise safety engine upgrade. Introduces cryptographic checkpoints, lock fencing, WAL mutation logging, and compatibility checks. Full backward compatibility with prior tool abilities.
 
 = 1.7.1 =
 Adds a bundled VS Code MCP workspace config (`.vscode/mcp.json`). No code or data changes; safe drop-in upgrade from 1.7.0.
