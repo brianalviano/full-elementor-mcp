@@ -320,11 +320,28 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			return new \WP_Error( 'safety_subsystem_unavailable', __( 'Safety lock or strategies unavailable.', 'full-elementor-mcp' ) );
 		}
 
-		$req_uuid = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
-		$owner_id = 'ckpt_manual_' . $req_uuid;
+		$req_uuid  = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
+		$owner_id  = 'ckpt_manual_' . $req_uuid;
+		$user_id   = (int) ( $meta['user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) );
+		$cred_uuid = $meta['credential_uuid'] ?? null;
+		$ability   = (string) ( $meta['source_ability'] ?? 'full-elementor-mcp/create-checkpoint' );
 
 		$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 60 );
 		if ( is_wp_error( $lock ) ) {
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATE_FAILED,
+					array(
+						'ability'         => $ability,
+						'resource_key'    => $resource_key,
+						'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
+						'error_code'      => $lock->get_error_code(),
+						'user_id'         => $user_id,
+						'credential_uuid' => $cred_uuid,
+						'request_uuid'    => $req_uuid,
+					)
+				);
+			}
 			return $lock;
 		}
 
@@ -334,11 +351,39 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 		try {
 			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $fencing_token );
 			if ( is_wp_error( $fence_check ) ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATE_FAILED,
+						array(
+							'ability'         => $ability,
+							'resource_key'    => $resource_key,
+							'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
+							'error_code'      => $fence_check->get_error_code(),
+							'user_id'         => $user_id,
+							'credential_uuid' => $cred_uuid,
+							'request_uuid'    => $req_uuid,
+						)
+					);
+				}
 				return $fence_check;
 			}
 
 			$state = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key, $meta );
 			if ( is_wp_error( $state ) ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATE_FAILED,
+						array(
+							'ability'         => $ability,
+							'resource_key'    => $resource_key,
+							'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
+							'error_code'      => $state->get_error_code(),
+							'user_id'         => $user_id,
+							'credential_uuid' => $cred_uuid,
+							'request_uuid'    => $req_uuid,
+						)
+					);
+				}
 				return $state;
 			}
 
@@ -350,6 +395,44 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 			Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
 			$lock_released = true;
+
+			if ( is_wp_error( $res ) ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATE_FAILED,
+						array(
+							'ability'         => $ability,
+							'resource_key'    => $resource_key,
+							'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
+							'error_code'      => $res->get_error_code(),
+							'user_id'         => $user_id,
+							'credential_uuid' => $cred_uuid,
+							'request_uuid'    => $req_uuid,
+						)
+					);
+				}
+				return $res;
+			}
+
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATED,
+					array(
+						'ability'         => $ability,
+						'resource_key'    => $resource_key,
+						'checkpoint_uuid' => $res['checkpoint_uuid'],
+						'result_status'   => 'success',
+						'user_id'         => $user_id,
+						'credential_uuid' => $cred_uuid,
+						'request_uuid'    => $req_uuid,
+						'metadata'        => array(
+							'checkpoint_type'    => 'manual',
+							'label'              => $meta['label'],
+							'restore_capability' => $res['restore_capability'] ?? 'exact',
+						),
+					)
+				);
+			}
 
 			return $res;
 		} finally {
@@ -790,14 +873,20 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 			// 9. Decide idempotent no-op under lock:
 			if ( hash_equals( (string) $row['state_hash'], (string) $current_hash ) ) {
+				// Terminal confirmed no-op: consume the presented one-time confirmation token exactly once:
+				if ( isset( $options['_confirmation_consumer'] ) && is_callable( $options['_confirmation_consumer'] ) ) {
+					( $options['_confirmation_consumer'] )();
+				}
+
 				Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
 				$lock_released = true;
 				return array(
-					'restored'        => false,
-					'noop'            => true,
-					'resource_key'    => $resource_key,
-					'checkpoint_uuid' => $row['checkpoint_uuid'],
-					'state_hash'      => $row['state_hash'],
+					'restored'              => false,
+					'noop'                  => true,
+					'resource_key'          => $resource_key,
+					'checkpoint_uuid'       => $row['checkpoint_uuid'],
+					'state_hash'            => $row['state_hash'],
+					'confirmation_consumed' => true,
 				);
 			}
 
@@ -857,6 +946,13 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				'is_readonly'     => false,
 				'is_create'       => false,
 			) );
+
+			// 12.8. Final pre-write fencing assertion immediately before confirmation consumption:
+			$fence_preflight = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $fencing_token );
+			if ( is_wp_error( $fence_preflight ) ) {
+				Full_Elementor_MCP_Journal::mark_failed( $journal_id, $fence_preflight->get_error_code(), $fencing_token );
+				return $fence_preflight;
+			}
 
 			// 12.9. Atomic confirmation consumption at final execution readiness:
 			if ( isset( $options['_confirmation_consumer'] ) && is_callable( $options['_confirmation_consumer'] ) ) {

@@ -61,6 +61,8 @@ final class Full_Elementor_MCP_Audit_Logger {
 	public const EVENT_RECOVERY_COMPLETED          = 'recovery_completed';
 	public const EVENT_RECOVERY_MANUAL_REQUIRED    = 'recovery_manual_required';
 
+	public const EVENT_AUDIT_PRUNED                = 'audit_pruned';
+
 	// -------------------------------------------------------------------------
 	// Severity Constants
 	// -------------------------------------------------------------------------
@@ -411,11 +413,12 @@ final class Full_Elementor_MCP_Audit_Logger {
 	 * Critical protection: Preserves unresolved safety events and errors indefinitely
 	 * or until explicitly cleared so operator forensic trails are not destroyed.
 	 *
-	 * @param int $retention_days Maximum age in days (default 90).
-	 * @param int $batch_limit    Maximum records to delete in one batch (default 100).
+	 * @param int                  $retention_days Maximum age in days (default 90).
+	 * @param int                  $batch_limit    Maximum records to delete in one batch (default 100).
+	 * @param array<string, mixed> $context        Optional operator context (ability, user_id, etc.).
 	 * @return int Count of deleted rows.
 	 */
-	public static function prune( int $retention_days = self::DEFAULT_RETENTION_DAYS, int $batch_limit = 100 ): int {
+	public static function prune( int $retention_days = self::DEFAULT_RETENTION_DAYS, int $batch_limit = 100, array $context = array() ): int {
 		global $wpdb;
 
 		if ( ! class_exists( 'Full_Elementor_MCP_Database_Installer' ) ) {
@@ -451,13 +454,43 @@ final class Full_Elementor_MCP_Audit_Logger {
 		);
 
 		if ( empty( $candidates ) ) {
+			if ( ! empty( $context['log_if_empty'] ) || ! empty( $context['ability'] ) ) {
+				self::log(
+					self::EVENT_AUDIT_PRUNED,
+					array(
+						'ability'       => $context['ability'] ?? 'audit/prune',
+						'user_id'       => (int) ( $context['user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) ),
+						'result_status' => 'success',
+						'severity'      => self::SEVERITY_NOTICE,
+						'metadata'      => array(
+							'retention_days'    => $retention_days,
+							'deleted_row_count' => 0,
+						),
+					)
+				);
+			}
 			return 0;
 		}
 
 		$ids_in  = implode( ',', array_map( 'intval', $candidates ) );
 		$deleted = $wpdb->query( "DELETE FROM {$table} WHERE id IN ({$ids_in})" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$deleted_count = is_int( $deleted ) ? $deleted : 0;
 
-		return is_int( $deleted ) ? $deleted : 0;
+		self::log(
+			self::EVENT_AUDIT_PRUNED,
+			array(
+				'ability'       => $context['ability'] ?? 'audit/prune',
+				'user_id'       => (int) ( $context['user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) ),
+				'result_status' => 'success',
+				'severity'      => self::SEVERITY_NOTICE,
+				'metadata'      => array(
+					'retention_days'    => $retention_days,
+					'deleted_row_count' => $deleted_count,
+				),
+			)
+		);
+
+		return $deleted_count;
 	}
 
 	/**

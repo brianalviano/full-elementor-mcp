@@ -92,11 +92,6 @@ final class Full_Elementor_MCP_Undo_Manager {
 			);
 		}
 
-		$resource_key = (string) ( $entry['resource_key'] ?? '' );
-		if ( '' === $resource_key ) {
-			return new \WP_Error( 'invalid_resource_key', __( 'Journal entry lacks a valid canonical resource key.', 'full-elementor-mcp' ) );
-		}
-
 		$strategy = Full_Elementor_MCP_Mutation_Registry::get( (string) $entry['ability'] );
 		if ( empty( $strategy ) ) {
 			return new \WP_Error(
@@ -107,6 +102,65 @@ final class Full_Elementor_MCP_Undo_Manager {
 					$entry['ability']
 				)
 			);
+		}
+
+		$is_create = Full_Elementor_MCP_Mutation_Registry::is_create( (string) $entry['ability'] );
+		if ( $is_create ) {
+			$created_id = absint( $entry['created_object_id'] ?? 0 );
+			if ( $created_id <= 0 ) {
+				return new \WP_Error(
+					'undo_target_unresolvable',
+					__( 'Cannot undo creation mutation: created_object_id is missing or untracked.', 'full-elementor-mcp' ),
+					array(
+						'journal_id' => $journal_id,
+						'ability'    => $entry['ability'],
+					)
+				);
+			}
+			$target_object_id    = $created_id;
+			$target_resource_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
+				(string) $entry['ability'],
+				$entry,
+				array(
+					'created_object_id'     => $target_object_id,
+					'post_id'               => $target_object_id,
+					'object_id'             => $target_object_id,
+					'page_id'               => $target_object_id,
+					'template_id'           => $target_object_id,
+					'resource_key'          => (string) ( $entry['resource_key'] ?? '' ),
+					'rollback_resource_key' => 'post:' . $target_object_id,
+				)
+			);
+			if ( is_wp_error( $target_resource_key ) || '' === trim( (string) $target_resource_key ) ) {
+				return new \WP_Error(
+					'undo_target_unresolvable',
+					__( 'Could not resolve authoritative target resource key for undo.', 'full-elementor-mcp' ),
+					array(
+						'journal_id' => $journal_id,
+						'ability'    => $entry['ability'],
+					)
+				);
+			}
+			$target_resource_key = (string) $target_resource_key;
+		} else {
+			$target_object_id    = (int) $entry['object_id'];
+			$target_resource_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
+				(string) $entry['ability'],
+				$entry,
+				array(
+					'post_id'      => $target_object_id,
+					'object_id'    => $target_object_id,
+					'page_id'      => $target_object_id,
+					'resource_key' => (string) ( $entry['resource_key'] ?? '' ),
+				)
+			);
+			if ( is_wp_error( $target_resource_key ) || '' === trim( (string) $target_resource_key ) ) {
+				$target_resource_key = (string) ( $entry['resource_key'] ?? '' );
+			}
+			if ( '' === trim( (string) $target_resource_key ) ) {
+				return new \WP_Error( 'invalid_resource_key', __( 'Journal entry lacks a valid canonical resource key.', 'full-elementor-mcp' ) );
+			}
+			$target_resource_key = (string) $target_resource_key;
 		}
 
 		$is_dry_run = true === ( $options['dry_run'] ?? false );
@@ -120,9 +174,9 @@ final class Full_Elementor_MCP_Undo_Manager {
 				'journal_id'            => $journal_id,
 				'ability'               => $entry['ability'],
 				'action'                => $entry['action'],
-				'resource_key'          => $resource_key,
+				'resource_key'          => $target_resource_key,
 				'object_type'           => $entry['object_type'],
-				'object_id'             => (int) $entry['object_id'],
+				'object_id'             => $target_object_id,
 				'rollback_supported'    => ! empty( $entry['rollback_supported'] ),
 				'confirmation_required' => true,
 				'target_after_hash'     => $entry['after_hash'],
@@ -134,7 +188,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 		$req_uuid = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
 		$owner_id = 'rst_undo_' . $req_uuid;
 
-		$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 60 );
+		$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $target_resource_key, $owner_id, 60 );
 		if ( is_wp_error( $lock ) ) {
 			return $lock;
 		}
@@ -150,12 +204,15 @@ final class Full_Elementor_MCP_Undo_Manager {
 				Full_Elementor_MCP_Audit_Logger::EVENT_UNDO_STARTED,
 				array(
 					'ability'         => $entry['ability'],
-					'resource_key'    => $resource_key,
+					'resource_key'    => $target_resource_key,
 					'change_id'       => $journal_id,
 					'user_id'         => $user_id,
 					'credential_uuid' => $cred_uuid,
 					'request_uuid'    => $req_uuid,
-					'metadata'        => array( 'journal_id' => $journal_id ),
+					'metadata'        => array(
+						'journal_id'       => $journal_id,
+						'target_object_id' => $target_object_id,
+					),
 				)
 			);
 		}
@@ -181,19 +238,19 @@ final class Full_Elementor_MCP_Undo_Manager {
 			}
 
 			$resolver_args = array(
-				'resource_key'          => $resource_key,
-				'rollback_resource_key' => $resource_key,
-				'target_resource'       => $resource_key,
-				'target_resource_key'   => $resource_key,
+				'resource_key'          => $target_resource_key,
+				'rollback_resource_key' => $target_resource_key,
+				'target_resource'       => $target_resource_key,
+				'target_resource_key'   => $target_resource_key,
 				'object_type'           => (string) ( $entry['object_type'] ?? '' ),
-				'post_id'               => (int) $entry['object_id'],
-				'object_id'             => (int) $entry['object_id'],
-				'page_id'               => (int) $entry['object_id'],
-				'created_object_id'     => (int) $entry['object_id'],
-				'id'                    => (int) $entry['object_id'],
+				'post_id'               => $target_object_id,
+				'object_id'             => $target_object_id,
+				'page_id'               => $target_object_id,
+				'created_object_id'     => $is_create ? $target_object_id : 0,
+				'id'                    => $target_object_id,
 			);
 
-			$current_state = call_user_func( $capture_fn, (int) $entry['object_id'], $resolver_args, null );
+			$current_state = call_user_func( $capture_fn, $target_object_id, $resolver_args, null );
 			if ( is_wp_error( $current_state ) || null === $current_state ) {
 				return new \WP_Error(
 					'undo_state_unverifiable',
@@ -224,7 +281,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 					__( 'Live resource state has changed since this mutation was committed. Undo cannot overwrite newer modifications.', 'full-elementor-mcp' ),
 					array(
 						'journal_id'    => $journal_id,
-						'resource_key'  => $resource_key,
+						'resource_key'  => $target_resource_key,
 						'expected_hash' => $after_hash,
 						'current_hash'  => $current_hash,
 					)
@@ -240,9 +297,10 @@ final class Full_Elementor_MCP_Undo_Manager {
 					'user_id'           => $user_id,
 					'credential_uuid'   => $cred_uuid,
 					'label'             => 'Pre-Undo snapshot for journal #' . $journal_id,
+					'target_object_id'  => $target_object_id,
 				);
 
-				$pre_undo_res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( $resource_key, 'pre_undo', $chk_meta );
+				$pre_undo_res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( $target_resource_key, 'pre_undo', $chk_meta );
 				if ( is_wp_error( $pre_undo_res ) ) {
 					return new \WP_Error(
 						'undo_pre_checkpoint_failed',
@@ -257,7 +315,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 			}
 
 			// 6.5. Assert fence ownership before execution readiness:
-			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $fencing_token );
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $target_resource_key, $owner_id, $fencing_token );
 			if ( is_wp_error( $fence_check ) ) {
 				return $fence_check;
 			}
@@ -304,7 +362,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 						Full_Elementor_MCP_Audit_Logger::EVENT_UNDO_FAILED,
 						array(
 							'ability'         => $entry['ability'],
-							'resource_key'    => $resource_key,
+							'resource_key'    => $target_resource_key,
 							'change_id'       => $journal_id,
 							'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
 							'error_code'      => $rollback_result->get_error_code(),
@@ -327,7 +385,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 					Full_Elementor_MCP_Audit_Logger::EVENT_UNDO_COMPLETED,
 					array(
 						'ability'         => $entry['ability'],
-						'resource_key'    => $resource_key,
+						'resource_key'    => $target_resource_key,
 						'change_id'       => $journal_id,
 						'checkpoint_uuid' => $pre_undo_uuid,
 						'result_status'   => 'success',
@@ -335,6 +393,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 						'credential_uuid' => $cred_uuid,
 						'metadata'        => array(
 							'journal_id'               => $journal_id,
+							'target_object_id'         => $target_object_id,
 							'pre_undo_checkpoint_uuid' => $pre_undo_uuid,
 							'before_hash'              => $entry['before_hash'],
 						),
@@ -342,20 +401,20 @@ final class Full_Elementor_MCP_Undo_Manager {
 				);
 			}
 
-			Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+			Full_Elementor_MCP_Lock_Manager::release_lock( $target_resource_key, $owner_id, $fencing_token );
 			$lock_released = true;
 
 			return array(
 				'success'                  => true,
 				'undone'                   => true,
 				'journal_id'               => $journal_id,
-				'resource_key'             => $resource_key,
+				'resource_key'             => $target_resource_key,
 				'pre_undo_checkpoint_uuid' => $pre_undo_uuid,
 				'status'                   => Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK,
 			);
 		} finally {
 			if ( ! $lock_released ) {
-				Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+				Full_Elementor_MCP_Lock_Manager::release_lock( $target_resource_key, $owner_id, $fencing_token );
 			}
 		}
 	}
@@ -389,17 +448,36 @@ final class Full_Elementor_MCP_Undo_Manager {
 
 		$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
 
-		// Query the actual NEWEST mutation row for this exact resource (no status filter!):
-		$latest = $wpdb->get_row(
-			$wpdb->prepare(
-				"SELECT * FROM {$table}
-				 WHERE resource_key = %s
-				 ORDER BY id DESC
-				 LIMIT 1",
-				$resource_key
-			),
-			ARRAY_A
-		);
+		$post_id = 0;
+		if ( 0 === strpos( $resource_key, 'post:' ) ) {
+			$post_id = absint( substr( $resource_key, 5 ) );
+		}
+
+		// Query the actual NEWEST mutation row for this logical resource (including CREATE rows whose created_object_id = N):
+		if ( $post_id > 0 ) {
+			$latest = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT * FROM {$table}
+					 WHERE resource_key = %s OR created_object_id = %d
+					 ORDER BY id DESC
+					 LIMIT 1",
+					$resource_key,
+					$post_id
+				),
+				ARRAY_A
+			);
+		} else {
+			$latest = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT * FROM {$table}
+					 WHERE resource_key = %s
+					 ORDER BY id DESC
+					 LIMIT 1",
+					$resource_key
+				),
+				ARRAY_A
+			);
+		}
 
 		if ( empty( $latest ) ) {
 			return new \WP_Error(
@@ -483,21 +561,41 @@ final class Full_Elementor_MCP_Undo_Manager {
 			return new \WP_Error( 'missing_journal_id', __( 'journal_id (or change_id) is required for undo-change.', 'full-elementor-mcp' ) );
 		}
 
-		// If caller provided target_resource, validate against journal entry's actual resource_key:
+		// If caller provided target_resource, validate against journal entry's actual resource_key or authoritative rollback target:
 		$target_resource = (string) ( $input['target_resource'] ?? ( $input['target_resource_key'] ?? '' ) );
 		if ( '' !== $target_resource && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
 			$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
-			if ( $entry && ! empty( $entry['resource_key'] ) && $entry['resource_key'] !== $target_resource ) {
-				return new \WP_Error(
-					'resource_mismatch',
-					sprintf(
-						/* translators: 1: journal resource, 2: target resource */
-						__( 'Target resource "%1$s" does not match journal resource key "%2$s". Cross-resource undo is prohibited.', 'full-elementor-mcp' ),
-						$target_resource,
-						$entry['resource_key']
-					),
-					array( 'journal_id' => $journal_id )
-				);
+			if ( $entry ) {
+				$fwd_res      = (string) ( $entry['resource_key'] ?? '' );
+				$rollback_res = '';
+				if ( class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) && ! empty( $entry['ability'] ) ) {
+					$is_cr = Full_Elementor_MCP_Mutation_Registry::is_create( (string) $entry['ability'] );
+					$t_id  = $is_cr ? absint( $entry['created_object_id'] ?? 0 ) : (int) ( $entry['object_id'] ?? 0 );
+					$res   = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
+						(string) $entry['ability'],
+						$entry,
+						array(
+							'post_id'           => $t_id,
+							'object_id'         => $t_id,
+							'created_object_id' => $t_id,
+						)
+					);
+					if ( is_string( $res ) ) {
+						$rollback_res = $res;
+					}
+				}
+				if ( $target_resource !== $fwd_res && $target_resource !== $rollback_res ) {
+					return new \WP_Error(
+						'resource_mismatch',
+						sprintf(
+							/* translators: 1: target resource, 2: journal resource */
+							__( 'Target resource "%1$s" does not match journal resource key "%2$s". Cross-resource undo is prohibited.', 'full-elementor-mcp' ),
+							$target_resource,
+							$fwd_res
+						),
+						array( 'journal_id' => $journal_id )
+					);
+				}
 			}
 		}
 

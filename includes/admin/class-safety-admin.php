@@ -120,7 +120,13 @@ class Full_Elementor_MCP_Safety_Admin {
 			return;
 		}
 
-		$results = Full_Elementor_MCP_Journal::recover_pending();
+		$results = Full_Elementor_MCP_Journal::recover_pending(
+			Full_Elementor_MCP_Journal::RECOVERY_GRACE_PERIOD_SECONDS,
+			array(
+				'ability' => 'admin/recover_pending',
+				'user_id' => get_current_user_id(),
+			)
+		);
 		if ( empty( $results ) ) {
 			self::add_notice( 'success', __( 'Recovery scan complete: zero pending or abandoned journals required recovery.', 'full-elementor-mcp' ) );
 		} else {
@@ -362,7 +368,15 @@ class Full_Elementor_MCP_Safety_Admin {
 		}
 
 		$days   = absint( $_POST['retention_days'] ?? 90 );
-		$pruned = Full_Elementor_MCP_Audit_Logger::prune( $days > 0 ? $days : 90 );
+		$pruned = Full_Elementor_MCP_Audit_Logger::prune(
+			$days > 0 ? $days : 90,
+			100,
+			array(
+				'ability'      => 'admin/prune_audit',
+				'user_id'      => get_current_user_id(),
+				'log_if_empty' => true,
+			)
+		);
 		self::add_notice( 'success', sprintf(
 			/* translators: %d: count */
 			__( 'Audit log pruned: %d old event(s) removed (critical safety recovery events preserved).', 'full-elementor-mcp' ),

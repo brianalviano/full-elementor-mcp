@@ -303,7 +303,7 @@ class Full_Elementor_MCP_Journal {
 	 * @return string Sanitized and bounded message.
 	 */
 	public static function sanitize_error_message( string $message ): string {
-		$stripped = wp_strip_all_tags( $message );
+		$stripped = function_exists( 'wp_strip_all_tags' ) ? wp_strip_all_tags( $message ) : strip_tags( $message );
 
 		// Redact Bearer tokens, passwords, authorization patterns.
 		$stripped = (string) preg_replace( '#Bearer\s+[A-Za-z0-9._\-~+/]+=*#i', 'Bearer [REDACTED]', $stripped );
@@ -1429,12 +1429,28 @@ class Full_Elementor_MCP_Journal {
 	 * @param int $grace_seconds Grace period in seconds (default 60).
 	 * @return array<int, array<string, mixed>> Recovery summary reports.
 	 */
-	public static function recover_pending( int $grace_seconds = self::RECOVERY_GRACE_PERIOD_SECONDS ): array {
+	public static function recover_pending( int $grace_seconds = self::RECOVERY_GRACE_PERIOD_SECONDS, array $context = array() ): array {
 		global $wpdb;
 
 		$table        = Full_Elementor_MCP_Database_Installer::get_journal_table();
 		$tokens_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
 		$grace        = max( 10, $grace_seconds );
+
+		$req_uuid       = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
+		$user_id        = (int) ( $context['user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) );
+		$source_ability = (string) ( $context['ability'] ?? 'recovery_scan' );
+
+		if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+			Full_Elementor_MCP_Audit_Logger::log(
+				Full_Elementor_MCP_Audit_Logger::EVENT_RECOVERY_SCAN_STARTED,
+				array(
+					'ability'      => $source_ability,
+					'user_id'      => $user_id,
+					'request_uuid' => $req_uuid,
+					'severity'     => Full_Elementor_MCP_Audit_Logger::SEVERITY_NOTICE,
+				)
+			);
+		}
 
 		// Query pending journal entries.
 		$pending_rows = $wpdb->get_results(
@@ -1445,118 +1461,142 @@ class Full_Elementor_MCP_Journal {
 			ARRAY_A
 		);
 
-		if ( empty( $pending_rows ) ) {
-			return array();
-		}
-
 		$results = array();
 
-		foreach ( $pending_rows as $row ) {
-			$journal_id    = (int) $row['id'];
-			$ability       = (string) $row['ability'];
-			$journal_fence = (int) $row['fencing_token'];
-			$resource_key  = (string) ( $row['resource_key'] ?? '' );
-			$strategy      = Full_Elementor_MCP_Mutation_Registry::get( $ability );
+		if ( ! empty( $pending_rows ) ) {
+			foreach ( $pending_rows as $row ) {
+				$journal_id    = (int) $row['id'];
+				$ability       = (string) $row['ability'];
+				$journal_fence = (int) $row['fencing_token'];
+				$resource_key  = (string) ( $row['resource_key'] ?? '' );
+				$strategy      = Full_Elementor_MCP_Mutation_Registry::get( $ability );
 
-			if ( '' === trim( $resource_key ) ) {
-				$mf = self::mark_failed( $journal_id, 'abandoned_pending_unresolvable_key', $journal_fence );
-				$results[] = array(
-					'journal_id' => $journal_id,
-					'ability'    => $ability,
-					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unresolvable_resource_key',
-					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
-				);
-				continue;
-			}
-
-			// Check abandonment of the original mutation lock lease.
-			$lock_key  = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $resource_key );
-			$lock_info = $wpdb->get_row(
-				$wpdb->prepare(
-					"SELECT fencing_token, expires_at, used,
-					       (expires_at <= UTC_TIMESTAMP()) AS is_expired,
-					       (expires_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d SECOND)) AS is_abandoned
-					FROM {$tokens_table}
-					WHERE token_key = %s
-					  AND token_type = 'lock'",
-					$grace,
-					$lock_key
-				),
-				ARRAY_A
-			);
-
-			$is_abandoned = false;
-			if ( ! empty( $lock_info ) ) {
-				if ( ! empty( $lock_info['is_abandoned'] ) ) {
-					$is_abandoned = true;
-				}
-			} else {
-				$min_age_seconds = Full_Elementor_MCP_Lock_Manager::DEFAULT_LEASE_TTL + $grace;
-				$age_check       = $wpdb->get_var(
-					$wpdb->prepare(
-						"SELECT (created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d SECOND)) AS is_old
-						FROM {$table} WHERE id = %d",
-						$min_age_seconds,
-						$journal_id
-					)
-				);
-				if ( ! empty( $age_check ) ) {
-					$is_abandoned = true;
-				}
-			}
-
-			// If lease is still active or within grace period, do not touch.
-			if ( ! $is_abandoned ) {
-				continue;
-			}
-
-			// Requirement 3: Conservative Abandoned CREATE Recovery.
-			$is_create = $strategy && Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
-			if ( $is_create ) {
-				$created_id = absint( $row['created_object_id'] ?? 0 );
-				if ( $created_id > 0 ) {
-					// Object was created! Do NOT automatically trash it. Report and transition to safe failure.
-					$mf = self::mark_failed(
-						$journal_id,
-						'abandoned_create_requires_manual_recovery',
-						$journal_fence
-					);
+				if ( '' === trim( $resource_key ) ) {
+					$mf = self::mark_failed( $journal_id, 'abandoned_pending_unresolvable_key', $journal_fence );
 					$results[] = array(
-						'journal_id'        => $journal_id,
-						'ability'           => $ability,
-						'status'            => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-						'reason'            => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_requires_manual_recovery',
-						'created_object_id' => $created_id,
-						'error'             => is_wp_error( $mf ) ? $mf->get_error_message() : null,
+						'journal_id' => $journal_id,
+						'ability'    => $ability,
+						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unresolvable_resource_key',
+						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
+					continue;
+				}
+
+				// Check abandonment of the original mutation lock lease.
+				$lock_key  = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $resource_key );
+				$lock_info = $wpdb->get_row(
+					$wpdb->prepare(
+						"SELECT fencing_token, expires_at, used,
+						       (expires_at <= UTC_TIMESTAMP()) AS is_expired,
+						       (expires_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d SECOND)) AS is_abandoned
+						FROM {$tokens_table}
+						WHERE token_key = %s
+						  AND token_type = 'lock'",
+						$grace,
+						$lock_key
+					),
+					ARRAY_A
+				);
+
+				$is_abandoned = false;
+				if ( ! empty( $lock_info ) ) {
+					if ( ! empty( $lock_info['is_abandoned'] ) ) {
+						$is_abandoned = true;
+					}
 				} else {
-					// ID was not recorded before crash. State is unknown. Do NOT assume no object was created.
+					$min_age_seconds = Full_Elementor_MCP_Lock_Manager::DEFAULT_LEASE_TTL + $grace;
+					$age_check       = $wpdb->get_var(
+						$wpdb->prepare(
+							"SELECT (created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d SECOND)) AS is_old
+							FROM {$table} WHERE id = %d",
+							$min_age_seconds,
+							$journal_id
+						)
+					);
+					if ( ! empty( $age_check ) ) {
+						$is_abandoned = true;
+					}
+				}
+
+				// If lease is still active or within grace period, do not touch.
+				if ( ! $is_abandoned ) {
+					continue;
+				}
+
+				// Requirement 3: Conservative Abandoned CREATE Recovery.
+				$is_create = $strategy && Full_Elementor_MCP_Mutation_Registry::CATEGORY_WP_OBJECT_CREATE === $strategy['category'];
+				if ( $is_create ) {
+					$created_id = absint( $row['created_object_id'] ?? 0 );
+					if ( $created_id > 0 ) {
+						// Object was created! Do NOT automatically trash it. Report and transition to safe failure.
+						$mf = self::mark_failed(
+							$journal_id,
+							'abandoned_create_requires_manual_recovery',
+							$journal_fence
+						);
+						$results[] = array(
+							'journal_id'        => $journal_id,
+							'ability'           => $ability,
+							'status'            => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+							'reason'            => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_requires_manual_recovery',
+							'created_object_id' => $created_id,
+						);
+						if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+							Full_Elementor_MCP_Audit_Logger::log(
+								Full_Elementor_MCP_Audit_Logger::EVENT_RECOVERY_MANUAL_REQUIRED,
+								array(
+									'ability'      => $ability,
+									'resource_key' => $resource_key,
+									'change_id'    => $journal_id,
+									'user_id'      => $user_id,
+									'request_uuid' => $req_uuid,
+									'severity'     => Full_Elementor_MCP_Audit_Logger::SEVERITY_WARNING,
+									'error_code'   => 'manual_recovery_required',
+									'metadata'     => array(
+										'journal_id'        => $journal_id,
+										'reason'            => 'abandoned_create_requires_manual_recovery',
+										'created_object_id' => $created_id,
+									),
+								)
+							);
+						}
+						continue;
+					}
+
+					// Created object ID untracked: fail closed without touching target entity.
 					$mf = self::mark_failed(
 						$journal_id,
-						'abandoned_create_identity_unknown',
+						'abandoned_create_untracked_id',
 						$journal_fence
 					);
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
 						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'abandoned_create_identity_unknown',
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'untracked_created_id',
+					);
+					continue;
+				}
+
+				// Check strategy support:
+				if ( ! $strategy || empty( $strategy['supports_rollback'] ) ) {
+					$mf = self::mark_failed( $journal_id, 'abandoned_pending_unsupported_strategy', $journal_fence );
+					$results[] = array(
+						'journal_id' => $journal_id,
+						'ability'    => $ability,
+						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unsupported_strategy',
 						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
+					continue;
 				}
-				continue;
-			}
 
-			// Requirement 10: Compare generations ONLY on the same canonical resource key.
-			if ( ! empty( $lock_info ) ) {
-				$current_lock_fence = (int) $lock_info['fencing_token'];
-				if ( $current_lock_fence > $journal_fence ) {
-					$mf = self::mark_failed(
-						$journal_id,
-						'abandoned_pending_stale_generation',
-						$journal_fence
-					);
+				// Check fencing generation against current token on the resource:
+				$current_fencing_token = (int) ( $lock_info['fencing_token'] ?? 0 );
+				if ( $current_fencing_token > $journal_fence ) {
+					// Lock was acquired by a newer generation! The pending journal is STALE and MUST NOT overwrite newer work.
+					$mf = self::mark_failed( $journal_id, 'abandoned_pending_stale_generation', $journal_fence );
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
@@ -1566,96 +1606,113 @@ class Full_Elementor_MCP_Journal {
 					);
 					continue;
 				}
-			}
 
-			// Verify durable rollback capability.
-			if ( array_key_exists( 'rollback_supported', $row ) && empty( $row['rollback_supported'] ) ) {
-				$mf = self::mark_failed(
-					$journal_id,
-					'abandoned_pending_unsupported_strategy',
-					$journal_fence
-				);
-				$results[] = array(
-					'journal_id' => $journal_id,
-					'ability'    => $ability,
-					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unsupported_strategy',
-					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
-				);
-				continue;
-			}
+				// Requirement 11: Conservative Pending Existing-Resource Recovery.
+				// Pending operations have no committed after_hash. Verify live state.
+				$capture_fn = $strategy['capture_before'] ?? ( $strategy['capture_after'] ?? null );
+				$target_id  = (int) $row['object_id'];
+				$args       = array( 'object_id' => $target_id, 'post_id' => $target_id );
 
-			if ( ! $strategy || empty( $strategy['supports_rollback'] ) ) {
-				$mf = self::mark_failed(
-					$journal_id,
-					'abandoned_pending_unsupported_strategy',
-					$journal_fence
-				);
-				$results[] = array(
-					'journal_id' => $journal_id,
-					'ability'    => $ability,
-					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unsupported_strategy',
-					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
-				);
-				continue;
-			}
+				if ( is_callable( $capture_fn ) ) {
+					$live_state = $capture_fn( $target_id, $args, null );
+					$live_hash  = is_wp_error( $live_state ) || null === $live_state ? '' : self::hash_state( $live_state );
 
-			// Requirement 11: Conservative Pending Existing-Resource Recovery.
-			// Pending operations have no committed after_hash. Verify live state.
-			$capture_fn = $strategy['capture_before'] ?? ( $strategy['capture_after'] ?? null );
-			$target_id  = (int) $row['object_id'];
-			$args       = array( 'object_id' => $target_id, 'post_id' => $target_id );
+					if ( ! is_wp_error( $live_hash ) && '' !== $live_hash && hash_equals( (string) $row['before_hash'], $live_hash ) ) {
+						// Live state matches before_state: mutation left no changes. Safe clean resolution without write.
+						$mf = self::mark_failed(
+							$journal_id,
+							'abandoned_pending_clean_noop',
+							$journal_fence
+						);
+						$results[] = array(
+							'journal_id' => $journal_id,
+							'ability'    => $ability,
+							'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
+							'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'clean_noop',
+							'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
+						);
+						continue;
+					}
 
-			if ( is_callable( $capture_fn ) ) {
-				$live_state = $capture_fn( $target_id, $args, null );
-				$live_hash  = is_wp_error( $live_state ) || null === $live_state ? '' : self::hash_state( $live_state );
-
-				if ( ! is_wp_error( $live_hash ) && '' !== $live_hash && hash_equals( (string) $row['before_hash'], $live_hash ) ) {
-					// Live state matches before_state: mutation left no changes. Safe clean resolution without write.
+					// Live state diverged or unverifiable: fail closed; do not speculatively overwrite.
 					$mf = self::mark_failed(
 						$journal_id,
-						'abandoned_pending_clean_noop',
+						'abandoned_pending_divergent_state_manual_recovery_required',
 						$journal_fence
 					);
 					$results[] = array(
 						'journal_id' => $journal_id,
 						'ability'    => $ability,
 						'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'clean_noop',
+						'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'manual_recovery_required',
 						'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 					);
+					if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+						Full_Elementor_MCP_Audit_Logger::log(
+							Full_Elementor_MCP_Audit_Logger::EVENT_RECOVERY_MANUAL_REQUIRED,
+							array(
+								'ability'      => $ability,
+								'resource_key' => $resource_key,
+								'change_id'    => $journal_id,
+								'user_id'      => $user_id,
+								'request_uuid' => $req_uuid,
+								'severity'     => Full_Elementor_MCP_Audit_Logger::SEVERITY_WARNING,
+								'error_code'   => 'manual_recovery_required',
+								'metadata'     => array(
+									'journal_id' => $journal_id,
+									'reason'     => 'abandoned_pending_divergent_state_manual_recovery_required',
+								),
+							)
+						);
+					}
 					continue;
 				}
 
-				// Live state diverged or unverifiable: fail closed; do not speculatively overwrite.
+				// Unverifiable live state.
 				$mf = self::mark_failed(
 					$journal_id,
-					'abandoned_pending_divergent_state_manual_recovery_required',
+					'abandoned_pending_unverifiable_live_state',
 					$journal_fence
 				);
 				$results[] = array(
 					'journal_id' => $journal_id,
 					'ability'    => $ability,
 					'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'manual_recovery_required',
+					'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unverifiable_live_state',
 					'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
 				);
-				continue;
+			}
+		}
+
+		if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+			$counts = array(
+				'processed'       => count( $results ),
+				'recovery_failed' => 0,
+				'manual_required' => 0,
+				'clean_noop'      => 0,
+			);
+			foreach ( $results as $r ) {
+				$status = $r['status'] ?? '';
+				$reason = (string) ( $r['reason'] ?? '' );
+				if ( 'recovery_failed' === $status ) {
+					$counts['recovery_failed']++;
+				} elseif ( 'clean_noop' === $reason ) {
+					$counts['clean_noop']++;
+				} elseif ( str_contains( $reason, 'manual' ) ) {
+					$counts['manual_required']++;
+				}
 			}
 
-			// Unverifiable live state.
-			$mf = self::mark_failed(
-				$journal_id,
-				'abandoned_pending_unverifiable_live_state',
-				$journal_fence
-			);
-			$results[] = array(
-				'journal_id' => $journal_id,
-				'ability'    => $ability,
-				'status'     => is_wp_error( $mf ) ? 'recovery_failed' : self::STATUS_FAILED,
-				'reason'     => is_wp_error( $mf ) ? $mf->get_error_code() : 'unverifiable_live_state',
-				'error'      => is_wp_error( $mf ) ? $mf->get_error_message() : null,
+			Full_Elementor_MCP_Audit_Logger::log(
+				Full_Elementor_MCP_Audit_Logger::EVENT_RECOVERY_COMPLETED,
+				array(
+					'ability'       => $source_ability,
+					'user_id'       => $user_id,
+					'request_uuid'  => $req_uuid,
+					'result_status' => empty( $counts['recovery_failed'] ) ? 'success' : 'warning',
+					'severity'      => empty( $counts['recovery_failed'] ) ? Full_Elementor_MCP_Audit_Logger::SEVERITY_INFO : Full_Elementor_MCP_Audit_Logger::SEVERITY_WARNING,
+					'metadata'      => $counts,
+				)
 			);
 		}
 

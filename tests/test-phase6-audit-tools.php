@@ -185,6 +185,16 @@ if ( ! function_exists( 'sanitize_text_field' ) ) {
 		return trim( strip_tags( $str ) );
 	}
 }
+if ( ! function_exists( 'wp_strip_all_tags' ) ) {
+	function wp_strip_all_tags( string $string, bool $remove_breaks = false ): string {
+		$string = preg_replace( '@<(script|style)[^>]*?>.*?</\\1>@si', '', $string );
+		$string = strip_tags( $string );
+		if ( $remove_breaks ) {
+			$string = preg_replace( '/[\r\n\t ]+/', ' ', $string );
+		}
+		return trim( $string );
+	}
+}
 if ( ! function_exists( 'sanitize_key' ) ) {
 	function sanitize_key( string $key ): string {
 		return preg_replace( '/[^a-z0-9_\-]/', '', strtolower( $key ) );
@@ -2114,6 +2124,401 @@ run_test( 'Admin Safety: two-step confirmation flow and type-correct restore inv
 	$html2 = ob_get_clean();
 
 	assert_true( str_contains( $html2, 'restored successfully' ), 'Restore must succeed with valid confirmation token' );
+} );
+
+// =============================================================================
+// 11. Final Corrective Pass Regressions (Sections A, B, C, D, E)
+// =============================================================================
+
+run_test( 'CREATE Undo: create-page journal targets post:N, pre_undo targets post:N, and trashes created post', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][950] = (object) array( 'ID' => 950, 'post_title' => 'Page 950', 'post_status' => 'publish' );
+	$GLOBALS['mock_post_meta'][950]['_elementor_data'] = json_encode( array( array( 'id' => 'cp950' ) ) );
+
+	$strat       = Full_Elementor_MCP_Mutation_Registry::get( 'full-elementor-mcp/create-page' );
+	$after_state = call_user_func( $strat['capture_after'], 950, array( 'post_id' => 950 ) );
+	$after_hash  = Full_Elementor_MCP_Journal::hash_state( $after_state );
+
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->insert(
+		$table,
+		array(
+			'ability'            => 'full-elementor-mcp/create-page',
+			'action'             => 'create_page',
+			'object_type'        => 'page',
+			'object_id'          => 0,
+			'created_object_id'  => 950,
+			'resource_key'       => 'create:page:' . md5( 'test_create_950' ),
+			'before_hash'        => Full_Elementor_MCP_Journal::hash_state( array( 'exists' => false ) ),
+			'after_hash'         => $after_hash,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_change( $jid, false );
+	assert_false( is_wp_error( $res ) );
+	assert_true( ! empty( $res['undone'] ) );
+	assert_equals( 'post:950', $res['resource_key'] );
+
+	// Pre-undo checkpoint must target post:950:
+	$chk = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $res['pre_undo_checkpoint_uuid'] );
+	assert_equals( 'post:950', $chk['resource_key'] );
+
+	// Created post must now be trashed:
+	assert_equals( 'trash', $GLOBALS['mock_posts'][950]->post_status );
+
+	// Journal entry must be marked rolled_back:
+	$row = Full_Elementor_MCP_Journal::get_entry( $jid );
+	assert_equals( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK, $row['status'] );
+} );
+
+run_test( 'CREATE Undo: create-theme-template journal targets post:N and reverts created template', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][951] = (object) array( 'ID' => 951, 'post_title' => 'Template 951', 'post_status' => 'publish', 'post_type' => 'elementor_library' );
+	$GLOBALS['mock_post_meta'][951]['_elementor_data'] = json_encode( array( array( 'id' => 'tmpl951' ) ) );
+
+	$strat       = Full_Elementor_MCP_Mutation_Registry::get( 'full-elementor-mcp/create-theme-template' );
+	$after_state = call_user_func( $strat['capture_after'], 951, array( 'post_id' => 951 ) );
+	$after_hash  = Full_Elementor_MCP_Journal::hash_state( $after_state );
+
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->insert(
+		$table,
+		array(
+			'ability'            => 'full-elementor-mcp/create-theme-template',
+			'action'             => 'create_theme_template',
+			'object_type'        => 'template',
+			'object_id'          => 0,
+			'created_object_id'  => 951,
+			'resource_key'       => 'create:template:' . md5( 'test_create_tmpl_951' ),
+			'before_hash'        => Full_Elementor_MCP_Journal::hash_state( array( 'exists' => false ) ),
+			'after_hash'         => $after_hash,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_change( $jid, false );
+	assert_false( is_wp_error( $res ) );
+	assert_equals( 'post:951', $res['resource_key'] );
+	assert_equals( 'trash', $GLOBALS['mock_posts'][951]->post_status );
+} );
+
+run_test( 'CREATE Undo: fails closed with undo_target_unresolvable when created_object_id is missing', function () use ( $wpdb ) {
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->insert(
+		$table,
+		array(
+			'ability'            => 'full-elementor-mcp/create-page',
+			'action'             => 'create_page',
+			'object_type'        => 'page',
+			'object_id'          => 0,
+			'created_object_id'  => 0,
+			'resource_key'       => 'create:page:' . md5( 'missing_created_id' ),
+			'before_hash'        => Full_Elementor_MCP_Journal::hash_state( array( 'exists' => false ) ),
+			'after_hash'         => 'fakeafterhash',
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_change( $jid, false );
+	assert_is_wp_error( $res );
+	assert_equals( 'undo_target_unresolvable', $res->get_error_code() );
+} );
+
+run_test( 'Undo Last Change: finds CREATE journal for post:N with no subsequent mutations', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][952] = (object) array( 'ID' => 952, 'post_title' => 'Page 952', 'post_status' => 'publish' );
+	$GLOBALS['mock_post_meta'][952]['_elementor_data'] = json_encode( array( array( 'id' => 'p952' ) ) );
+
+	$strat       = Full_Elementor_MCP_Mutation_Registry::get( 'full-elementor-mcp/create-page' );
+	$after_state = call_user_func( $strat['capture_after'], 952, array( 'post_id' => 952 ) );
+	$after_hash  = Full_Elementor_MCP_Journal::hash_state( $after_state );
+
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$wpdb->insert(
+		$table,
+		array(
+			'ability'            => 'full-elementor-mcp/create-page',
+			'action'             => 'create_page',
+			'object_type'        => 'page',
+			'object_id'          => 0,
+			'created_object_id'  => 952,
+			'resource_key'       => 'create:page:' . md5( 'test_create_952' ),
+			'before_hash'        => Full_Elementor_MCP_Journal::hash_state( array( 'exists' => false ) ),
+			'after_hash'         => $after_hash,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_last_change( 'post:952', false );
+	assert_false( is_wp_error( $res ) );
+	assert_equals( 'post:952', $res['resource_key'] );
+	assert_equals( $jid, $res['journal_id'] );
+	assert_equals( 'trash', $GLOBALS['mock_posts'][952]->post_status );
+} );
+
+run_test( 'Undo Last Change: CREATE followed by normal update selects update as newest', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][953] = (object) array( 'ID' => 953, 'post_title' => 'Page 953', 'post_status' => 'publish' );
+	$GLOBALS['mock_post_meta'][953]['_elementor_page_settings'] = array( 'title' => 'v2' );
+
+	$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+
+	// Old CREATE journal:
+	$wpdb->insert(
+		$table,
+		array(
+			'ability'            => 'full-elementor-mcp/create-page',
+			'action'             => 'create_page',
+			'object_type'        => 'page',
+			'object_id'          => 0,
+			'created_object_id'  => 953,
+			'resource_key'       => 'create:page:' . md5( 'test_create_953' ),
+			'before_hash'        => 'hash0',
+			'after_hash'         => 'hash1',
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+		)
+	);
+	$create_jid = (int) $wpdb->insert_id;
+
+	// Newer update journal:
+	$wpdb->insert(
+		$table,
+		array(
+			'ability'            => 'full-elementor-mcp/update-page-settings',
+			'action'             => 'update_page_settings',
+			'object_type'        => 'page',
+			'object_id'          => 953,
+			'created_object_id'  => 0,
+			'resource_key'       => 'post:953',
+			'before_hash'        => 'hash1',
+			'after_hash'         => 'hash2',
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+		)
+	);
+	$update_jid = (int) $wpdb->insert_id;
+
+	// Dry-run inspects newest:
+	$dry = Full_Elementor_MCP_Undo_Manager::undo_last_change( 'post:953', true );
+	assert_false( is_wp_error( $dry ) );
+	assert_equals( $update_jid, $dry['journal_id'] );
+	assert_equals( 'full-elementor-mcp/update-page-settings', $dry['ability'] );
+	assert_equals( 'post:953', $dry['resource_key'] );
+} );
+
+run_test( 'Restore Fencing: pre-write fencing assertion failure keeps confirmation token reusable and target unchanged', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][954] = (object) array( 'ID' => 954, 'post_title' => 'Page 954 Original', 'post_status' => 'publish' );
+	$GLOBALS['mock_post_meta'][954]['_elementor_data'] = json_encode( array( array( 'id' => 'orig_954', 'elType' => 'section', 'elements' => array() ) ) );
+
+	// Capture checkpoint CP_target:
+	$GLOBALS['mock_post_meta'][954]['_elementor_data'] = json_encode( array( array( 'id' => 'target_954', 'elType' => 'section', 'elements' => array() ) ) );
+	$save = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:954', 'manual', array( 'label' => 'Target CP' ) );
+	$uuid = $save['checkpoint_uuid'];
+
+	// Reset to original:
+	$GLOBALS['mock_post_meta'][954]['_elementor_data'] = json_encode( array( array( 'id' => 'orig_954', 'elType' => 'section', 'elements' => array() ) ) );
+
+	// Issue confirmation token via middleware:
+	$chal_res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array( 'checkpoint_uuid' => $uuid )
+	);
+	assert_is_wp_error( $chal_res );
+	assert_equals( 'confirmation_required', $chal_res->get_error_code() );
+	$chal_data  = $chal_res->get_error_data();
+	$conf_token = $chal_data['confirmation_token'];
+
+	// Intercept right after WAL insert into elementor_mcp_journal, to steal the lock:
+	$simulated = false;
+	$tok_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$lock_key  = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( 'post:954' );
+	$wpdb->on_before_query = function ( $q ) use ( &$wpdb, &$simulated, $tok_table, $lock_key ) {
+		if ( ! $simulated && str_contains( $q, 'INSERT INTO' ) && str_contains( $q, 'elementor_mcp_journal' ) ) {
+			$simulated = true;
+			// Steal lock by updating owner_id on post:954 in tokens table:
+			$wpdb->pdo->exec( "UPDATE {$tok_table} SET owner_id = 'stolen_lock_owner' WHERE token_key = '{$lock_key}'" );
+		}
+	};
+
+	// Attempt restore via middleware:
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid'    => $uuid,
+			'confirmation_token' => $conf_token,
+		)
+	);
+
+	$wpdb->on_before_query = null;
+
+	assert_is_wp_error( $res );
+	assert_equals( 'stale_writer_conflict', $res->get_error_code() );
+
+	// 1. Confirmation token must NOT be consumed (used = 0):
+	$tok_row = $wpdb->get_row( $wpdb->prepare( "SELECT used FROM {$tok_table} WHERE token_key = %s", 'conf:' . hash( 'sha256', $conf_token ) ), ARRAY_A );
+	assert_true( ! empty( $tok_row ), 'Token row must exist in tokens table' );
+	assert_equals( 0, (int) $tok_row['used'], 'Token must remain reusable after pre-write fence failure' );
+
+	// 2. Target state must remain unchanged:
+	$curr_meta = $GLOBALS['mock_post_meta'][954]['_elementor_data'];
+	assert_true( str_contains( $curr_meta, 'orig_954' ), 'Target state must not be modified when fence check fails' );
+} );
+
+run_test( 'Confirmed Restore No-op: consumes token on terminal no-op and blocks replay', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][955] = (object) array( 'ID' => 955, 'post_title' => 'Page 955', 'post_status' => 'publish' );
+	$GLOBALS['mock_post_meta'][955]['_elementor_data'] = json_encode( array( array( 'id' => 'noop_state', 'elType' => 'section', 'elements' => array() ) ) );
+
+	// Save checkpoint while in noop_state:
+	$save = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:955', 'manual', array( 'label' => 'Noop CP' ) );
+	$uuid = $save['checkpoint_uuid'];
+
+	// Step 1: Request confirmation challenge:
+	$req1 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array( 'checkpoint_uuid' => $uuid )
+	);
+	assert_is_wp_error( $req1 );
+	assert_equals( 'confirmation_required', $req1->get_error_code() );
+	$req1_data  = $req1->get_error_data();
+	$conf_token = $req1_data['confirmation_token'];
+
+	// Step 2: Execute with token when live state matches checkpoint (terminal no-op):
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid'    => $uuid,
+			'confirmation_token' => $conf_token,
+		)
+	);
+	assert_false( is_wp_error( $res ) );
+	assert_true( ! empty( $res['noop'] ), 'Must return noop=true' );
+	assert_true( ! empty( $res['confirmation_consumed'] ), 'Must mark confirmation consumed' );
+
+	// Check token in DB: must be used = 1:
+	$tok_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+	$tok_row   = $wpdb->get_row( $wpdb->prepare( "SELECT used FROM {$tok_table} WHERE token_key = %s", 'conf:' . hash( 'sha256', $conf_token ) ), ARRAY_A );
+	assert_true( ! empty( $tok_row ), 'Token row must exist in tokens table' );
+	assert_equals( 1, (int) $tok_row['used'], 'Confirmed no-op must consume confirmation token' );
+
+	// Mutate resource later:
+	$GLOBALS['mock_post_meta'][955]['_elementor_data'] = json_encode( array( array( 'id' => 'diverged_state', 'elType' => 'section', 'elements' => array() ) ) );
+
+	// Replay old confirmation token: must fail:
+	$replay_res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid'    => $uuid,
+			'confirmation_token' => $conf_token,
+		)
+	);
+	assert_is_wp_error( $replay_res );
+	assert_equals( 'confirmation_token_used', $replay_res->get_error_code() );
+} );
+
+run_test( 'Forensic Audit Coverage: operator safety actions create append-only audit events', function () use ( $wpdb ) {
+	$GLOBALS['mock_posts'][956] = (object) array( 'ID' => 956, 'post_title' => 'Page 956', 'post_status' => 'publish' );
+	$GLOBALS['mock_post_meta'][956]['_elementor_data'] = json_encode( array( array( 'id' => 'audit_956' ) ) );
+
+	// 1. Manual Checkpoint Creation:
+	$cp = Full_Elementor_MCP_Checkpoint_Manager::create_manual_checkpoint(
+		'post:956',
+		array(
+			'label'   => 'Forensic Test CP',
+			'user_id' => 77,
+		)
+	);
+	assert_false( is_wp_error( $cp ) );
+
+	$audit_table = Full_Elementor_MCP_Database_Installer::get_audit_log_table();
+	$cp_event    = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$audit_table} WHERE event = %s AND resource_key = %s ORDER BY id DESC LIMIT 1",
+			Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATED,
+			'post:956'
+		),
+		ARRAY_A
+	);
+	assert_true( ! empty( $cp_event ), 'checkpoint_created audit event must exist' );
+	assert_equals( $cp['checkpoint_uuid'], $cp_event['checkpoint_uuid'] );
+	assert_equals( 77, (int) $cp_event['user_id'] );
+	assert_equals( 'success', $cp_event['result_status'] );
+
+	// Checkpoint failure audit event:
+	$lock    = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:956', 'blocker', 60 );
+	$cp_fail = Full_Elementor_MCP_Checkpoint_Manager::create_manual_checkpoint( 'post:956', array( 'user_id' => 77 ) );
+	assert_is_wp_error( $cp_fail );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:956', 'blocker', (int) $lock['fencing_token'] );
+
+	$cp_fail_event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$audit_table} WHERE event = %s AND resource_key = %s ORDER BY id DESC LIMIT 1",
+			Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_CREATE_FAILED,
+			'post:956'
+		),
+		ARRAY_A
+	);
+	assert_true( ! empty( $cp_fail_event ), 'checkpoint_create_failed audit event must exist' );
+	assert_equals( 'resource_locked', $cp_fail_event['error_code'] );
+
+	// 2. Recovery Scan Audit Events:
+	Full_Elementor_MCP_Journal::recover_pending(
+		60,
+		array(
+			'ability' => 'admin/recover_pending',
+			'user_id' => 88,
+		)
+	);
+
+	$scan_start = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$audit_table} WHERE event = %s AND user_id = 88 ORDER BY id DESC LIMIT 1",
+			Full_Elementor_MCP_Audit_Logger::EVENT_RECOVERY_SCAN_STARTED
+		),
+		ARRAY_A
+	);
+	assert_true( ! empty( $scan_start ), 'recovery_scan_started event must exist' );
+
+	$scan_end = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$audit_table} WHERE event = %s AND user_id = 88 ORDER BY id DESC LIMIT 1",
+			Full_Elementor_MCP_Audit_Logger::EVENT_RECOVERY_COMPLETED
+		),
+		ARRAY_A
+	);
+	assert_true( ! empty( $scan_end ), 'recovery_completed event must exist' );
+	$scan_meta = json_decode( (string) $scan_end['metadata_sanitized'], true );
+	assert_true( is_array( $scan_meta ), 'scan_meta must be an array' );
+	assert_true( array_key_exists( 'processed', $scan_meta ), 'scan_meta must have processed count' );
+
+	// 3. Audit Pruning Audit Event:
+	Full_Elementor_MCP_Audit_Logger::prune(
+		90,
+		50,
+		array(
+			'ability'      => 'admin/prune_audit',
+			'user_id'      => 99,
+			'log_if_empty' => true,
+		)
+	);
+
+	$prune_event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$audit_table} WHERE event = %s AND user_id = 99 ORDER BY id DESC LIMIT 1",
+			Full_Elementor_MCP_Audit_Logger::EVENT_AUDIT_PRUNED
+		),
+		ARRAY_A
+	);
+	assert_true( ! empty( $prune_event ), 'audit_pruned event must exist' );
+	$prune_meta = json_decode( (string) $prune_event['metadata_sanitized'], true );
+	assert_true( is_array( $prune_meta ), 'prune_meta must be an array' );
+	assert_equals( 90, (int) ( $prune_meta['retention_days'] ?? 0 ) );
+	assert_true( array_key_exists( 'deleted_row_count', $prune_meta ), 'prune_meta must have deleted_row_count' );
 } );
 
 // =============================================================================
