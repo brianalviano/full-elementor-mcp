@@ -34,7 +34,11 @@ if ( ! defined( 'FULL_ELEMENTOR_MCP_DIR' ) ) {
 	define( 'FULL_ELEMENTOR_MCP_DIR', dirname( __DIR__ ) . DIRECTORY_SEPARATOR );
 }
 
+$active_mysql_conn   = null;
+$active_mysql_dbname = null;
+
 function get_concurrency_mysql_pdo(): PDO {
+	global $active_mysql_conn, $active_mysql_dbname;
 	$env_host = getenv( 'DB_HOST' ) ?: getenv( 'MYSQL_HOST' ) ?: '127.0.0.1';
 	$env_port = (int) ( getenv( 'DB_PORT' ) ?: getenv( 'MYSQL_PORT' ) ?: 0 );
 	$env_user = getenv( 'DB_USER' ) ?: getenv( 'MYSQL_USER' ) ?: 'root';
@@ -64,6 +68,8 @@ function get_concurrency_mysql_pdo(): PDO {
 				PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
 				PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
 			) );
+			$active_mysql_conn   = $c;
+			$active_mysql_dbname = $dbname;
 			return $pdo;
 		} catch ( Exception $e ) {
 			// continue
@@ -77,6 +83,10 @@ function get_concurrency_mysql_pdo(): PDO {
 $pdo = get_concurrency_mysql_pdo();
 echo "Executing multi-process races against MySQL " . $pdo->getAttribute( PDO::ATTR_SERVER_VERSION ) . "...\n\n";
 
+// Ensure safety database tables exist before executing concurrency races
+require_once __DIR__ . '/test-mysql-safety.php';
+Full_Elementor_MCP_Database_Installer::install();
+
 $worker_script = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-mysql-runner.php';
 $php_bin       = PHP_BINARY;
 
@@ -85,35 +95,43 @@ $total_tests  = 0;
 $passed_tests = 0;
 $failed_tests = 0;
 
-function run_test( string $name, callable $fn ): void {
-	global $total_tests, $passed_tests, $failed_tests;
-	$total_tests++;
-	try {
-		$fn();
-		$passed_tests++;
-		echo " [PASS] {$name}\n";
-	} catch ( Throwable $e ) {
-		$failed_tests++;
-		echo " [FAIL] {$name}\n";
-		echo "        " . $e->getMessage() . " (" . $e->getFile() . ":" . $e->getLine() . ")\n";
+if ( ! function_exists( 'run_test' ) ) {
+	function run_test( string $name, callable $fn ): void {
+		global $total_tests, $passed_tests, $failed_tests;
+		$total_tests++;
+		try {
+			$fn();
+			$passed_tests++;
+			echo " [PASS] {$name}\n";
+		} catch ( Throwable $e ) {
+			$failed_tests++;
+			echo " [FAIL] {$name}\n";
+			echo "        " . $e->getMessage() . " (" . $e->getFile() . ":" . $e->getLine() . ")\n";
+		}
 	}
 }
 
-function assert_true( mixed $val, string $msg = 'Expected true' ): void {
-	if ( true !== $val ) {
-		throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+if ( ! function_exists( 'assert_true' ) ) {
+	function assert_true( mixed $val, string $msg = 'Expected true' ): void {
+		if ( true !== $val ) {
+			throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+		}
 	}
 }
 
-function assert_false( mixed $val, string $msg = 'Expected false' ): void {
-	if ( false !== $val ) {
-		throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+if ( ! function_exists( 'assert_false' ) ) {
+	function assert_false( mixed $val, string $msg = 'Expected false' ): void {
+		if ( false !== $val ) {
+			throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+		}
 	}
 }
 
-function assert_equals( mixed $expected, mixed $actual, string $msg = '' ): void {
-	if ( $expected !== $actual ) {
-		throw new RuntimeException( ( $msg ? $msg . ': ' : '' ) . 'Expected ' . var_export( $expected, true ) . ', got ' . var_export( $actual, true ) );
+if ( ! function_exists( 'assert_equals' ) ) {
+	function assert_equals( mixed $expected, mixed $actual, string $msg = '' ): void {
+		if ( $expected !== $actual ) {
+			throw new RuntimeException( ( $msg ? $msg . ': ' : '' ) . 'Expected ' . var_export( $expected, true ) . ', got ' . var_export( $actual, true ) );
+		}
 	}
 }
 
@@ -135,7 +153,18 @@ function spawn_worker( string $php_bin, string $worker_script, array $args ): ar
 		2 => array( 'pipe', 'w' ), // stderr
 	);
 
-	$proc = proc_open( $cmd, $descriptors, $pipes );
+	global $active_mysql_conn, $active_mysql_dbname;
+	$env = getenv();
+	if ( ! is_array( $env ) ) {
+		$env = array();
+	}
+	$env['DB_HOST']     = (string) ( $active_mysql_conn['host'] ?? '127.0.0.1' );
+	$env['DB_PORT']     = (string) ( $active_mysql_conn['port'] ?? 3306 );
+	$env['DB_USER']     = (string) ( $active_mysql_conn['user'] ?? 'root' );
+	$env['DB_PASSWORD'] = (string) ( $active_mysql_conn['pass'] ?? 'root' );
+	$env['DB_NAME']     = (string) ( $active_mysql_dbname ?? 'safe_elementor_test' );
+
+	$proc = proc_open( $cmd, $descriptors, $pipes, null, $env );
 	if ( ! is_resource( $proc ) ) {
 		throw new RuntimeException( "Failed to spawn worker process: {$cmd}" );
 	}

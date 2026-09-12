@@ -316,35 +316,43 @@ $total_tests  = 0;
 $passed_tests = 0;
 $failed_tests = 0;
 
-function run_test( string $name, callable $fn ): void {
-	global $total_tests, $passed_tests, $failed_tests;
-	$total_tests++;
-	try {
-		$fn();
-		$passed_tests++;
-		echo " [PASS] {$name}\n";
-	} catch ( Throwable $e ) {
-		$failed_tests++;
-		echo " [FAIL] {$name}\n";
-		echo "        " . $e->getMessage() . " (" . $e->getFile() . ":" . $e->getLine() . ")\n";
+if ( ! function_exists( 'run_test' ) ) {
+	function run_test( string $name, callable $fn ): void {
+		global $total_tests, $passed_tests, $failed_tests;
+		$total_tests++;
+		try {
+			$fn();
+			$passed_tests++;
+			echo " [PASS] {$name}\n";
+		} catch ( Throwable $e ) {
+			$failed_tests++;
+			echo " [FAIL] {$name}\n";
+			echo "        " . $e->getMessage() . " (" . $e->getFile() . ":" . $e->getLine() . ")\n";
+		}
 	}
 }
 
-function assert_true( mixed $val, string $msg = 'Expected true' ): void {
-	if ( true !== $val ) {
-		throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+if ( ! function_exists( 'assert_true' ) ) {
+	function assert_true( mixed $val, string $msg = 'Expected true' ): void {
+		if ( true !== $val ) {
+			throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+		}
 	}
 }
 
-function assert_false( mixed $val, string $msg = 'Expected false' ): void {
-	if ( false !== $val ) {
-		throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+if ( ! function_exists( 'assert_false' ) ) {
+	function assert_false( mixed $val, string $msg = 'Expected false' ): void {
+		if ( false !== $val ) {
+			throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+		}
 	}
 }
 
-function assert_equals( mixed $expected, mixed $actual, string $msg = '' ): void {
-	if ( $expected !== $actual ) {
-		throw new RuntimeException( ( $msg ? $msg . ': ' : '' ) . 'Expected ' . var_export( $expected, true ) . ', got ' . var_export( $actual, true ) );
+if ( ! function_exists( 'assert_equals' ) ) {
+	function assert_equals( mixed $expected, mixed $actual, string $msg = '' ): void {
+		if ( $expected !== $actual ) {
+			throw new RuntimeException( ( $msg ? $msg . ': ' : '' ) . 'Expected ' . var_export( $expected, true ) . ', got ' . var_export( $actual, true ) );
+		}
 	}
 }
 
