@@ -306,7 +306,11 @@ class Full_Elementor_MCP_Mutation_Registry {
 		}
 
 		$resolver = $strategy['resource_key_resolver'];
-		$key      = (string) $resolver( $args );
+		$key      = $resolver( $args );
+		if ( is_wp_error( $key ) ) {
+			return $key;
+		}
+		$key = (string) $key;
 
 		if ( '' === trim( $key ) || 'post:0' === $key ) {
 			return new \WP_Error(
@@ -1159,24 +1163,67 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'category'              => self::CATEGORY_COMPOSITE,
 				'managed_safety_action' => true,
 				'managed_delegate'      => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_change_ability' ),
-				'resource_key_resolver' => static function ( array $args = array() ): string {
+				'resource_key_resolver' => static function ( array $args = array() ) {
 					$journal_id = absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
-					if ( class_exists( 'Full_Elementor_MCP_Journal' ) && $journal_id > 0 ) {
+					if ( $journal_id <= 0 ) {
+						if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
+							return sanitize_text_field( (string) $args['target_resource'] );
+						}
+						if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
+							return sanitize_text_field( (string) $args['target_resource_key'] );
+						}
+						return new \WP_Error( 'missing_journal_id', __( 'journal_id (or change_id) is required for undo-change.', 'full-elementor-mcp' ) );
+					}
+					if ( class_exists( 'Full_Elementor_MCP_Journal' ) ) {
 						$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+						if ( empty( $entry ) ) {
+							return new \WP_Error(
+								'journal_entry_not_found',
+								__( 'Journal entry not found.', 'full-elementor-mcp' ),
+								array( 'journal_id' => $journal_id )
+							);
+						}
+						if ( class_exists( 'Full_Elementor_MCP_Undo_Manager' ) ) {
+							$target = Full_Elementor_MCP_Undo_Manager::resolve_undo_target( $entry );
+							if ( is_wp_error( $target ) ) {
+								return $target;
+							}
+							$authoritative_resource = (string) ( $target['target_resource_key'] ?? '' );
+							$target_resource        = (string) ( $args['target_resource'] ?? ( $args['target_resource_key'] ?? '' ) );
+							if ( '' !== $target_resource && $target_resource !== $authoritative_resource && $target_resource !== (string) ( $entry['resource_key'] ?? '' ) ) {
+								return new \WP_Error(
+									'resource_mismatch',
+									sprintf(
+										/* translators: 1: target resource, 2: journal resource */
+										__( 'Target resource "%1$s" does not match journal resource key "%2$s". Cross-resource undo is prohibited.', 'full-elementor-mcp' ),
+										$target_resource,
+										$authoritative_resource
+									),
+									array( 'journal_id' => $journal_id )
+								);
+							}
+							if ( '' !== $authoritative_resource ) {
+								return $authoritative_resource;
+							}
+						}
 						if ( ! empty( $entry['resource_key'] ) ) {
 							return (string) $entry['resource_key'];
 						}
 					}
-					if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
-						return sanitize_text_field( (string) $args['target_resource'] );
-					}
-					if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
-						return sanitize_text_field( (string) $args['target_resource_key'] );
-					}
-					return 'journal:' . $journal_id;
+					return new \WP_Error( 'undo_target_unresolvable', __( 'Could not resolve authoritative target resource key for undo.', 'full-elementor-mcp' ) );
 				},
 				'object_id_resolver'    => static function ( array $args = array() ): int {
-					return absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
+					$journal_id = absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
+					if ( class_exists( 'Full_Elementor_MCP_Journal' ) && $journal_id > 0 && class_exists( 'Full_Elementor_MCP_Undo_Manager' ) ) {
+						$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+						if ( $entry ) {
+							$target = Full_Elementor_MCP_Undo_Manager::resolve_undo_target( $entry );
+							if ( ! is_wp_error( $target ) && ! empty( $target['target_object_id'] ) ) {
+								return (int) $target['target_object_id'];
+							}
+						}
+					}
+					return $journal_id;
 				},
 				'capture_before'        => static function () {
 					return null;

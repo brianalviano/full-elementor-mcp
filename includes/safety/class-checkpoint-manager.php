@@ -873,9 +873,18 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 			// 9. Decide idempotent no-op under lock:
 			if ( hash_equals( (string) $row['state_hash'], (string) $current_hash ) ) {
-				// Terminal confirmed no-op: consume the presented one-time confirmation token exactly once:
+				// 9.1. Immediately re-assert fencing token ownership under lock:
+				$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $fencing_token );
+				if ( is_wp_error( $fence_check ) ) {
+					return $fence_check;
+				}
+
+				// 9.2. Call confirmation consumer and CHECK its result:
 				if ( isset( $options['_confirmation_consumer'] ) && is_callable( $options['_confirmation_consumer'] ) ) {
-					( $options['_confirmation_consumer'] )();
+					$consume_res = ( $options['_confirmation_consumer'] )();
+					if ( is_wp_error( $consume_res ) ) {
+						return $consume_res;
+					}
 				}
 
 				Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );

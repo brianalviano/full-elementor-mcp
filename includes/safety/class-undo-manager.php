@@ -23,6 +23,129 @@ if ( ! defined( 'ABSPATH' ) ) {
 final class Full_Elementor_MCP_Undo_Manager {
 
 	/**
+	 * Resolves the authoritative user-facing undo target from a journal entry.
+	 *
+	 * Returns:
+	 * - target_object_id: int
+	 * - target_resource_key: string
+	 * - is_create: bool
+	 *
+	 * For CREATE journals, maps object_id = 0 and historical create:* resource key
+	 * to target_object_id = created_object_id and target_resource_key = post:N.
+	 * Fails closed with undo_target_unresolvable if created_object_id is missing/<=0.
+	 *
+	 * @param array<string, mixed>|int $entry Journal entry row or journal ID.
+	 * @return array{target_object_id: int, target_resource_key: string, is_create: bool}|\WP_Error
+	 */
+	public static function resolve_undo_target( $entry ) {
+		if ( is_numeric( $entry ) && (int) $entry > 0 && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
+			$entry = Full_Elementor_MCP_Journal::get_entry( (int) $entry );
+		}
+
+		if ( ! is_array( $entry ) || empty( $entry ) ) {
+			return new \WP_Error(
+				'undo_target_unresolvable',
+				__( 'Cannot resolve undo target: invalid or missing journal entry.', 'full-elementor-mcp' )
+			);
+		}
+
+		$ability = (string) ( $entry['ability'] ?? '' );
+		if ( '' === $ability ) {
+			return new \WP_Error(
+				'undo_target_unresolvable',
+				__( 'Cannot resolve undo target: missing ability in journal entry.', 'full-elementor-mcp' ),
+				array( 'journal_id' => $entry['id'] ?? 0 )
+			);
+		}
+
+		$is_create = class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) && Full_Elementor_MCP_Mutation_Registry::is_create( $ability );
+
+		if ( $is_create ) {
+			$created_id = absint( $entry['created_object_id'] ?? 0 );
+			if ( $created_id <= 0 ) {
+				return new \WP_Error(
+					'undo_target_unresolvable',
+					__( 'Cannot undo creation mutation: created_object_id is missing or untracked.', 'full-elementor-mcp' ),
+					array(
+						'journal_id' => $entry['id'] ?? 0,
+						'ability'    => $ability,
+					)
+				);
+			}
+
+			$target_object_id    = $created_id;
+			$target_resource_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
+				$ability,
+				$entry,
+				array(
+					'created_object_id'     => $target_object_id,
+					'post_id'               => $target_object_id,
+					'object_id'             => $target_object_id,
+					'page_id'               => $target_object_id,
+					'template_id'           => $target_object_id,
+					'resource_key'          => (string) ( $entry['resource_key'] ?? '' ),
+					'rollback_resource_key' => 'post:' . $target_object_id,
+				)
+			);
+
+			if ( is_wp_error( $target_resource_key ) || '' === trim( (string) $target_resource_key ) ) {
+				return new \WP_Error(
+					'undo_target_unresolvable',
+					__( 'Could not resolve authoritative target resource key for undo.', 'full-elementor-mcp' ),
+					array(
+						'journal_id' => $entry['id'] ?? 0,
+						'ability'    => $ability,
+					)
+				);
+			}
+
+			$target_resource_key = (string) $target_resource_key;
+		} else {
+			$target_object_id    = (int) ( $entry['object_id'] ?? 0 );
+			$target_resource_key = '';
+
+			if ( class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) ) {
+				$resolved = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
+					$ability,
+					$entry,
+					array(
+						'post_id'      => $target_object_id,
+						'object_id'    => $target_object_id,
+						'page_id'      => $target_object_id,
+						'resource_key' => (string) ( $entry['resource_key'] ?? '' ),
+					)
+				);
+				if ( ! is_wp_error( $resolved ) && '' !== trim( (string) $resolved ) ) {
+					$target_resource_key = (string) $resolved;
+				}
+			}
+
+			if ( '' === $target_resource_key ) {
+				$target_resource_key = (string) ( $entry['resource_key'] ?? '' );
+			}
+
+			if ( '' === trim( $target_resource_key ) ) {
+				return new \WP_Error(
+					'undo_target_unresolvable',
+					__( 'Journal entry lacks a valid canonical resource key.', 'full-elementor-mcp' ),
+					array(
+						'journal_id' => $entry['id'] ?? 0,
+						'ability'    => $ability,
+					)
+				);
+			}
+
+			$target_resource_key = (string) $target_resource_key;
+		}
+
+		return array(
+			'target_object_id'    => $target_object_id,
+			'target_resource_key' => $target_resource_key,
+			'is_create'           => $is_create,
+		);
+	}
+
+	/**
 	 * Reverts a specific committed Journal mutation safely.
 	 *
 	 * Order of operations:
@@ -76,17 +199,19 @@ final class Full_Elementor_MCP_Undo_Manager {
 			return new \WP_Error(
 				'change_not_committed',
 				sprintf(
-					/* translators: %s: status */
-					__( 'Only committed changes can be undone. Target status is "%s".', 'full-elementor-mcp' ),
+					/* translators: 1: journal id, 2: status */
+					__( 'Journal change #%1$d is in status "%2$s" and cannot be undone.', 'full-elementor-mcp' ),
+					$journal_id,
 					$entry['status']
 				),
 				array( 'journal_id' => $journal_id, 'status' => $entry['status'] )
 			);
 		}
 
+		// Verify durable rollback capability:
 		if ( empty( $entry['rollback_supported'] ) ) {
 			return new \WP_Error(
-				'change_not_rollbackable',
+				'rollback_unsupported',
 				__( 'This mutation was marked non-rollbackable (e.g. permanent deletion or irreversible external state).', 'full-elementor-mcp' ),
 				array( 'journal_id' => $journal_id, 'ability' => $entry['ability'] )
 			);
@@ -104,64 +229,14 @@ final class Full_Elementor_MCP_Undo_Manager {
 			);
 		}
 
-		$is_create = Full_Elementor_MCP_Mutation_Registry::is_create( (string) $entry['ability'] );
-		if ( $is_create ) {
-			$created_id = absint( $entry['created_object_id'] ?? 0 );
-			if ( $created_id <= 0 ) {
-				return new \WP_Error(
-					'undo_target_unresolvable',
-					__( 'Cannot undo creation mutation: created_object_id is missing or untracked.', 'full-elementor-mcp' ),
-					array(
-						'journal_id' => $journal_id,
-						'ability'    => $entry['ability'],
-					)
-				);
-			}
-			$target_object_id    = $created_id;
-			$target_resource_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
-				(string) $entry['ability'],
-				$entry,
-				array(
-					'created_object_id'     => $target_object_id,
-					'post_id'               => $target_object_id,
-					'object_id'             => $target_object_id,
-					'page_id'               => $target_object_id,
-					'template_id'           => $target_object_id,
-					'resource_key'          => (string) ( $entry['resource_key'] ?? '' ),
-					'rollback_resource_key' => 'post:' . $target_object_id,
-				)
-			);
-			if ( is_wp_error( $target_resource_key ) || '' === trim( (string) $target_resource_key ) ) {
-				return new \WP_Error(
-					'undo_target_unresolvable',
-					__( 'Could not resolve authoritative target resource key for undo.', 'full-elementor-mcp' ),
-					array(
-						'journal_id' => $journal_id,
-						'ability'    => $entry['ability'],
-					)
-				);
-			}
-			$target_resource_key = (string) $target_resource_key;
-		} else {
-			$target_object_id    = (int) $entry['object_id'];
-			$target_resource_key = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
-				(string) $entry['ability'],
-				$entry,
-				array(
-					'post_id'      => $target_object_id,
-					'object_id'    => $target_object_id,
-					'page_id'      => $target_object_id,
-					'resource_key' => (string) ( $entry['resource_key'] ?? '' ),
-				)
-			);
-			if ( is_wp_error( $target_resource_key ) || '' === trim( (string) $target_resource_key ) ) {
-				$target_resource_key = (string) ( $entry['resource_key'] ?? '' );
-			}
-			if ( '' === trim( (string) $target_resource_key ) ) {
-				return new \WP_Error( 'invalid_resource_key', __( 'Journal entry lacks a valid canonical resource key.', 'full-elementor-mcp' ) );
-			}
-			$target_resource_key = (string) $target_resource_key;
+		$target = self::resolve_undo_target( $entry );
+		if ( is_wp_error( $target ) ) {
+			return $target;
 		}
+
+		$target_object_id    = (int) $target['target_object_id'];
+		$target_resource_key = (string) $target['target_resource_key'];
+		$is_create           = (bool) $target['is_create'];
 
 		$is_dry_run = true === ( $options['dry_run'] ?? false );
 
@@ -561,29 +636,17 @@ final class Full_Elementor_MCP_Undo_Manager {
 			return new \WP_Error( 'missing_journal_id', __( 'journal_id (or change_id) is required for undo-change.', 'full-elementor-mcp' ) );
 		}
 
-		// If caller provided target_resource, validate against journal entry's actual resource_key or authoritative rollback target:
+		// If caller provided target_resource, validate against journal entry's authoritative rollback target:
 		$target_resource = (string) ( $input['target_resource'] ?? ( $input['target_resource_key'] ?? '' ) );
 		if ( '' !== $target_resource && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
 			$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
 			if ( $entry ) {
-				$fwd_res      = (string) ( $entry['resource_key'] ?? '' );
-				$rollback_res = '';
-				if ( class_exists( 'Full_Elementor_MCP_Mutation_Registry' ) && ! empty( $entry['ability'] ) ) {
-					$is_cr = Full_Elementor_MCP_Mutation_Registry::is_create( (string) $entry['ability'] );
-					$t_id  = $is_cr ? absint( $entry['created_object_id'] ?? 0 ) : (int) ( $entry['object_id'] ?? 0 );
-					$res   = Full_Elementor_MCP_Mutation_Registry::resolve_rollback_resource_key(
-						(string) $entry['ability'],
-						$entry,
-						array(
-							'post_id'           => $t_id,
-							'object_id'         => $t_id,
-							'created_object_id' => $t_id,
-						)
-					);
-					if ( is_string( $res ) ) {
-						$rollback_res = $res;
-					}
+				$target = self::resolve_undo_target( $entry );
+				if ( is_wp_error( $target ) ) {
+					return $target;
 				}
+				$fwd_res      = (string) ( $entry['resource_key'] ?? '' );
+				$rollback_res = (string) ( $target['target_resource_key'] ?? '' );
 				if ( $target_resource !== $fwd_res && $target_resource !== $rollback_res ) {
 					return new \WP_Error(
 						'resource_mismatch',
@@ -591,7 +654,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 							/* translators: 1: target resource, 2: journal resource */
 							__( 'Target resource "%1$s" does not match journal resource key "%2$s". Cross-resource undo is prohibited.', 'full-elementor-mcp' ),
 							$target_resource,
-							$fwd_res
+							$rollback_res
 						),
 						array( 'journal_id' => $journal_id )
 					);
