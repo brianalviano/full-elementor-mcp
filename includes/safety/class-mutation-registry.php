@@ -1107,6 +1107,168 @@ class Full_Elementor_MCP_Mutation_Registry {
 		if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
 			Full_Elementor_MCP_Checkpoint_Manager::ensure_restore_strategy_registered();
 		}
+
+		// ---------------------------------------------------------------------
+		// 9. Phase 6 Managed Safety Actions (restore-checkpoint, undo-change, undo-last-change, create-checkpoint)
+		// ---------------------------------------------------------------------
+		self::register(
+			array(
+				'ability'               => 'full-elementor-mcp/restore-checkpoint',
+				'action'                => 'restore_checkpoint',
+				'object_type'           => 'checkpoint',
+				'category'              => self::CATEGORY_COMPOSITE,
+				'managed_safety_action' => true,
+				'managed_delegate'      => array( 'Full_Elementor_MCP_Checkpoint_Manager', 'execute_restore_ability' ),
+				'resource_key_resolver' => static function ( array $args = array() ): string {
+					if ( ! empty( $args['resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['resource_key'] );
+					}
+					$id_or_uuid = $args['checkpoint_id'] ?? ( $args['checkpoint_uuid'] ?? ( $args['id'] ?? '' ) );
+					if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) && ! empty( $id_or_uuid ) ) {
+						$row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $id_or_uuid );
+						if ( ! empty( $row['resource_key'] ) ) {
+							return (string) $row['resource_key'];
+						}
+					}
+					return 'checkpoint:' . (string) $id_or_uuid;
+				},
+				'object_id_resolver'    => static function ( array $args = array() ): int {
+					return absint( $args['checkpoint_id'] ?? ( $args['id'] ?? 0 ) );
+				},
+				'capture_before'        => static function () {
+					return null;
+				},
+				'restore_before'        => static function () {
+					return true;
+				},
+				'supports_rollback'     => true,
+				'is_destructive'        => false,
+				'security_profile'      => 'high_risk',
+			)
+		);
+
+		self::register(
+			array(
+				'ability'               => 'full-elementor-mcp/undo-change',
+				'action'                => 'undo_change',
+				'object_type'           => 'journal',
+				'category'              => self::CATEGORY_COMPOSITE,
+				'managed_safety_action' => true,
+				'managed_delegate'      => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_change_ability' ),
+				'resource_key_resolver' => static function ( array $args = array() ): string {
+					if ( ! empty( $args['resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['resource_key'] );
+					}
+					$journal_id = absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
+					if ( class_exists( 'Full_Elementor_MCP_Journal' ) && $journal_id > 0 ) {
+						$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+						if ( ! empty( $entry['resource_key'] ) ) {
+							return (string) $entry['resource_key'];
+						}
+					}
+					return 'journal:' . $journal_id;
+				},
+				'object_id_resolver'    => static function ( array $args = array() ): int {
+					return absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
+				},
+				'capture_before'        => static function () {
+					return null;
+				},
+				'restore_before'        => static function () {
+					return true;
+				},
+				'supports_rollback'     => true,
+				'is_destructive'        => false,
+				'security_profile'      => 'high_risk',
+			)
+		);
+
+		self::register(
+			array(
+				'ability'               => 'full-elementor-mcp/undo-last-change',
+				'action'                => 'undo_last_change',
+				'object_type'           => 'resource',
+				'category'              => self::CATEGORY_COMPOSITE,
+				'managed_safety_action' => true,
+				'managed_delegate'      => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_last_change_ability' ),
+				'resource_key_resolver' => static function ( array $args = array() ): string {
+					if ( ! empty( $args['resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['resource_key'] );
+					}
+					$id = absint( $args['post_id'] ?? ( $args['page_id'] ?? 0 ) );
+					return self::build_resource_key( 'post', $id );
+				},
+				'object_id_resolver'    => static function ( array $args = array() ): int {
+					return absint( $args['post_id'] ?? ( $args['page_id'] ?? 0 ) );
+				},
+				'capture_before'        => static function () {
+					return null;
+				},
+				'restore_before'        => static function () {
+					return true;
+				},
+				'supports_rollback'     => true,
+				'is_destructive'        => false,
+				'security_profile'      => 'high_risk',
+			)
+		);
+
+		self::register(
+			array(
+				'ability'               => 'full-elementor-mcp/create-checkpoint',
+				'action'                => 'create_checkpoint',
+				'object_type'           => 'checkpoint',
+				'category'              => self::CATEGORY_COMPOSITE,
+				'managed_safety_action' => true,
+				'managed_delegate'      => static function ( array $input ) {
+					$res_key = (string) ( $input['resource_key'] ?? ( ! empty( $input['post_id'] ) ? 'post:' . (int) $input['post_id'] : '' ) );
+					if ( '' === $res_key ) {
+						return new \WP_Error( 'missing_resource_key', __( 'resource_key or post_id is required.', 'full-elementor-mcp' ) );
+					}
+					$label = isset( $input['label'] ) ? sanitize_text_field( (string) $input['label'] ) : 'Manual Checkpoint';
+					if ( strlen( $label ) > 255 ) {
+						$label = substr( $label, 0, 255 );
+					}
+					if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
+						return new \WP_Error( 'checkpoint_unavailable', __( 'Checkpoint manager unavailable.', 'full-elementor-mcp' ) );
+					}
+					$res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save(
+						$res_key,
+						'manual',
+						array(
+							'label'           => $label,
+							'user_id'         => (int) ( $input['user_id'] ?? 0 ),
+							'credential_uuid' => $input['credential_uuid'] ?? null,
+						)
+					);
+					if ( is_wp_error( $res ) ) {
+						return $res;
+					}
+					return array(
+						'success'            => true,
+						'checkpoint_uuid'    => $res['checkpoint_uuid'],
+						'resource_key'       => $res['resource_key'],
+						'restore_capability' => $res['restore_capability'],
+						'state_hash'         => $res['state_hash'],
+					);
+				},
+				'resource_key_resolver' => static function ( array $args = array() ): string {
+					return (string) ( $args['resource_key'] ?? ( ! empty( $args['post_id'] ) ? 'post:' . (int) $args['post_id'] : '' ) );
+				},
+				'object_id_resolver'    => static function ( array $args = array() ): int {
+					return absint( $args['post_id'] ?? 0 );
+				},
+				'capture_before'        => static function () {
+					return null;
+				},
+				'restore_before'        => static function () {
+					return true;
+				},
+				'supports_rollback'     => false,
+				'is_destructive'        => false,
+				'security_profile'      => 'standard',
+			)
+		);
 	}
 
 	// -------------------------------------------------------------------------

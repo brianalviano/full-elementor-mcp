@@ -98,6 +98,16 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 	}
 
 	/**
+	 * Checks if an active encryption key can be successfully resolved.
+	 *
+	 * @return bool True if active key is available.
+	 */
+	public static function has_active_key(): bool {
+		$res = self::get_active_key();
+		return ! is_wp_error( $res );
+	}
+
+	/**
 	 * Resolves active encryption key from configuration constant, keyring, or WP salt fallback.
 	 *
 	 * @return array{key_id: string, version: int, raw_key: string}|\WP_Error

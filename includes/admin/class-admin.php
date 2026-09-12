@@ -292,6 +292,10 @@ class Full_Elementor_MCP_Admin {
 				   class="nav-tab <?php echo esc_attr( 'changelog' === $active_tab ? 'nav-tab-active' : '' ); ?>">
 					<?php esc_html_e( 'Changelog', 'full-elementor-mcp' ); ?>
 				</a>
+				<a href="<?php echo esc_url( admin_url( 'options-general.php?page=' . self::PAGE_SLUG . '&tab=safety' ) ); ?>"
+				   class="nav-tab <?php echo esc_attr( 'safety' === $active_tab ? 'nav-tab-active' : '' ); ?>">
+					<?php esc_html_e( 'Safety & Recovery', 'full-elementor-mcp' ); ?>
+				</a>
 			</nav>
 
 			<!-- Content -->
@@ -303,6 +307,10 @@ class Full_Elementor_MCP_Admin {
 					include FULL_ELEMENTOR_MCP_DIR . 'includes/admin/views/page-prompts.php';
 				} elseif ( 'changelog' === $active_tab ) {
 					include FULL_ELEMENTOR_MCP_DIR . 'includes/admin/views/page-changelog.php';
+				} elseif ( 'safety' === $active_tab ) {
+					if ( class_exists( 'Full_Elementor_MCP_Safety_Admin' ) ) {
+						Full_Elementor_MCP_Safety_Admin::render();
+					}
 				} else {
 					include FULL_ELEMENTOR_MCP_DIR . 'includes/admin/views/page-tools.php';
 				}

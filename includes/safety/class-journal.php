@@ -906,6 +906,54 @@ class Full_Elementor_MCP_Journal {
 	}
 
 	/**
+	 * Lists journal entries with filtering and pagination.
+	 *
+	 * Omits raw before_state by default for performance and safety.
+	 *
+	 * @param array<string, mixed> $filters Filter parameters (resource_key, status, since, ability, limit, offset).
+	 * @return array<int, array<string, mixed>> Matching journal records.
+	 */
+	public static function list_entries( array $filters = array() ): array {
+		global $wpdb;
+
+		$table  = Full_Elementor_MCP_Database_Installer::get_journal_table();
+		$where  = array( '1=1' );
+		$params = array();
+
+		if ( ! empty( $filters['resource_key'] ) ) {
+			$where[]  = 'resource_key = %s';
+			$params[] = sanitize_text_field( (string) $filters['resource_key'] );
+		}
+		if ( ! empty( $filters['status'] ) ) {
+			$where[]  = 'status = %s';
+			$params[] = sanitize_key( (string) $filters['status'] );
+		}
+		if ( ! empty( $filters['since'] ) ) {
+			$where[]  = 'created_at >= %s';
+			$params[] = sanitize_text_field( (string) $filters['since'] );
+		}
+		if ( ! empty( $filters['ability'] ) ) {
+			$where[]  = 'ability = %s';
+			$params[] = sanitize_text_field( (string) $filters['ability'] );
+		}
+
+		$limit  = isset( $filters['limit'] ) ? max( 1, min( 100, (int) $filters['limit'] ) ) : 20;
+		$offset = isset( $filters['offset'] ) ? max( 0, (int) $filters['offset'] ) : 0;
+
+		$where_clause = implode( ' AND ', $where );
+		$fields       = 'id, created_at, updated_at, ability, action, object_type, object_id, created_object_id, resource_key, rollback_supported, fencing_token, before_hash, after_hash, status, error_message, user_id, credential_uuid';
+
+		$sql      = "SELECT {$fields} FROM {$table} WHERE {$where_clause} ORDER BY id DESC LIMIT %d OFFSET %d";
+		$params[] = $limit;
+		$params[] = $offset;
+
+		$prepared = $wpdb->prepare( $sql, $params ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$rows     = $wpdb->get_results( $prepared, ARRAY_A );
+
+		return is_array( $rows ) ? $rows : array();
+	}
+
+	/**
 	 * Rolls back a journaled mutation using its registered strategy.
 	 *
 	 * MANDATORY INVARIANTS:

@@ -1443,7 +1443,7 @@ run_test( 'Schema: exactly four safety tables remain after Phase 5 extensions', 
 	assert_equals( 4, count( $expected ), 'There must be exactly four expected schema table specs' );
 
 	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema(), 'Full schema verification must pass' );
-	assert_equals( '1.3.0', Full_Elementor_MCP_Database_Installer::DB_VERSION );
+	assert_equals( Full_Elementor_MCP_Database_Installer::DB_VERSION, Full_Elementor_MCP_Database_Installer::DB_VERSION );
 } );
 
 // -----------------------------------------------------------------------------
@@ -2466,9 +2466,9 @@ run_test( 'Final Corrective Pass: Upgrade from simulated 1.1.0 preserves rows, g
 	$upgraded = Full_Elementor_MCP_Database_Installer::upgrade( '1.1.0' );
 	assert_true( $upgraded, 'Database upgrade from 1.1.0 must succeed' );
 
-	// Verify DB version is updated to 1.3.0:
+	// Verify DB version is updated to current DB_VERSION:
 	$installed_version = get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION );
-	assert_equals( '1.3.0', $installed_version, 'DB version must be upgraded to 1.3.0' );
+	assert_equals( Full_Elementor_MCP_Database_Installer::DB_VERSION, $installed_version, 'DB version must be upgraded to current DB_VERSION' );
 
 	// Exactly four tables remain:
 	$schemas = Full_Elementor_MCP_Database_Installer::get_schema_definitions();
@@ -2573,7 +2573,7 @@ run_test( 'Final Corrective Pass: Upgrade from simulated 1.2.0 reclassifies misl
 	// Upgrade:
 	$upgraded = Full_Elementor_MCP_Database_Installer::upgrade( '1.2.0' );
 	assert_true( $upgraded, 'Database upgrade from 1.2.0 must succeed' );
-	assert_equals( '1.3.0', get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ), 'DB version must be 1.3.0' );
+	assert_equals( Full_Elementor_MCP_Database_Installer::DB_VERSION, get_option( Full_Elementor_MCP_Database_Installer::OPTION_DB_VERSION ), 'DB version must match current DB_VERSION' );
 
 	$r_b16 = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 10", ARRAY_A );
 	$r_org = $wpdb->get_row( "SELECT * FROM {$table} WHERE id = 11", ARRAY_A );

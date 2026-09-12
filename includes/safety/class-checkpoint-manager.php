@@ -325,6 +325,65 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 	}
 
 	/**
+	 * Lists checkpoint metadata rows with filtering and pagination.
+	 *
+	 * Omits encrypted_payload, nonce, auth_tag by default for security and performance.
+	 * Annotates rows with historical profile classification.
+	 *
+	 * @param array<string, mixed> $filters Filter parameters (resource_key, checkpoint_type, restore_capability, since, limit, offset).
+	 * @return array<int, array<string, mixed>> Matching checkpoint records.
+	 */
+	public static function list_checkpoints( array $filters = array() ): array {
+		global $wpdb;
+
+		$table  = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+		$where  = array( '1=1' );
+		$params = array();
+
+		if ( ! empty( $filters['resource_key'] ) ) {
+			$where[]  = 'resource_key = %s';
+			$params[] = sanitize_text_field( (string) $filters['resource_key'] );
+		}
+		if ( ! empty( $filters['checkpoint_type'] ) ) {
+			$where[]  = 'checkpoint_type = %s';
+			$params[] = sanitize_key( (string) $filters['checkpoint_type'] );
+		}
+		if ( ! empty( $filters['restore_capability'] ) ) {
+			$where[]  = 'restore_capability = %s';
+			$params[] = sanitize_key( (string) $filters['restore_capability'] );
+		}
+		if ( ! empty( $filters['since'] ) ) {
+			$where[]  = 'created_at >= %s';
+			$params[] = sanitize_text_field( (string) $filters['since'] );
+		}
+
+		$limit  = isset( $filters['limit'] ) ? max( 1, min( 100, (int) $filters['limit'] ) ) : 20;
+		$offset = isset( $filters['offset'] ) ? max( 0, (int) $filters['offset'] ) : 0;
+
+		$where_clause = implode( ' AND ', $where );
+		$fields       = 'id, checkpoint_uuid, created_at, resource_key, object_type, object_id, checkpoint_type, restore_capability, payload_schema_version, crypto_envelope_version, encryption_algorithm, key_version, state_hash, size_bytes, label, source_ability, source_journal_id, created_by, is_pinned';
+
+		$sql      = "SELECT {$fields} FROM {$table} WHERE {$where_clause} ORDER BY id DESC LIMIT %d OFFSET %d";
+		$params[] = $limit;
+		$params[] = $offset;
+
+		$prepared = $wpdb->prepare( $sql, $params ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$rows     = $wpdb->get_results( $prepared, ARRAY_A );
+
+		if ( ! is_array( $rows ) ) {
+			return array();
+		}
+
+		foreach ( $rows as &$row ) {
+			$row['user_id']            = $row['created_by'] ?? null;
+			$row['historical_profile'] = self::classify_historical_profile( $row );
+		}
+		unset( $row );
+
+		return $rows;
+	}
+
+	/**
 	 * Decrypts a checkpoint row into its validated plaintext state array.
 	 *
 	 * @param int|string|array<string, mixed> $checkpoint Numeric ID, UUID string, or raw DB row.
@@ -924,5 +983,127 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			'supports_rollback'     => true,
 			'is_destructive'        => false,
 		) );
+	}
+
+	/**
+	 * Delegate for MCP ability 'full-elementor-mcp/restore-checkpoint'.
+	 *
+	 * Supports dry_run preview as well as non-dry-run execution.
+	 *
+	 * @param array<string, mixed> $input Input arguments.
+	 * @return array<string, mixed>|\WP_Error Result or error.
+	 */
+	public static function execute_restore_ability( array $input ) {
+		$id_or_uuid = $input['checkpoint_id'] ?? ( $input['checkpoint_uuid'] ?? ( $input['id'] ?? null ) );
+		if ( empty( $id_or_uuid ) ) {
+			return new \WP_Error( 'missing_checkpoint_identifier', __( 'checkpoint_id or checkpoint_uuid is required for restore-checkpoint.', 'full-elementor-mcp' ) );
+		}
+
+		$is_dry_run = ( true === ( $input['dry_run'] ?? false ) ) || ( true === ( $input['_safety']['dry_run'] ?? false ) );
+
+		$row = self::get_checkpoint( $id_or_uuid );
+		if ( empty( $row ) ) {
+			return new \WP_Error( 'checkpoint_not_found', __( 'Target checkpoint not found.', 'full-elementor-mcp' ), array( 'checkpoint' => $id_or_uuid ) );
+		}
+
+		$resource_key = (string) $row['resource_key'];
+
+		// Audit restore start:
+		if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+			Full_Elementor_MCP_Audit_Logger::log(
+				Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_RESTORE_STARTED,
+				array(
+					'ability'         => 'full-elementor-mcp/restore-checkpoint',
+					'resource_key'    => $resource_key,
+					'checkpoint_uuid' => $row['checkpoint_uuid'],
+					'user_id'         => (int) ( $input['user_id'] ?? 0 ),
+					'credential_uuid' => $input['credential_uuid'] ?? null,
+					'metadata'        => array( 'dry_run' => $is_dry_run ),
+				)
+			);
+		}
+
+		if ( $is_dry_run ) {
+			$dec     = self::decrypt_checkpoint( $row );
+			$can_dec = ! is_wp_error( $dec );
+			$profile = $can_dec ? Full_Elementor_MCP_Checkpoint_Strategies::resolve_payload_profile( $row, $dec ) : 'unknown';
+
+			return array(
+				'dry_run'               => true,
+				'allowed'               => true,
+				'checkpoint_uuid'       => $row['checkpoint_uuid'],
+				'resource_key'          => $resource_key,
+				'restore_capability'    => $row['restore_capability'],
+				'can_decrypt'           => $can_dec,
+				'payload_profile'       => is_string( $profile ) ? $profile : 'unknown',
+				'confirmation_required' => true,
+			);
+		}
+
+		$options = array(
+			'user_id'         => (int) ( $input['user_id'] ?? 0 ),
+			'credential_uuid' => $input['credential_uuid'] ?? null,
+		);
+
+		$res = self::restore( $id_or_uuid, $options );
+
+		if ( is_wp_error( $res ) ) {
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_RESTORE_FAILED,
+					array(
+						'ability'         => 'full-elementor-mcp/restore-checkpoint',
+						'resource_key'    => $resource_key,
+						'checkpoint_uuid' => $row['checkpoint_uuid'],
+						'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
+						'error_code'      => $res->get_error_code(),
+						'user_id'         => (int) ( $input['user_id'] ?? 0 ),
+						'credential_uuid' => $input['credential_uuid'] ?? null,
+					)
+				);
+			}
+			return $res;
+		}
+
+		if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+			Full_Elementor_MCP_Audit_Logger::log(
+				Full_Elementor_MCP_Audit_Logger::EVENT_CHECKPOINT_RESTORED,
+				array(
+					'ability'         => 'full-elementor-mcp/restore-checkpoint',
+					'resource_key'    => $resource_key,
+					'checkpoint_uuid' => $row['checkpoint_uuid'],
+					'change_id'       => $res['journal_id'] ?? null,
+					'result_status'   => 'success',
+					'user_id'         => (int) ( $input['user_id'] ?? 0 ),
+					'credential_uuid' => $input['credential_uuid'] ?? null,
+					'metadata'        => array(
+						'pre_restore_uuid' => $res['pre_restore_uuid'] ?? null,
+						'noop'             => ! empty( $res['noop'] ),
+					),
+				)
+			);
+		}
+
+		return $res;
+	}
+
+	/**
+	 * Classifies the historical profile of a checkpoint from its metadata.
+	 *
+	 * Never decrypts the payload.
+	 *
+	 * @param array<string, mixed> $row Checkpoint DB row.
+	 * @return string Historical profile label.
+	 */
+	public static function classify_historical_profile( array $row ): string {
+		$envelope_version = isset( $row['crypto_envelope_version'] ) ? (int) $row['crypto_envelope_version'] : 2;
+		if ( 1 === $envelope_version ) {
+			return 'legacy_518_v1';
+		}
+		$schema_version = isset( $row['payload_schema_version'] ) ? (int) $row['payload_schema_version'] : 2;
+		if ( 2 === $schema_version ) {
+			return 'modern_v2';
+		}
+		return 'transitional_v1';
 	}
 }

@@ -195,6 +195,7 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/class-atomic-styles.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/abilities/class-atomic-widget-abilities.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/abilities/class-atomic-layout-abilities.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/abilities/class-safety-abilities.php';
 
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/abilities/class-ability-registrar.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/class-plugin.php';
@@ -202,9 +203,10 @@ function full_elementor_mcp_init(): void {
 	// Admin.
 	if ( is_admin() ) {
 		require_once FULL_ELEMENTOR_MCP_DIR . 'includes/admin/class-admin.php';
+		require_once FULL_ELEMENTOR_MCP_DIR . 'includes/admin/class-safety-admin.php';
 	}
 
-	// Safety subsystem foundation (Phases 1-4).
+	// Safety subsystem foundation (Phases 1-6).
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-database-installer.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-safety-settings.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-lock-manager.php';
@@ -221,6 +223,8 @@ function full_elementor_mcp_init(): void {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-checkpoint-crypto.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-checkpoint-strategies.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-checkpoint-manager.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-audit-logger.php';
+	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-undo-manager.php';
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-mutation-middleware.php';
 
 	// Initialize mutation strategies:

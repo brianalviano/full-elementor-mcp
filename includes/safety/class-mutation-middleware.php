@@ -39,6 +39,18 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		'resource_key',
 		'rollback_supported',
 		'created_object_id',
+		'managed_safety_action',
+		'managed_delegate',
+	);
+
+	/**
+	 * Allowlist of ability names permitted to execute in managed safety mutation mode.
+	 */
+	const ALLOWED_MANAGED_SAFETY_ABILITIES = array(
+		'full-elementor-mcp/restore-checkpoint',
+		'full-elementor-mcp/undo-change',
+		'full-elementor-mcp/undo-last-change',
+		'full-elementor-mcp/create-checkpoint',
 	);
 
 	/**
@@ -174,6 +186,16 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		// 4. Global disabled tool gate (applies to readonly and mutations alike):
 		$disabled_tools = get_option( 'full_elementor_mcp_disabled_tools', array() );
 		if ( is_array( $disabled_tools ) && in_array( $ability, $disabled_tools, true ) ) {
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_BLOCKED_DISABLED,
+					array(
+						'ability'  => $ability,
+						'severity' => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+						'args'     => $input,
+					)
+				);
+			}
 			return new \WP_Error(
 				'ability_disabled',
 				sprintf(
@@ -200,6 +222,16 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		}
 
 		if ( ! $is_readonly && 'read_only' === ( $scope['mode'] ?? '' ) ) {
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_BLOCKED_SCOPE,
+					array(
+						'ability'  => $ability,
+						'severity' => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+						'args'     => $input,
+					)
+				);
+			}
 			return new \WP_Error(
 				'credential_scope_readonly',
 				__( 'Mutation rejected: active credential scope is read-only.', 'full-elementor-mcp' ),
@@ -210,6 +242,16 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		if ( class_exists( 'Full_Elementor_MCP_Security_Guard' ) ) {
 			$annotations = array( 'readonly' => $is_readonly );
 			if ( ! Full_Elementor_MCP_Security_Guard::is_ability_in_scope( $ability, $annotations, $scope ) ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_BLOCKED_SCOPE,
+						array(
+							'ability'  => $ability,
+							'severity' => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+							'args'     => $input,
+						)
+					);
+				}
 				return new \WP_Error(
 					'credential_scope_denied',
 					sprintf(
@@ -230,6 +272,16 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				return $perm_res;
 			}
 			if ( false === $perm_res ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_BLOCKED_PERMISSION,
+						array(
+							'ability'  => $ability,
+							'severity' => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+							'args'     => $input,
+						)
+					);
+				}
 				return new \WP_Error(
 					'permission_denied',
 					__( 'You do not have permission to execute this ability.', 'full-elementor-mcp' ),
@@ -334,6 +386,16 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		if ( ! empty( $security_profile['requires_unfiltered_html'] ) ) {
 			if ( ! function_exists( 'current_user_can' ) || ! current_user_can( 'unfiltered_html' ) ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_BLOCKED_SECURITY,
+						array(
+							'ability'  => $ability,
+							'severity' => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+							'args'     => $input,
+						)
+					);
+				}
 				return new \WP_Error(
 					'unfiltered_html_required',
 					__( 'This mutation contains raw HTML, script, or stylesheet rules requiring the unfiltered_html capability.', 'full-elementor-mcp' ),
@@ -372,9 +434,26 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			}
 
 			if ( 'completed' === ( $precheck['status'] ?? '' ) ) {
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_IDEMPOTENT_REPLAY,
+						array(
+							'ability'         => $ability,
+							'resource_key'    => $resource_key ?? '',
+							'user_id'         => $user_id,
+							'credential_uuid' => $cred_uuid,
+							'severity'        => Full_Elementor_MCP_Audit_Logger::SEV_NOTICE,
+							'metadata'        => array( 'idempotency_key' => $idempotency_key ),
+						)
+					);
+				}
 				return $precheck['result'] ?? array( 'success' => true );
 			}
 		}
+
+		// Determine if ability is a managed safety action:
+		$is_managed_safety = ! empty( $strategy['managed_safety_action'] )
+			&& in_array( $ability, self::ALLOWED_MANAGED_SAFETY_ABILITIES, true );
 
 		// 11. High-Risk / Protected / Irreversible Confirmation Gate:
 		$requires_confirmation = ! empty( $security_profile['high_risk'] )
@@ -384,6 +463,10 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		// 11. Dry-Run Handling (predictive execution analysis):
 		if ( $is_dry_run ) {
+			if ( $is_managed_safety && ! empty( $strategy['managed_delegate'] ) && is_callable( $strategy['managed_delegate'] ) ) {
+				return call_user_func( $strategy['managed_delegate'], $input );
+			}
+
 			$chk_req = false;
 			$chk_sup = false;
 			$chk_cap = 'unsupported';
@@ -424,6 +507,19 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 					$resource_key
 				);
 				if ( is_wp_error( $val_res ) ) {
+					if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+						Full_Elementor_MCP_Audit_Logger::log(
+							Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_BLOCKED_CONFIRMATION,
+							array(
+								'ability'      => $ability,
+								'resource_key' => $resource_key,
+								'user_id'      => $user_id,
+								'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+								'error_code'   => $val_res->get_error_code(),
+								'args'         => $input,
+							)
+						);
+					}
 					return $val_res;
 				}
 			} else {
@@ -438,6 +534,22 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				);
 				if ( is_wp_error( $challenge ) ) {
 					return $challenge;
+				}
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_CONFIRMATION_ISSUED,
+						array(
+							'ability'      => $ability,
+							'resource_key' => $resource_key,
+							'user_id'      => $user_id,
+							'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_NOTICE,
+							'metadata'     => array(
+								'challenge_token' => $challenge['confirmation_token'] ?? '',
+								'expires_at_utc'  => $challenge['expires_at_utc'] ?? '',
+							),
+							'args'         => $input,
+						)
+					);
 				}
 				return new \WP_Error(
 					'confirmation_required',
@@ -472,10 +584,137 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 			if ( 'completed' === ( $claim['status'] ?? '' ) ) {
 				// Replay cached successful result without re-executing mutation:
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_IDEMPOTENT_REPLAY,
+						array(
+							'ability'         => $ability,
+							'resource_key'    => $resource_key,
+							'user_id'         => $user_id,
+							'credential_uuid' => $cred_uuid,
+							'severity'        => Full_Elementor_MCP_Audit_Logger::SEV_NOTICE,
+							'metadata'        => array( 'idempotency_key' => $idempotency_key ),
+						)
+					);
+				}
 				return $claim['result'] ?? array( 'success' => true );
 			}
 
 			$idemp_token_key = $claim['token_key'] ?? null;
+		}
+
+		// 14.5. Managed Safety Action Execution (Phase 6):
+		// Checkpoint restores and Undos manage their own WAL / locks.
+		// Caller input must NEVER declare this; it is strictly read from Mutation Registry.
+		if ( $is_managed_safety ) {
+			$delegate = $strategy['managed_delegate'] ?? null;
+			if ( ! is_callable( $delegate ) ) {
+				if ( $idemp_token_key ) {
+					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'invalid_safety_delegate' );
+				}
+				return new \WP_Error(
+					'invalid_safety_delegate',
+					__( 'Internal error: registered safety action delegate is not callable.', 'full-elementor-mcp' ),
+					array( 'ability' => $ability )
+				);
+			}
+
+			// Atomically consume confirmation token if required:
+			if ( $requires_confirmation && ! empty( $confirmation_token ) ) {
+				$consume_res = Full_Elementor_MCP_Confirmation_Manager::consume(
+					$confirmation_token,
+					$ability,
+					$input,
+					$user_id,
+					$cred_uuid,
+					$resource_key
+				);
+				if ( is_wp_error( $consume_res ) ) {
+					if ( $idemp_token_key ) {
+						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $consume_res->get_error_code() );
+					}
+					return $consume_res;
+				}
+			}
+
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_STARTED,
+					array(
+						'event_uuid'   => $req_uuid,
+						'request_uuid' => $req_uuid,
+						'ability'      => $ability,
+						'resource_key' => $resource_key,
+						'user_id'      => $user_id,
+						'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_INFO,
+						'args'         => $input,
+					)
+				);
+			}
+
+			// Execute managed safety delegate with context parameters:
+			$delegate_args = array_merge(
+				$input,
+				array(
+					'_request_uuid' => $req_uuid,
+					'_owner_id'     => $owner_id,
+					'_user_id'      => $user_id,
+					'_cred_uuid'    => $cred_uuid,
+					'_resource_key' => $resource_key,
+				)
+			);
+
+			$delegate_result = call_user_func( $delegate, $delegate_args );
+
+			if ( is_wp_error( $delegate_result ) ) {
+				if ( $idemp_token_key ) {
+					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $delegate_result->get_error_code() );
+				}
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
+						array(
+							'event_uuid'   => wp_generate_uuid4(),
+							'request_uuid' => $req_uuid,
+							'ability'      => $ability,
+							'resource_key' => $resource_key,
+							'user_id'      => $user_id,
+							'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+							'error_code'   => $delegate_result->get_error_code(),
+							'metadata'     => array( 'error' => $delegate_result->get_error_message() ),
+						)
+					);
+				}
+				return $delegate_result;
+			}
+
+			// Complete idempotency claim:
+			if ( $idemp_token_key ) {
+				$res_arr = is_array( $delegate_result ) ? $delegate_result : array( 'result' => $delegate_result );
+				$journal_id = isset( $delegate_result['journal_id'] ) ? (int) $delegate_result['journal_id'] : null;
+				$created_id = isset( $delegate_result['created_id'] ) ? (int) $delegate_result['created_id'] : null;
+				Full_Elementor_MCP_Idempotency_Manager::complete( $idemp_token_key, $owner_id, $res_arr, $journal_id, $created_id );
+			}
+
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_COMMITTED,
+					array(
+						'event_uuid'   => wp_generate_uuid4(),
+						'request_uuid' => $req_uuid,
+						'ability'      => $ability,
+						'resource_key' => $resource_key,
+						'user_id'      => $user_id,
+						'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_INFO,
+						'metadata'     => array(
+							'managed_safety' => true,
+							'result_status'  => is_array( $delegate_result ) ? ( $delegate_result['status'] ?? 'success' ) : 'success',
+						),
+					)
+				);
+			}
+
+			return $delegate_result;
 		}
 
 		// 15. Acquire Phase 1 Lock:
@@ -672,6 +911,22 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				}
 			}
 
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_STARTED,
+					array(
+						'event_uuid'   => $req_uuid,
+						'request_uuid' => $req_uuid,
+						'ability'      => $ability,
+						'resource_key' => $resource_key,
+						'journal_id'   => $journal_id,
+						'user_id'      => $user_id,
+						'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_INFO,
+						'args'         => $input,
+					)
+				);
+			}
+
 			$result = call_user_func( $orig_execute_cb, $input );
 
 			if ( is_wp_error( $result ) ) {
@@ -686,10 +941,47 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 					} elseif ( $idemp_token_key ) {
 						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $result->get_error_code() );
 					}
+
+					if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+						$ev_type = ( is_wp_error( $rollback_res ) || $must_recover )
+							? Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_RECOVERY_REQUIRED
+							: Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_ROLLED_BACK;
+						$ev_sev  = ( is_wp_error( $rollback_res ) || $must_recover )
+							? Full_Elementor_MCP_Audit_Logger::SEV_CRITICAL
+							: Full_Elementor_MCP_Audit_Logger::SEV_WARNING;
+						Full_Elementor_MCP_Audit_Logger::log(
+							$ev_type,
+							array(
+								'event_uuid'   => wp_generate_uuid4(),
+								'request_uuid' => $req_uuid,
+								'ability'      => $ability,
+								'resource_key' => $resource_key,
+								'journal_id'   => $journal_id,
+								'user_id'      => $user_id,
+								'severity'     => $ev_sev,
+								'error_code'   => $result->get_error_code(),
+							)
+						);
+					}
 				} else {
 					Full_Elementor_MCP_Journal::mark_failed( $journal_id, $result->get_error_code(), $fencing_token );
 					if ( $idemp_token_key ) {
 						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $result->get_error_code() );
+					}
+					if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+						Full_Elementor_MCP_Audit_Logger::log(
+							Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
+							array(
+								'event_uuid'   => wp_generate_uuid4(),
+								'request_uuid' => $req_uuid,
+								'ability'      => $ability,
+								'resource_key' => $resource_key,
+								'journal_id'   => $journal_id,
+								'user_id'      => $user_id,
+								'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+								'error_code'   => $result->get_error_code(),
+							)
+						);
 					}
 				}
 				return $result;
@@ -754,10 +1046,46 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 						} elseif ( $idemp_token_key ) {
 							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $error_code );
 						}
+						if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+							$ev_type = is_wp_error( $rollback_res )
+								? Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_RECOVERY_REQUIRED
+								: Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_ROLLED_BACK;
+							$ev_sev  = is_wp_error( $rollback_res )
+								? Full_Elementor_MCP_Audit_Logger::SEV_CRITICAL
+								: Full_Elementor_MCP_Audit_Logger::SEV_WARNING;
+							Full_Elementor_MCP_Audit_Logger::log(
+								$ev_type,
+								array(
+									'event_uuid'   => wp_generate_uuid4(),
+									'request_uuid' => $req_uuid,
+									'ability'      => $ability,
+									'resource_key' => $resource_key,
+									'journal_id'   => $journal_id,
+									'user_id'      => $user_id,
+									'severity'     => $ev_sev,
+									'error_code'   => $error_code,
+								)
+							);
+						}
 					} else {
 						Full_Elementor_MCP_Journal::mark_failed( $journal_id, $error_code, $fencing_token );
 						if ( $idemp_token_key ) {
 							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $error_code );
+						}
+						if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+							Full_Elementor_MCP_Audit_Logger::log(
+								Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
+								array(
+									'event_uuid'   => wp_generate_uuid4(),
+									'request_uuid' => $req_uuid,
+									'ability'      => $ability,
+									'resource_key' => $resource_key,
+									'journal_id'   => $journal_id,
+									'user_id'      => $user_id,
+									'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+									'error_code'   => $error_code,
+								)
+							);
 						}
 					}
 					return new \WP_Error( $error_code, $error_msg, $error_data );
@@ -780,6 +1108,27 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 						} elseif ( $idemp_token_key ) {
 							Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $tree_read->get_error_code() );
 						}
+						if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+							$ev_type = is_wp_error( $rollback_res )
+								? Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_RECOVERY_REQUIRED
+								: Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_ROLLED_BACK;
+							$ev_sev  = is_wp_error( $rollback_res )
+								? Full_Elementor_MCP_Audit_Logger::SEV_CRITICAL
+								: Full_Elementor_MCP_Audit_Logger::SEV_WARNING;
+							Full_Elementor_MCP_Audit_Logger::log(
+								$ev_type,
+								array(
+									'event_uuid'   => wp_generate_uuid4(),
+									'request_uuid' => $req_uuid,
+									'ability'      => $ability,
+									'resource_key' => $resource_key,
+									'journal_id'   => $journal_id,
+									'user_id'      => $user_id,
+									'severity'     => $ev_sev,
+									'error_code'   => $tree_read->get_error_code(),
+								)
+							);
+						}
 						return $tree_read;
 					}
 
@@ -795,6 +1144,27 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 							if ( $idemp_token_key ) {
 								Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, 'post_mutation_validation_failed' );
 							}
+						}
+						if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+							$ev_type = is_wp_error( $rollback_res )
+								? Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_RECOVERY_REQUIRED
+								: Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_ROLLED_BACK;
+							$ev_sev  = is_wp_error( $rollback_res )
+								? Full_Elementor_MCP_Audit_Logger::SEV_CRITICAL
+								: Full_Elementor_MCP_Audit_Logger::SEV_WARNING;
+							Full_Elementor_MCP_Audit_Logger::log(
+								$ev_type,
+								array(
+									'event_uuid'   => wp_generate_uuid4(),
+									'request_uuid' => $req_uuid,
+									'ability'      => $ability,
+									'resource_key' => $resource_key,
+									'journal_id'   => $journal_id,
+									'user_id'      => $user_id,
+									'severity'     => $ev_sev,
+									'error_code'   => 'post_mutation_validation_failed',
+								)
+							);
 						}
 						return new \WP_Error(
 							'post_mutation_validation_failed',
@@ -830,13 +1200,46 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				if ( $idemp_token_key ) {
 					Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required( $idemp_token_key, $owner_id, $journal_id, $commit_res->get_error_code() );
 				}
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
+						array(
+							'event_uuid'   => wp_generate_uuid4(),
+							'request_uuid' => $req_uuid,
+							'ability'      => $ability,
+							'resource_key' => $resource_key,
+							'journal_id'   => $journal_id,
+							'user_id'      => $user_id,
+							'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_CRITICAL,
+							'error_code'   => $commit_res->get_error_code(),
+						)
+					);
+				}
 				return $commit_res;
 			}
 
-			// 23. Complete Idempotency Record:
+			// Complete Idempotency Record:
 			if ( $idemp_token_key ) {
 				$res_arr = is_array( $result ) ? $result : array( 'result' => $result );
 				Full_Elementor_MCP_Idempotency_Manager::complete( $idemp_token_key, $owner_id, $res_arr, $journal_id, $created_id );
+			}
+
+			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+				Full_Elementor_MCP_Audit_Logger::log(
+					Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_COMMITTED,
+					array(
+						'event_uuid'   => wp_generate_uuid4(),
+						'request_uuid' => $req_uuid,
+						'ability'      => $ability,
+						'resource_key' => $resource_key,
+						'journal_id'   => $journal_id,
+						'user_id'      => $user_id,
+						'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_INFO,
+						'metadata'     => array(
+							'created_id' => $created_id,
+						),
+					)
+				);
 			}
 
 		} catch ( \Throwable $e ) {
@@ -851,10 +1254,48 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				} elseif ( $idemp_token_key ) {
 					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $raw_msg );
 				}
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					$ev_type = is_wp_error( $rollback_res )
+						? Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_RECOVERY_REQUIRED
+						: Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_ROLLED_BACK;
+					$ev_sev  = is_wp_error( $rollback_res )
+						? Full_Elementor_MCP_Audit_Logger::SEV_CRITICAL
+						: Full_Elementor_MCP_Audit_Logger::SEV_WARNING;
+					Full_Elementor_MCP_Audit_Logger::log(
+						$ev_type,
+						array(
+							'event_uuid'   => wp_generate_uuid4(),
+							'request_uuid' => $req_uuid,
+							'ability'      => $ability,
+							'resource_key' => $resource_key,
+							'journal_id'   => $journal_id,
+							'user_id'      => $user_id,
+							'severity'     => $ev_sev,
+							'error_code'   => 'mutation_exception',
+							'metadata'     => array( 'error' => $clean_msg ),
+						)
+					);
+				}
 			} else {
 				Full_Elementor_MCP_Journal::mark_failed( $journal_id, $raw_msg, $fencing_token );
 				if ( $idemp_token_key ) {
 					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $raw_msg );
+				}
+				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+					Full_Elementor_MCP_Audit_Logger::log(
+						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
+						array(
+							'event_uuid'   => wp_generate_uuid4(),
+							'request_uuid' => $req_uuid,
+							'ability'      => $ability,
+							'resource_key' => $resource_key,
+							'journal_id'   => $journal_id,
+							'user_id'      => $user_id,
+							'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+							'error_code'   => 'mutation_exception',
+							'metadata'     => array( 'error' => $clean_msg ),
+						)
+					);
 				}
 			}
 

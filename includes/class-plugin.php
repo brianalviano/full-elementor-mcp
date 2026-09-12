@@ -106,9 +106,14 @@ class Full_Elementor_MCP_Plugin {
 		$this->registrar        = new Full_Elementor_MCP_Ability_Registrar( $this->data, $this->factory, $this->schema_generator, $validator );
 
 		// Admin settings page.
-		if ( is_admin() && class_exists( 'Full_Elementor_MCP_Admin' ) ) {
-			$this->admin = new Full_Elementor_MCP_Admin();
-			$this->admin->init();
+		if ( is_admin() ) {
+			if ( class_exists( 'Full_Elementor_MCP_Admin' ) ) {
+				$this->admin = new Full_Elementor_MCP_Admin();
+				$this->admin->init();
+			}
+			if ( class_exists( 'Full_Elementor_MCP_Safety_Admin' ) ) {
+				Full_Elementor_MCP_Safety_Admin::init();
+			}
 		}
 
 		// Register hooks.

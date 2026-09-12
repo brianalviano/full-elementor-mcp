@@ -144,6 +144,13 @@ class Full_Elementor_MCP_Ability_Registrar {
 		$atomic_layout->register();
 		$this->ability_names = array_merge( $this->ability_names, $atomic_layout->get_ability_names() );
 
+		// Phase 6: Safety, audit, and undo abilities.
+		if ( class_exists( 'Full_Elementor_MCP_Safety_Abilities' ) ) {
+			$safety = new Full_Elementor_MCP_Safety_Abilities();
+			$safety->register();
+			$this->ability_names = array_merge( $this->ability_names, $safety->get_ability_names() );
+		}
+
 		/**
 		 * Filters the registered ability names.
 		 *

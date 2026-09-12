@@ -26,9 +26,9 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Current database schema version.
 	 *
-	 * 1.3.0: Unambiguous historical crypto envelope generations and payload schema v2.
+	 * 1.4.0: Phase 6 forensic audit trail correlation columns and indexes.
 	 */
-	public const DB_VERSION = '1.3.0';
+	public const DB_VERSION = '1.4.0';
 
 	/**
 	 * Option key storing installed schema version.
@@ -153,18 +153,25 @@ class Full_Elementor_MCP_Database_Installer {
 				KEY idx_created (created_at)
 			) {$charset_collate};",
 
-			// 3. Forensic Audit Log table.
+			// 3. Forensic Audit Log table (Phase 6 extended correlation schema).
 			"CREATE TABLE {$audit_log_table} (
 				id bigint(20) unsigned NOT NULL auto_increment,
+				event_uuid varchar(64) NOT NULL default '',
 				timestamp datetime NOT NULL default CURRENT_TIMESTAMP,
 				event varchar(50) NOT NULL,
 				ability varchar(100) default NULL,
 				object_type varchar(30) default NULL,
 				object_id bigint(20) unsigned default NULL,
+				resource_key varchar(128) NOT NULL default '',
+				request_uuid varchar(64) default NULL,
+				checkpoint_uuid varchar(64) default NULL,
 				user_id bigint(20) unsigned default NULL,
 				credential_uuid varchar(64) default NULL,
 				ip_address varchar(45) default NULL,
+				severity varchar(20) NOT NULL default 'info',
+				error_code varchar(64) default NULL,
 				args_sanitized longtext default NULL,
+				metadata_sanitized longtext default NULL,
 				result_status varchar(20) default NULL,
 				change_id bigint(20) unsigned default NULL,
 				execution_time_ms int(10) unsigned default 0,
@@ -172,7 +179,12 @@ class Full_Elementor_MCP_Database_Installer {
 				KEY idx_timestamp (timestamp),
 				KEY idx_event (event),
 				KEY idx_ability (ability),
-				KEY idx_change (change_id)
+				KEY idx_change (change_id),
+				KEY idx_request (request_uuid),
+				KEY idx_resource (resource_key),
+				KEY idx_checkpoint (checkpoint_uuid),
+				KEY idx_severity (severity),
+				KEY idx_event_uuid (event_uuid)
 			) {$charset_collate};",
 
 			// 4. Tokens, Locks & Idempotency table.
@@ -275,6 +287,11 @@ class Full_Elementor_MCP_Database_Installer {
 			'credential_uuid'         => "varchar(64) default NULL",
 			'is_pinned'               => "tinyint(1) NOT NULL default 0",
 			'rollback_supported'      => "tinyint(1) NOT NULL default 0",
+			'event_uuid'              => "varchar(64) NOT NULL default ''",
+			'request_uuid'            => "varchar(64) default NULL",
+			'severity'                => "varchar(20) NOT NULL default 'info'",
+			'error_code'              => "varchar(64) default NULL",
+			'metadata_sanitized'      => "longtext default NULL",
 		);
 
 		$expected = self::get_expected_schema();
@@ -528,19 +545,26 @@ class Full_Elementor_MCP_Database_Installer {
 				'primary'       => 'id',
 				'single_unique' => 'checkpoint_uuid',
 			),
-			// Audit log table: forensic mutation history.
+			// Audit log table: forensic mutation history (Phase 6 extended correlation schema).
 			self::get_audit_log_table()   => array(
 				'columns'       => array(
 					'id',
+					'event_uuid',
 					'timestamp',
 					'event',
 					'ability',
 					'object_type',
 					'object_id',
+					'resource_key',
+					'request_uuid',
+					'checkpoint_uuid',
 					'user_id',
 					'credential_uuid',
 					'ip_address',
+					'severity',
+					'error_code',
 					'args_sanitized',
+					'metadata_sanitized',
 					'result_status',
 					'change_id',
 					'execution_time_ms',
@@ -550,6 +574,11 @@ class Full_Elementor_MCP_Database_Installer {
 					'idx_event',
 					'idx_ability',
 					'idx_change',
+					'idx_request',
+					'idx_resource',
+					'idx_checkpoint',
+					'idx_severity',
+					'idx_event_uuid',
 				),
 				'primary'       => 'id',
 				'single_unique' => 'id',
