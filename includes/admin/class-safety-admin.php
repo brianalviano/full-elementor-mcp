@@ -45,6 +45,13 @@ class Full_Elementor_MCP_Safety_Admin {
 	private static array $notices = array();
 
 	/**
+	 * Pending confirmation challenge to render.
+	 *
+	 * @var array{action: string, title: string, description: string, fields: array<string, string>, confirmation_token: string, expires_at: string}|null
+	 */
+	private static ?array $pending_confirmation = null;
+
+	/**
 	 * Initializes hooks.
 	 */
 	public static function init(): void {
@@ -127,15 +134,20 @@ class Full_Elementor_MCP_Safety_Admin {
 	}
 
 	/**
-	 * Captures and saves a manual checkpoint.
+	 * Captures and saves a manual checkpoint under canonical resource lock.
 	 */
 	private static function do_create_checkpoint(): void {
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) && Full_Elementor_MCP_Mutation_Middleware::is_ability_disabled( 'full-elementor-mcp/create-checkpoint' ) ) {
+			self::add_notice( 'error', __( 'Create checkpoint is currently disabled by administrator safety policy.', 'full-elementor-mcp' ) );
+			return;
+		}
+
 		if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
 			self::add_notice( 'error', __( 'Checkpoint subsystem unavailable.', 'full-elementor-mcp' ) );
 			return;
 		}
 
-		$resource_key = sanitize_text_field( (string) ( $_POST['resource_key'] ?? '' ) );
+		$resource_key = sanitize_text_field( (string) ( $_POST['resource_key'] ?? ( $_POST['target_resource'] ?? '' ) ) );
 		$label        = sanitize_text_field( (string) ( $_POST['label'] ?? '' ) );
 
 		if ( '' === $resource_key ) {
@@ -143,9 +155,8 @@ class Full_Elementor_MCP_Safety_Admin {
 			return;
 		}
 
-		$res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save(
+		$res = Full_Elementor_MCP_Checkpoint_Manager::create_manual_checkpoint(
 			$resource_key,
-			'manual',
 			array(
 				'label'   => ! empty( $label ) ? $label : 'Manual Admin Checkpoint',
 				'user_id' => get_current_user_id(),
@@ -161,18 +172,23 @@ class Full_Elementor_MCP_Safety_Admin {
 		} else {
 			self::add_notice( 'success', sprintf(
 				/* translators: %s: checkpoint UUID */
-				__( 'Checkpoint created successfully! UUID: %s', 'full-elementor-mcp' ),
+				__( 'Checkpoint created successfully under canonical lock! UUID: %s', 'full-elementor-mcp' ),
 				$res['checkpoint_uuid']
 			) );
 		}
 	}
 
 	/**
-	 * Executes a checkpoint restore.
+	 * Executes a checkpoint restore through the shared safety gate with two-step confirmation.
 	 */
 	private static function do_restore_checkpoint(): void {
-		if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
-			self::add_notice( 'error', __( 'Checkpoint subsystem unavailable.', 'full-elementor-mcp' ) );
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) && Full_Elementor_MCP_Mutation_Middleware::is_ability_disabled( 'full-elementor-mcp/restore-checkpoint' ) ) {
+			self::add_notice( 'error', __( 'Checkpoint restore is currently disabled by administrator safety policy.', 'full-elementor-mcp' ) );
+			return;
+		}
+
+		if ( ! class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
+			self::add_notice( 'error', __( 'Safety middleware unavailable.', 'full-elementor-mcp' ) );
 			return;
 		}
 
@@ -182,10 +198,56 @@ class Full_Elementor_MCP_Safety_Admin {
 			return;
 		}
 
-		$res = Full_Elementor_MCP_Checkpoint_Manager::restore(
-			$uuid,
-			'admin_console',
-			array( 'user_id' => get_current_user_id() )
+		$confirmation_token = sanitize_text_field( (string) ( $_POST['confirmation_token'] ?? '' ) );
+
+		// Step 1: If no confirmation token provided, request challenge through safety middleware:
+		if ( empty( $confirmation_token ) ) {
+			$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+				'full-elementor-mcp/restore-checkpoint',
+				array(
+					'checkpoint_uuid' => $uuid,
+				)
+			);
+
+			if ( is_wp_error( $res ) && 'confirmation_required' === $res->get_error_code() ) {
+				$data  = $res->get_error_data();
+				$token = is_array( $data ) && ! empty( $data['confirmation_token'] ) ? (string) $data['confirmation_token'] : '';
+				if ( ! empty( $token ) ) {
+					self::$pending_confirmation = array(
+						'action'             => 'restore_checkpoint',
+						'title'              => __( 'Confirm Checkpoint Restore', 'full-elementor-mcp' ),
+						'description'        => sprintf(
+							/* translators: %s: checkpoint UUID */
+							__( 'CRITICAL: You are about to restore checkpoint %s. This will overwrite the live state of the target resource with historical data. A pre-restore safety checkpoint will be durably captured before any changes are made.', 'full-elementor-mcp' ),
+							$uuid
+						),
+						'fields'             => array(
+							'checkpoint_uuid' => $uuid,
+						),
+						'confirmation_token' => $token,
+						'expires_at'         => is_array( $data ) && ! empty( $data['expires_at'] ) ? (string) $data['expires_at'] : '',
+					);
+					return;
+				}
+			}
+
+			if ( is_wp_error( $res ) ) {
+				self::add_notice( 'error', sprintf(
+					/* translators: %s: error message */
+					__( 'Checkpoint restore preparation failed: %s', 'full-elementor-mcp' ),
+					$res->get_error_message()
+				) );
+				return;
+			}
+		}
+
+		// Step 2: Execute with confirmation token through the shared safety gate:
+		$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+			'full-elementor-mcp/restore-checkpoint',
+			array(
+				'checkpoint_uuid'    => $uuid,
+				'confirmation_token' => $confirmation_token,
+			)
 		);
 
 		if ( is_wp_error( $res ) ) {
@@ -197,18 +259,23 @@ class Full_Elementor_MCP_Safety_Admin {
 		} else {
 			self::add_notice( 'success', sprintf(
 				/* translators: %s: checkpoint UUID */
-				__( 'Checkpoint %s restored successfully! Pre-restore safety snapshot was captured.', 'full-elementor-mcp' ),
+				__( 'Checkpoint %s restored successfully! Pre-restore safety snapshot was captured and verified.', 'full-elementor-mcp' ),
 				$uuid
 			) );
 		}
 	}
 
 	/**
-	 * Executes an undo of a journaled mutation.
+	 * Executes an undo of a journaled mutation through the shared safety gate with two-step confirmation.
 	 */
 	private static function do_undo_change(): void {
-		if ( ! class_exists( 'Full_Elementor_MCP_Undo_Manager' ) ) {
-			self::add_notice( 'error', __( 'Undo subsystem unavailable.', 'full-elementor-mcp' ) );
+		if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) && Full_Elementor_MCP_Mutation_Middleware::is_ability_disabled( 'full-elementor-mcp/undo-change' ) ) {
+			self::add_notice( 'error', __( 'Undo change is currently disabled by administrator safety policy.', 'full-elementor-mcp' ) );
+			return;
+		}
+
+		if ( ! class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
+			self::add_notice( 'error', __( 'Safety middleware unavailable.', 'full-elementor-mcp' ) );
 			return;
 		}
 
@@ -218,7 +285,58 @@ class Full_Elementor_MCP_Safety_Admin {
 			return;
 		}
 
-		$res = Full_Elementor_MCP_Undo_Manager::undo_change( $journal_id, false );
+		$confirmation_token = sanitize_text_field( (string) ( $_POST['confirmation_token'] ?? '' ) );
+
+		// Step 1: Request challenge via shared safety gate:
+		if ( empty( $confirmation_token ) ) {
+			$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+				'full-elementor-mcp/undo-change',
+				array(
+					'change_id' => $journal_id,
+				)
+			);
+
+			if ( is_wp_error( $res ) && 'confirmation_required' === $res->get_error_code() ) {
+				$data  = $res->get_error_data();
+				$token = is_array( $data ) && ! empty( $data['confirmation_token'] ) ? (string) $data['confirmation_token'] : '';
+				if ( ! empty( $token ) ) {
+					self::$pending_confirmation = array(
+						'action'             => 'undo_change',
+						'title'              => __( 'Confirm Change Reversion (Undo)', 'full-elementor-mcp' ),
+						'description'        => sprintf(
+							/* translators: %d: journal entry ID */
+							__( 'CRITICAL: You are about to revert Write-Ahead Journal change #%d. This will rollback the target resource to its recorded before-state, asserting state hashes and recording a durable pre-undo checkpoint.', 'full-elementor-mcp' ),
+							$journal_id
+						),
+						'fields'             => array(
+							'journal_id' => (string) $journal_id,
+						),
+						'confirmation_token' => $token,
+						'expires_at'         => is_array( $data ) && ! empty( $data['expires_at'] ) ? (string) $data['expires_at'] : '',
+					);
+					return;
+				}
+			}
+
+			if ( is_wp_error( $res ) ) {
+				self::add_notice( 'error', sprintf(
+					/* translators: %s: error message */
+					__( 'Undo preparation failed: %s', 'full-elementor-mcp' ),
+					$res->get_error_message()
+				) );
+				return;
+			}
+		}
+
+		// Step 2: Execute with confirmation token through the shared safety gate:
+		$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+			'full-elementor-mcp/undo-change',
+			array(
+				'change_id'          => $journal_id,
+				'confirmation_token' => $confirmation_token,
+			)
+		);
+
 		if ( is_wp_error( $res ) ) {
 			self::add_notice( 'error', sprintf(
 				/* translators: %s: error message */
@@ -243,8 +361,8 @@ class Full_Elementor_MCP_Safety_Admin {
 			return;
 		}
 
-		$days    = absint( $_POST['retention_days'] ?? 90 );
-		$pruned  = Full_Elementor_MCP_Audit_Logger::prune( $days > 0 ? $days : 90 );
+		$days   = absint( $_POST['retention_days'] ?? 90 );
+		$pruned = Full_Elementor_MCP_Audit_Logger::prune( $days > 0 ? $days : 90 );
 		self::add_notice( 'success', sprintf(
 			/* translators: %d: count */
 			__( 'Audit log pruned: %d old event(s) removed (critical safety recovery events preserved).', 'full-elementor-mcp' ),
@@ -285,6 +403,10 @@ class Full_Elementor_MCP_Safety_Admin {
 					<p><?php echo esc_html( $notice['message'] ); ?></p>
 				</div>
 			<?php endforeach; ?>
+
+			<?php if ( ! empty( self::$pending_confirmation ) ) : ?>
+				<?php self::render_confirmation_dialog(); ?>
+			<?php endif; ?>
 
 			<nav class="nav-tab-wrapper">
 				<a href="<?php echo esc_url( add_query_arg( array( 'page' => self::MENU_SLUG, 'tab' => 'overview' ), admin_url( 'options-general.php' ) ) ); ?>"
@@ -331,6 +453,50 @@ class Full_Elementor_MCP_Safety_Admin {
 				}
 				?>
 			</div>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Renders confirmation warning dialog if challenge is active.
+	 */
+	private static function render_confirmation_dialog(): void {
+		if ( empty( self::$pending_confirmation ) ) {
+			return;
+		}
+
+		$conf = self::$pending_confirmation;
+		?>
+		<div class="notice notice-error" style="padding: 20px; border-left: 5px solid #d63638; background: #fff; margin: 20px 0 25px;">
+			<h2 style="color: #d63638; margin-top: 0;">&#9888; <?php echo esc_html( $conf['title'] ); ?></h2>
+			<p style="font-size: 14px; font-weight: 500;"><?php echo esc_html( $conf['description'] ); ?></p>
+			<?php if ( ! empty( $conf['expires_at'] ) ) : ?>
+				<p style="color: #666; font-size: 12px;">
+					<?php
+					printf(
+						/* translators: %s: expiration time */
+						esc_html__( 'Server challenge issued. Token expires at: %s UTC', 'full-elementor-mcp' ),
+						esc_html( $conf['expires_at'] )
+					);
+					?>
+				</p>
+			<?php endif; ?>
+
+			<form method="post" style="margin-top: 15px; display: flex; gap: 15px; align-items: center;">
+				<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
+				<input type="hidden" name="safety_action" value="<?php echo esc_attr( $conf['action'] ); ?>" />
+				<input type="hidden" name="confirmation_token" value="<?php echo esc_attr( $conf['confirmation_token'] ); ?>" />
+				<?php foreach ( $conf['fields'] as $name => $val ) : ?>
+					<input type="hidden" name="<?php echo esc_attr( $name ); ?>" value="<?php echo esc_attr( $val ); ?>" />
+				<?php endforeach; ?>
+
+				<button type="submit" class="button button-primary" style="background: #d63638; border-color: #b32d2e; color: #fff; font-weight: bold;">
+					<?php esc_html_e( 'Confirm & Execute Now', 'full-elementor-mcp' ); ?>
+				</button>
+				<a href="<?php echo esc_url( add_query_arg( array( 'page' => self::MENU_SLUG ), admin_url( 'options-general.php' ) ) ); ?>" class="button button-secondary">
+					<?php esc_html_e( 'Cancel', 'full-elementor-mcp' ); ?>
+				</a>
+			</form>
 		</div>
 		<?php
 	}
@@ -490,12 +656,16 @@ class Full_Elementor_MCP_Safety_Admin {
 								<td><?php echo ! empty( $entry['rollback_supported'] ) ? '<span style="color:green;">Yes</span>' : '<span style="color:gray;">No</span>'; ?></td>
 								<td>
 									<?php if ( 'committed' === $entry['status'] && ! empty( $entry['rollback_supported'] ) ) : ?>
-										<form method="post" style="display:inline;" onsubmit="return confirm('<?php echo esc_js( __( 'Are you sure you want to undo this change? A pre-undo checkpoint will be captured.', 'full-elementor-mcp' ) ); ?>');">
-											<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
-											<input type="hidden" name="safety_action" value="undo_change" />
-											<input type="hidden" name="journal_id" value="<?php echo esc_attr( (string) $entry['id'] ); ?>" />
-											<button type="submit" class="button button-small button-secondary"><?php esc_html_e( 'Undo', 'full-elementor-mcp' ); ?></button>
-										</form>
+										<?php if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) && Full_Elementor_MCP_Mutation_Middleware::is_ability_disabled( 'full-elementor-mcp/undo-change' ) ) : ?>
+											<button type="button" class="button button-small button-secondary" disabled title="<?php esc_attr_e( 'Undo is disabled by policy', 'full-elementor-mcp' ); ?>"><?php esc_html_e( 'Disabled', 'full-elementor-mcp' ); ?></button>
+										<?php else : ?>
+											<form method="post" style="display:inline;">
+												<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
+												<input type="hidden" name="safety_action" value="undo_change" />
+												<input type="hidden" name="journal_id" value="<?php echo esc_attr( (string) $entry['id'] ); ?>" />
+												<button type="submit" class="button button-small button-secondary"><?php esc_html_e( 'Undo', 'full-elementor-mcp' ); ?></button>
+											</form>
+										<?php endif; ?>
 									<?php else : ?>
 										&mdash;
 									<?php endif; ?>
@@ -533,19 +703,23 @@ class Full_Elementor_MCP_Safety_Admin {
 
 			<div style="background: #f0f6fc; border-left: 4px solid #72aee6; padding: 10px 15px; margin: 15px 0;">
 				<h3 style="margin: 0 0 10px;"><?php esc_html_e( 'Create Manual Checkpoint', 'full-elementor-mcp' ); ?></h3>
-				<form method="post" style="display:flex; gap:10px; align-items:center;">
-					<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
-					<input type="hidden" name="safety_action" value="create_checkpoint" />
-					<label>
-						<?php esc_html_e( 'Resource Key:', 'full-elementor-mcp' ); ?>
-						<input type="text" name="resource_key" placeholder="post:123" required />
-					</label>
-					<label>
-						<?php esc_html_e( 'Label:', 'full-elementor-mcp' ); ?>
-						<input type="text" name="label" placeholder="<?php esc_attr_e( 'Pre-deployment backup', 'full-elementor-mcp' ); ?>" />
-					</label>
-					<button type="submit" class="button button-primary"><?php esc_html_e( 'Create Checkpoint', 'full-elementor-mcp' ); ?></button>
-				</form>
+				<?php if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) && Full_Elementor_MCP_Mutation_Middleware::is_ability_disabled( 'full-elementor-mcp/create-checkpoint' ) ) : ?>
+					<p style="color:gray; margin:0;"><?php esc_html_e( 'Manual checkpoint creation is disabled by administrator safety policy.', 'full-elementor-mcp' ); ?></p>
+				<?php else : ?>
+					<form method="post" style="display:flex; gap:10px; align-items:center;">
+						<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
+						<input type="hidden" name="safety_action" value="create_checkpoint" />
+						<label>
+							<?php esc_html_e( 'Resource Key:', 'full-elementor-mcp' ); ?>
+							<input type="text" name="resource_key" placeholder="post:123" required />
+						</label>
+						<label>
+							<?php esc_html_e( 'Label:', 'full-elementor-mcp' ); ?>
+							<input type="text" name="label" placeholder="<?php esc_attr_e( 'Pre-deployment backup', 'full-elementor-mcp' ); ?>" />
+						</label>
+						<button type="submit" class="button button-primary"><?php esc_html_e( 'Create Checkpoint', 'full-elementor-mcp' ); ?></button>
+					</form>
+				<?php endif; ?>
 			</div>
 
 			<table class="widefat striped" style="margin-top: 20px;">
@@ -578,12 +752,16 @@ class Full_Elementor_MCP_Safety_Admin {
 								<td><?php echo esc_html( size_format( (int) $cp['size_bytes'] ) ); ?></td>
 								<td>
 									<?php if ( 'automatic' === $cp['restore_capability'] ) : ?>
-										<form method="post" style="display:inline;" onsubmit="return confirm('<?php echo esc_js( __( 'Are you sure you want to restore this checkpoint? A pre-restore snapshot will be created first.', 'full-elementor-mcp' ) ); ?>');">
-											<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
-											<input type="hidden" name="safety_action" value="restore_checkpoint" />
-											<input type="hidden" name="checkpoint_uuid" value="<?php echo esc_attr( (string) $cp['checkpoint_uuid'] ); ?>" />
-											<button type="submit" class="button button-small button-primary"><?php esc_html_e( 'Restore', 'full-elementor-mcp' ); ?></button>
-										</form>
+										<?php if ( class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) && Full_Elementor_MCP_Mutation_Middleware::is_ability_disabled( 'full-elementor-mcp/restore-checkpoint' ) ) : ?>
+											<button type="button" class="button button-small button-primary" disabled title="<?php esc_attr_e( 'Restore is disabled by policy', 'full-elementor-mcp' ); ?>"><?php esc_html_e( 'Disabled', 'full-elementor-mcp' ); ?></button>
+										<?php else : ?>
+											<form method="post" style="display:inline;">
+												<?php wp_nonce_field( self::NONCE_ACTION, 'safety_nonce' ); ?>
+												<input type="hidden" name="safety_action" value="restore_checkpoint" />
+												<input type="hidden" name="checkpoint_uuid" value="<?php echo esc_attr( (string) $cp['checkpoint_uuid'] ); ?>" />
+												<button type="submit" class="button button-small button-primary"><?php esc_html_e( 'Restore', 'full-elementor-mcp' ); ?></button>
+											</form>
+										<?php endif; ?>
 									<?php else : ?>
 										<span style="color:gray;"><?php esc_html_e( 'Evidence only', 'full-elementor-mcp' ); ?></span>
 									<?php endif; ?>

@@ -300,6 +300,66 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 	}
 
 	/**
+	 * Creates a manual encrypted checkpoint under canonical lock and fencing.
+	 *
+	 * Acquires canonical resource lock to prevent torn multi-surface snapshots,
+	 * asserts fencing, captures authoritative strategy state, and writes the
+	 * immutable encrypted checkpoint.
+	 *
+	 * @param string               $resource_key Target canonical resource key.
+	 * @param array<string, mixed> $meta         Metadata (label, user_id, etc.).
+	 * @return array<string, mixed>|\WP_Error Checkpoint record on success, or WP_Error on failure.
+	 */
+	public static function create_manual_checkpoint( string $resource_key, array $meta = array() ) {
+		$resource_key = trim( $resource_key );
+		if ( '' === $resource_key ) {
+			return new \WP_Error( 'invalid_resource_key', __( 'Resource key cannot be empty for manual checkpoint.', 'full-elementor-mcp' ) );
+		}
+
+		if ( ! class_exists( 'Full_Elementor_MCP_Lock_Manager' ) || ! class_exists( 'Full_Elementor_MCP_Checkpoint_Strategies' ) ) {
+			return new \WP_Error( 'safety_subsystem_unavailable', __( 'Safety lock or strategies unavailable.', 'full-elementor-mcp' ) );
+		}
+
+		$req_uuid = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
+		$owner_id = 'ckpt_manual_' . $req_uuid;
+
+		$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 60 );
+		if ( is_wp_error( $lock ) ) {
+			return $lock;
+		}
+
+		$fencing_token = (int) $lock['fencing_token'];
+		$lock_released = false;
+
+		try {
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $fencing_token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
+
+			$state = Full_Elementor_MCP_Checkpoint_Strategies::capture( $resource_key, $meta );
+			if ( is_wp_error( $state ) ) {
+				return $state;
+			}
+
+			$meta['state']        = $state;
+			$meta['state_schema'] = 'checkpoint_strategy_v2';
+			$meta['label']        = ! empty( $meta['label'] ) ? sanitize_text_field( (string) $meta['label'] ) : 'Manual Checkpoint';
+
+			$res = self::capture_and_save( $resource_key, 'manual', $meta );
+
+			Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+			$lock_released = true;
+
+			return $res;
+		} finally {
+			if ( ! $lock_released ) {
+				Full_Elementor_MCP_Lock_Manager::release_lock( $resource_key, $owner_id, $fencing_token );
+			}
+		}
+	}
+
+	/**
 	 * Retrieves raw checkpoint database row by numeric ID or UUID.
 	 *
 	 * @param int|string $id_or_uuid Numeric ID or UUID string.
@@ -798,6 +858,15 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 				'is_create'       => false,
 			) );
 
+			// 12.9. Atomic confirmation consumption at final execution readiness:
+			if ( isset( $options['_confirmation_consumer'] ) && is_callable( $options['_confirmation_consumer'] ) ) {
+				$consume_res = ( $options['_confirmation_consumer'] )();
+				if ( is_wp_error( $consume_res ) ) {
+					Full_Elementor_MCP_Journal::mark_failed( $journal_id, $consume_res->get_error_code(), $fencing_token );
+					return $consume_res;
+				}
+			}
+
 			// 13. Execute persistent restore writes through Safe_Writes with payload profile dispatch:
 			$write_error = null;
 			try {
@@ -828,11 +897,35 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 							'journal_id'      => $journal_id,
 							'resource_key'    => $resource_key,
 							'original_error'  => $write_error->get_error_code(),
+							'_safety_outcome' => array(
+								'write_started'     => true,
+								'rollback_verified' => false,
+								'known_safe'        => false,
+								'recovery_required' => true,
+								'journal_id'        => $journal_id,
+							),
 						)
 					);
 				}
 
-				return $write_error;
+				$existing_data = is_array( $write_error->get_error_data() ) ? $write_error->get_error_data() : array();
+				$merged_data   = array_merge(
+					$existing_data,
+					array(
+						'checkpoint_uuid' => $row['checkpoint_uuid'],
+						'journal_id'      => $journal_id,
+						'resource_key'    => $resource_key,
+						'_safety_outcome' => array(
+							'write_started'     => true,
+							'rollback_verified' => true,
+							'known_safe'        => true,
+							'recovery_required' => false,
+							'journal_id'        => $journal_id,
+						),
+					)
+				);
+
+				return new \WP_Error( $write_error->get_error_code(), $write_error->get_error_message(), $merged_data );
 			}
 
 			// 14. Exact Post-Restore Verification in the matching profile domain:
@@ -865,6 +958,13 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 							'checkpoint_uuid' => $row['checkpoint_uuid'],
 							'journal_id'      => $journal_id,
 							'resource_key'    => $resource_key,
+							'_safety_outcome' => array(
+								'write_started'     => true,
+								'rollback_verified' => false,
+								'known_safe'        => false,
+								'recovery_required' => true,
+								'journal_id'        => $journal_id,
+							),
 						)
 					);
 				}
@@ -873,8 +973,18 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 					'checkpoint_restore_verification_failed',
 					__( 'Persistent state re-read after restore does not match checkpoint state hash.', 'full-elementor-mcp' ),
 					array(
-						'expected_hash' => $row['state_hash'],
-						'actual_hash'   => $post_hash,
+						'expected_hash'   => $row['state_hash'],
+						'actual_hash'     => $post_hash,
+						'checkpoint_uuid' => $row['checkpoint_uuid'],
+						'journal_id'      => $journal_id,
+						'resource_key'    => $resource_key,
+						'_safety_outcome' => array(
+							'write_started'     => true,
+							'rollback_verified' => true,
+							'known_safe'        => true,
+							'recovery_required' => false,
+							'journal_id'        => $journal_id,
+						),
 					)
 				);
 			}
@@ -890,6 +1000,13 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 						'checkpoint_uuid' => $row['checkpoint_uuid'],
 						'journal_id'      => $journal_id,
 						'resource_key'    => $resource_key,
+						'_safety_outcome' => array(
+							'write_started'     => true,
+							'rollback_verified' => false,
+							'known_safe'        => false,
+							'recovery_required' => true,
+							'journal_id'        => $journal_id,
+						),
 					)
 				);
 			}
@@ -1008,6 +1125,21 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 		$resource_key = (string) $row['resource_key'];
 
+		$target_selector = $input['target_resource'] ?? ( $input['target_resource_key'] ?? null );
+		if ( ! empty( $target_selector ) && (string) $target_selector !== (string) $row['resource_key'] ) {
+			return new \WP_Error(
+				'checkpoint_resource_mismatch',
+				__( 'Specified target resource does not match checkpoint resource.', 'full-elementor-mcp' ),
+				array(
+					'expected' => (string) $row['resource_key'],
+					'provided' => (string) $target_selector,
+				)
+			);
+		}
+
+		$user_id         = isset( $input['_user_id'] ) ? (int) $input['_user_id'] : get_current_user_id();
+		$credential_uuid = isset( $input['_cred_uuid'] ) ? (string) $input['_cred_uuid'] : null;
+
 		// Audit restore start:
 		if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
 			Full_Elementor_MCP_Audit_Logger::log(
@@ -1016,8 +1148,8 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 					'ability'         => 'full-elementor-mcp/restore-checkpoint',
 					'resource_key'    => $resource_key,
 					'checkpoint_uuid' => $row['checkpoint_uuid'],
-					'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-					'credential_uuid' => $input['credential_uuid'] ?? null,
+					'user_id'         => $user_id,
+					'credential_uuid' => $credential_uuid,
 					'metadata'        => array( 'dry_run' => $is_dry_run ),
 				)
 			);
@@ -1041,8 +1173,9 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 		}
 
 		$options = array(
-			'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-			'credential_uuid' => $input['credential_uuid'] ?? null,
+			'user_id'                => $user_id,
+			'credential_uuid'        => $credential_uuid,
+			'_confirmation_consumer' => $input['_confirmation_consumer'] ?? null,
 		);
 
 		$res = self::restore( $id_or_uuid, $options );
@@ -1057,8 +1190,8 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 						'checkpoint_uuid' => $row['checkpoint_uuid'],
 						'severity'        => Full_Elementor_MCP_Audit_Logger::SEVERITY_ERROR,
 						'error_code'      => $res->get_error_code(),
-						'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-						'credential_uuid' => $input['credential_uuid'] ?? null,
+						'user_id'         => $user_id,
+						'credential_uuid' => $credential_uuid,
 					)
 				);
 			}
@@ -1074,8 +1207,8 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 					'checkpoint_uuid' => $row['checkpoint_uuid'],
 					'change_id'       => $res['journal_id'] ?? null,
 					'result_status'   => 'success',
-					'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-					'credential_uuid' => $input['credential_uuid'] ?? null,
+					'user_id'         => $user_id,
+					'credential_uuid' => $credential_uuid,
 					'metadata'        => array(
 						'pre_restore_uuid' => $res['pre_restore_uuid'] ?? null,
 						'noop'             => ! empty( $res['noop'] ),

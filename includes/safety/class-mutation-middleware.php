@@ -41,6 +41,12 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		'created_object_id',
 		'managed_safety_action',
 		'managed_delegate',
+		'_request_uuid',
+		'_owner_id',
+		'_user_id',
+		'_cred_uuid',
+		'_resource_key',
+		'_confirmation_consumer',
 	);
 
 	/**
@@ -52,6 +58,46 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		'full-elementor-mcp/undo-last-change',
 		'full-elementor-mcp/create-checkpoint',
 	);
+
+	/**
+	 * Checks if an ability is disabled by site administrator policy.
+	 *
+	 * @param string $ability Full ability name.
+	 * @return bool True if disabled.
+	 */
+	public static function is_ability_disabled( string $ability ): bool {
+		$disabled_tools = get_option( 'full_elementor_mcp_disabled_tools', array() );
+		return is_array( $disabled_tools ) && in_array( $ability, $disabled_tools, true );
+	}
+
+	/**
+	 * Disables an ability programmatically.
+	 *
+	 * @param string $ability Ability name.
+	 */
+	public static function disable_ability( string $ability ): void {
+		$disabled = get_option( 'full_elementor_mcp_disabled_tools', array() );
+		if ( ! is_array( $disabled ) ) {
+			$disabled = array();
+		}
+		if ( ! in_array( $ability, $disabled, true ) ) {
+			$disabled[] = $ability;
+			update_option( 'full_elementor_mcp_disabled_tools', $disabled );
+		}
+	}
+
+	/**
+	 * Enables an ability programmatically.
+	 *
+	 * @param string $ability Ability name.
+	 */
+	public static function enable_ability( string $ability ): void {
+		$disabled = get_option( 'full_elementor_mcp_disabled_tools', array() );
+		if ( is_array( $disabled ) ) {
+			$disabled = array_values( array_diff( $disabled, array( $ability ) ) );
+			update_option( 'full_elementor_mcp_disabled_tools', $disabled );
+		}
+	}
 
 	/**
 	 * Registers and wraps an ability at bootstrap/registration time.
@@ -131,6 +177,20 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 						$field
 					),
 					array( 'argument' => $field )
+				);
+			}
+		}
+
+		foreach ( array_keys( $input ) as $k ) {
+			if ( str_starts_with( (string) $k, '_' ) && '_safety' !== $k ) {
+				return new \WP_Error(
+					'reserved_safety_argument',
+					sprintf(
+						/* translators: %s: argument name */
+						__( 'Reserved internal safety argument "%s" cannot be supplied by caller.', 'full-elementor-mcp' ),
+						$k
+					),
+					array( 'argument' => $k )
 				);
 			}
 		}
@@ -457,6 +517,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		// 11. High-Risk / Protected / Irreversible Confirmation Gate:
 		$requires_confirmation = ! empty( $security_profile['high_risk'] )
+			|| ! empty( $strategy['high_risk'] )
 			|| ! empty( $security_profile['irreversible'] )
 			|| ! empty( $security_profile['protected_resource_possible'] )
 			|| ! empty( $security_profile['executable_content'] );
@@ -497,7 +558,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 		// 12. High-Risk / Protected / Irreversible Confirmation Gate:
 		if ( $requires_confirmation ) {
 			if ( ! empty( $confirmation_token ) ) {
-				// Validate ONLY - do NOT consume yet. Consumption is deferred until after lock & WAL.
+				// Validate ONLY - do NOT consume yet. Consumption is deferred until execution readiness.
 				$val_res = Full_Elementor_MCP_Confirmation_Manager::validate(
 					$confirmation_token,
 					$ability,
@@ -619,22 +680,37 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				);
 			}
 
-			// Atomically consume confirmation token if required:
+			// Build scoped internal confirmation consumer callback.
+			// Actual token consumption is deferred to final execution readiness inside the delegate.
+			$confirmation_consumer = null;
 			if ( $requires_confirmation && ! empty( $confirmation_token ) ) {
-				$consume_res = Full_Elementor_MCP_Confirmation_Manager::consume(
+				$token_consumed        = false;
+				$confirmation_consumer = static function () use (
+					&$token_consumed,
 					$confirmation_token,
 					$ability,
 					$input,
 					$user_id,
 					$cred_uuid,
 					$resource_key
-				);
-				if ( is_wp_error( $consume_res ) ) {
-					if ( $idemp_token_key ) {
-						Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $consume_res->get_error_code() );
+				): bool|\WP_Error {
+					if ( $token_consumed ) {
+						return true;
 					}
-					return $consume_res;
-				}
+					$res = Full_Elementor_MCP_Confirmation_Manager::consume(
+						$confirmation_token,
+						$ability,
+						$input,
+						$user_id,
+						$cred_uuid,
+						$resource_key
+					);
+					if ( is_wp_error( $res ) ) {
+						return $res;
+					}
+					$token_consumed = true;
+					return true;
+				};
 			}
 
 			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
@@ -652,24 +728,92 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				);
 			}
 
-			// Execute managed safety delegate with context parameters:
+			// Clean input to ensure caller-controlled user_id or credential_uuid cannot override authenticated identity:
+			$clean_input = $input;
+			unset( $clean_input['user_id'], $clean_input['credential_uuid'] );
+
 			$delegate_args = array_merge(
-				$input,
+				$clean_input,
 				array(
-					'_request_uuid' => $req_uuid,
-					'_owner_id'     => $owner_id,
-					'_user_id'      => $user_id,
-					'_cred_uuid'    => $cred_uuid,
-					'_resource_key' => $resource_key,
+					'_request_uuid'          => $req_uuid,
+					'_owner_id'              => $owner_id,
+					'_user_id'               => $user_id,
+					'_cred_uuid'             => $cred_uuid,
+					'_resource_key'          => $resource_key,
+					'_confirmation_consumer' => $confirmation_consumer,
 				)
 			);
 
 			$delegate_result = call_user_func( $delegate, $delegate_args );
 
 			if ( is_wp_error( $delegate_result ) ) {
-				if ( $idemp_token_key ) {
-					Full_Elementor_MCP_Idempotency_Manager::fail_safe( $idemp_token_key, $owner_id, $delegate_result->get_error_code() );
+				$err_data = $delegate_result->get_error_data();
+				$outcome  = is_array( $err_data ) && isset( $err_data['_safety_outcome'] ) && is_array( $err_data['_safety_outcome'] )
+					? $err_data['_safety_outcome']
+					: array();
+
+				$err_code           = $delegate_result->get_error_code();
+				$write_started      = ! empty( $outcome['write_started'] );
+				$recovery_required  = ! empty( $outcome['recovery_required'] );
+				$rollback_verified  = ! empty( $outcome['rollback_verified'] );
+				$known_safe         = ! empty( $outcome['known_safe'] );
+				$related_journal_id = (int) ( $outcome['journal_id'] ?? ( is_array( $err_data ) ? ( $err_data['journal_id'] ?? 0 ) : 0 ) );
+
+				// Infer conservative defaults if explicit outcome was not attached:
+				if ( ! $write_started ) {
+					if ( in_array( $err_code, array(
+						'checkpoint_restore_recovery_required',
+						'checkpoint_restore_journal_commit_failed',
+						'manual_recovery_required',
+						'rollback_verification_failed',
+						'rollback_failed',
+					), true ) ) {
+						$write_started     = true;
+						$recovery_required = true;
+						$known_safe        = false;
+					} elseif ( in_array( $err_code, array(
+						'checkpoint_restore_verification_failed',
+					), true ) ) {
+						$write_started     = true;
+						$rollback_verified = true;
+						$known_safe        = true;
+					}
 				}
+
+				if ( $idemp_token_key ) {
+					if ( $write_started && ( $recovery_required || ! $known_safe ) ) {
+						// Rule C: Target write began and state is uncertain -> mark_recovery_required:
+						Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required(
+							$idemp_token_key,
+							$owner_id,
+							$related_journal_id,
+							'managed_uncertain_failure: ' . $err_code
+						);
+					} elseif ( ! $write_started ) {
+						// Rule A: No target write began -> fail_safe allowed:
+						Full_Elementor_MCP_Idempotency_Manager::fail_safe(
+							$idemp_token_key,
+							$owner_id,
+							$err_code
+						);
+					} elseif ( $write_started && $rollback_verified && $known_safe ) {
+						// Rule B: Target write began but exact compensation restored original state:
+						Full_Elementor_MCP_Idempotency_Manager::fail_safe(
+							$idemp_token_key,
+							$owner_id,
+							'compensated_safe_failure: ' . $err_code
+						);
+					} else {
+						// Default conservative: mark recovery required:
+						Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required(
+							$idemp_token_key,
+							$owner_id,
+							$related_journal_id,
+							'unresolved_managed_failure: ' . $err_code
+						);
+					}
+				}
+
 				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
 					Full_Elementor_MCP_Audit_Logger::log(
 						Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
@@ -679,21 +823,66 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 							'ability'      => $ability,
 							'resource_key' => $resource_key,
 							'user_id'      => $user_id,
-							'severity'     => Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
-							'error_code'   => $delegate_result->get_error_code(),
-							'metadata'     => array( 'error' => $delegate_result->get_error_message() ),
+							'severity'     => $recovery_required ? Full_Elementor_MCP_Audit_Logger::SEVERITY_CRITICAL : Full_Elementor_MCP_Audit_Logger::SEV_WARNING,
+							'error_code'   => $err_code,
+							'metadata'     => array(
+								'error'             => $delegate_result->get_error_message(),
+								'write_started'     => $write_started,
+								'recovery_required' => $recovery_required,
+								'journal_id'        => $related_journal_id,
+							),
 						)
 					);
 				}
+
 				return $delegate_result;
 			}
 
-			// Complete idempotency claim:
+			// Complete idempotency claim (Requirement 4):
 			if ( $idemp_token_key ) {
-				$res_arr = is_array( $delegate_result ) ? $delegate_result : array( 'result' => $delegate_result );
-				$journal_id = isset( $delegate_result['journal_id'] ) ? (int) $delegate_result['journal_id'] : null;
+				$res_arr    = is_array( $delegate_result ) ? $delegate_result : array( 'result' => $delegate_result );
+				$journal_id = isset( $delegate_result['journal_id'] ) ? (int) $delegate_result['journal_id'] : 0;
 				$created_id = isset( $delegate_result['created_id'] ) ? (int) $delegate_result['created_id'] : null;
-				Full_Elementor_MCP_Idempotency_Manager::complete( $idemp_token_key, $owner_id, $res_arr, $journal_id, $created_id );
+				$completed  = Full_Elementor_MCP_Idempotency_Manager::complete( $idemp_token_key, $owner_id, $res_arr, $journal_id, $created_id );
+
+				if ( ! $completed ) {
+					// Do NOT report normal success! Mark recovery required and return stable error:
+					Full_Elementor_MCP_Idempotency_Manager::mark_recovery_required(
+						$idemp_token_key,
+						$owner_id,
+						$journal_id,
+						'managed_idempotency_completion_failed'
+					);
+
+					if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
+						Full_Elementor_MCP_Audit_Logger::log(
+							Full_Elementor_MCP_Audit_Logger::EVENT_MUTATION_FAILED,
+							array(
+								'event_uuid'   => wp_generate_uuid4(),
+								'request_uuid' => $req_uuid,
+								'ability'      => $ability,
+								'resource_key' => $resource_key,
+								'user_id'      => $user_id,
+								'severity'     => Full_Elementor_MCP_Audit_Logger::SEVERITY_CRITICAL,
+								'error_code'   => 'managed_idempotency_completion_failed',
+								'metadata'     => array(
+									'journal_id'      => $journal_id,
+									'checkpoint_uuid' => $delegate_result['checkpoint_uuid'] ?? ( $delegate_result['pre_undo_checkpoint_uuid'] ?? null ),
+								),
+							)
+						);
+					}
+
+					return new \WP_Error(
+						'managed_idempotency_completion_failed',
+						__( 'Mutation persistent action succeeded, but recording idempotency completion failed. State is protected; inspect journal or retry safely.', 'full-elementor-mcp' ),
+						array(
+							'journal_id'      => $journal_id,
+							'checkpoint_uuid' => $delegate_result['checkpoint_uuid'] ?? ( $delegate_result['pre_undo_checkpoint_uuid'] ?? null ),
+							'delegate_result' => $delegate_result,
+						)
+					);
+				}
 			}
 
 			if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {

@@ -162,44 +162,73 @@ final class Full_Elementor_MCP_Undo_Manager {
 
 		try {
 			// 4. Capture current live resource state under lock using the original mutation strategy:
+			$after_hash = (string) ( $entry['after_hash'] ?? '' );
+			if ( '' === $after_hash ) {
+				return new \WP_Error(
+					'undo_state_unverifiable',
+					__( 'Cannot undo change: target journal entry lacks a verifiable after_hash baseline.', 'full-elementor-mcp' ),
+					array( 'journal_id' => $journal_id )
+				);
+			}
+
 			$capture_fn = $strategy['capture_after'] ?? ( $strategy['capture_before'] ?? null );
+			if ( ! is_callable( $capture_fn ) ) {
+				return new \WP_Error(
+					'undo_state_unverifiable',
+					__( 'Cannot undo change: registered mutation strategy lacks a callable live capture function.', 'full-elementor-mcp' ),
+					array( 'journal_id' => $journal_id, 'ability' => $entry['ability'] )
+				);
+			}
+
 			$resolver_args = array(
-				'post_id'           => (int) $entry['object_id'],
-				'object_id'         => (int) $entry['object_id'],
-				'page_id'           => (int) $entry['object_id'],
-				'created_object_id' => (int) $entry['object_id'],
-				'id'                => (int) $entry['object_id'],
+				'resource_key'          => $resource_key,
+				'rollback_resource_key' => $resource_key,
+				'target_resource'       => $resource_key,
+				'target_resource_key'   => $resource_key,
+				'object_type'           => (string) ( $entry['object_type'] ?? '' ),
+				'post_id'               => (int) $entry['object_id'],
+				'object_id'             => (int) $entry['object_id'],
+				'page_id'               => (int) $entry['object_id'],
+				'created_object_id'     => (int) $entry['object_id'],
+				'id'                    => (int) $entry['object_id'],
 			);
 
-			$current_state = is_callable( $capture_fn )
-				? call_user_func( $capture_fn, (int) $entry['object_id'], $resolver_args, null )
-				: null;
-
-			if ( is_wp_error( $current_state ) ) {
-				return $current_state;
+			$current_state = call_user_func( $capture_fn, (int) $entry['object_id'], $resolver_args, null );
+			if ( is_wp_error( $current_state ) || null === $current_state ) {
+				return new \WP_Error(
+					'undo_state_unverifiable',
+					sprintf(
+						/* translators: %s: failure detail */
+						__( 'Cannot undo change: live state could not be captured for verification: %s', 'full-elementor-mcp' ),
+						is_wp_error( $current_state ) ? $current_state->get_error_message() : 'State returned null'
+					),
+					array( 'journal_id' => $journal_id )
+				);
 			}
 
 			// 5. Live State Conflict Check:
-			// If target journal has an after_hash, current persistent state MUST match it.
+			// Target journal has a verified after_hash; current persistent state MUST match it.
 			// Newer mutations MUST NOT be silently overwritten.
-			if ( ! empty( $entry['after_hash'] ) ) {
-				$current_hash = Full_Elementor_MCP_Journal::hash_state( $current_state );
-				if ( is_wp_error( $current_hash ) ) {
-					return $current_hash;
-				}
+			$current_hash = Full_Elementor_MCP_Journal::hash_state( $current_state );
+			if ( is_wp_error( $current_hash ) || '' === (string) $current_hash ) {
+				return new \WP_Error(
+					'undo_state_unverifiable',
+					__( 'Cannot undo change: live state hashing failed during conflict verification.', 'full-elementor-mcp' ),
+					array( 'journal_id' => $journal_id )
+				);
+			}
 
-				if ( ! hash_equals( (string) $entry['after_hash'], (string) $current_hash ) ) {
-					return new \WP_Error(
-						'journal_state_conflict',
-						__( 'Live resource state has changed since this mutation was committed. Undo cannot overwrite newer modifications.', 'full-elementor-mcp' ),
-						array(
-							'journal_id'    => $journal_id,
-							'resource_key'  => $resource_key,
-							'expected_hash' => $entry['after_hash'],
-							'current_hash'  => $current_hash,
-						)
-					);
-				}
+			if ( ! hash_equals( $after_hash, (string) $current_hash ) ) {
+				return new \WP_Error(
+					'journal_state_conflict',
+					__( 'Live resource state has changed since this mutation was committed. Undo cannot overwrite newer modifications.', 'full-elementor-mcp' ),
+					array(
+						'journal_id'    => $journal_id,
+						'resource_key'  => $resource_key,
+						'expected_hash' => $after_hash,
+						'current_hash'  => $current_hash,
+					)
+				);
 			}
 
 			// 6. Create durable pre-undo encrypted checkpoint before persistent rollback:
@@ -227,6 +256,20 @@ final class Full_Elementor_MCP_Undo_Manager {
 				}
 			}
 
+			// 6.5. Assert fence ownership before execution readiness:
+			$fence_check = Full_Elementor_MCP_Lock_Manager::assert_fencing_token_ownership( $resource_key, $owner_id, $fencing_token );
+			if ( is_wp_error( $fence_check ) ) {
+				return $fence_check;
+			}
+
+			// 6.9. Atomic confirmation consumption at final execution readiness:
+			if ( isset( $options['_confirmation_consumer'] ) && is_callable( $options['_confirmation_consumer'] ) ) {
+				$consume_res = ( $options['_confirmation_consumer'] )();
+				if ( is_wp_error( $consume_res ) ) {
+					return $consume_res;
+				}
+			}
+
 			// 7. Execute frozen Phase 2 Journal::rollback() under active lock and fencing:
 			$rollback_result = Full_Elementor_MCP_Journal::rollback(
 				$journal_id,
@@ -236,6 +279,26 @@ final class Full_Elementor_MCP_Undo_Manager {
 			);
 
 			if ( is_wp_error( $rollback_result ) ) {
+				$err_code          = $rollback_result->get_error_code();
+				$write_started     = in_array( $err_code, array( 'manual_recovery_required', 'rollback_verification_failed', 'rollback_failed' ), true );
+				$recovery_required = in_array( $err_code, array( 'manual_recovery_required', 'rollback_verification_failed' ), true );
+
+				$existing_data = is_array( $rollback_result->get_error_data() ) ? $rollback_result->get_error_data() : array();
+				$merged_data   = array_merge(
+					$existing_data,
+					array(
+						'_safety_outcome' => array(
+							'write_started'     => $write_started,
+							'rollback_verified' => false,
+							'known_safe'        => ! $recovery_required,
+							'recovery_required' => $recovery_required,
+							'journal_id'        => $journal_id,
+						),
+					)
+				);
+
+				$rollback_result = new \WP_Error( $rollback_result->get_error_code(), $rollback_result->get_error_message(), $merged_data );
+
 				if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
 					Full_Elementor_MCP_Audit_Logger::log(
 						Full_Elementor_MCP_Audit_Logger::EVENT_UNDO_FAILED,
@@ -271,9 +334,9 @@ final class Full_Elementor_MCP_Undo_Manager {
 						'user_id'         => $user_id,
 						'credential_uuid' => $cred_uuid,
 						'metadata'        => array(
-							'journal_id'                 => $journal_id,
-							'pre_undo_checkpoint_uuid'   => $pre_undo_uuid,
-							'before_hash'                => $entry['before_hash'],
+							'journal_id'               => $journal_id,
+							'pre_undo_checkpoint_uuid' => $pre_undo_uuid,
+							'before_hash'              => $entry['before_hash'],
 						),
 					)
 				);
@@ -301,8 +364,9 @@ final class Full_Elementor_MCP_Undo_Manager {
 	 * Reverts the latest committed mutation for a specific resource key.
 	 *
 	 * Enforces strict conservatism:
-	 * If the newest committed mutation is non-rollbackable or requires manual recovery,
-	 * this method MUST NOT silently skip backward to an older rollbackable mutation.
+	 * First queries the actual newest relevant journal row for the canonical resource.
+	 * If the newest row is pending, failed with uncertain writes, recovery-required,
+	 * rolled_back, or non-rollbackable, this method MUST NOT silently skip backward.
 	 * It returns 'undo_latest_not_safe'.
 	 *
 	 * @param string                    $resource_key Canonical resource key (e.g. 'post:123').
@@ -325,16 +389,14 @@ final class Full_Elementor_MCP_Undo_Manager {
 
 		$table = Full_Elementor_MCP_Database_Installer::get_journal_table();
 
-		// Query the latest committed mutation for this exact resource:
+		// Query the actual NEWEST mutation row for this exact resource (no status filter!):
 		$latest = $wpdb->get_row(
 			$wpdb->prepare(
 				"SELECT * FROM {$table}
 				 WHERE resource_key = %s
-				   AND status = %s
 				 ORDER BY id DESC
 				 LIMIT 1",
-				$resource_key,
-				Full_Elementor_MCP_Journal::STATUS_COMMITTED
+				$resource_key
 			),
 			ARRAY_A
 		);
@@ -344,14 +406,50 @@ final class Full_Elementor_MCP_Undo_Manager {
 				'change_not_found',
 				sprintf(
 					/* translators: %s: resource key */
-					__( 'No committed changes found to undo for resource "%s".', 'full-elementor-mcp' ),
+					__( 'No recorded journal changes found to undo for resource "%s".', 'full-elementor-mcp' ),
 					$resource_key
 				),
 				array( 'resource_key' => $resource_key )
 			);
 		}
 
-		// Conservation check: if newest change is NOT rollbackable, fail closed:
+		// Conservation check: if newest row is already rolled back, fail closed:
+		if ( Full_Elementor_MCP_Journal::STATUS_ROLLED_BACK === $latest['status'] ) {
+			return new \WP_Error(
+				'undo_latest_not_safe',
+				sprintf(
+					/* translators: 1: journal id, 2: ability */
+					__( 'The latest change on resource "%1$s" (#%2$d) has already been rolled back. Skipping backward to older mutations is prohibited.', 'full-elementor-mcp' ),
+					$resource_key,
+					(int) $latest['id']
+				),
+				array(
+					'journal_id'   => (int) $latest['id'],
+					'status'       => 'rolled_back',
+					'resource_key' => $resource_key,
+				)
+			);
+		}
+
+		// Conservation check: if newest row is pending or failed or unresolved, fail closed:
+		if ( Full_Elementor_MCP_Journal::STATUS_COMMITTED !== $latest['status'] ) {
+			return new \WP_Error(
+				'undo_latest_not_safe',
+				sprintf(
+					/* translators: 1: journal id, 2: status */
+					__( 'The latest change on this resource (#%1$d) is in unresolved status "%2$s". Skipping backward to older mutations is prohibited.', 'full-elementor-mcp' ),
+					(int) $latest['id'],
+					$latest['status']
+				),
+				array(
+					'journal_id'   => (int) $latest['id'],
+					'status'       => $latest['status'],
+					'resource_key' => $resource_key,
+				)
+			);
+		}
+
+		// Conservation check: if newest committed change is NOT rollbackable, fail closed:
 		if ( empty( $latest['rollback_supported'] ) ) {
 			return new \WP_Error(
 				'undo_latest_not_safe',
@@ -369,7 +467,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 			);
 		}
 
-		// Delegate to undo_change for the latest change:
+		// Delegate to undo_change for the verified latest change:
 		return self::undo_change( (int) $latest['id'], $options );
 	}
 
@@ -385,10 +483,31 @@ final class Full_Elementor_MCP_Undo_Manager {
 			return new \WP_Error( 'missing_journal_id', __( 'journal_id (or change_id) is required for undo-change.', 'full-elementor-mcp' ) );
 		}
 
+		// If caller provided target_resource, validate against journal entry's actual resource_key:
+		$target_resource = (string) ( $input['target_resource'] ?? ( $input['target_resource_key'] ?? '' ) );
+		if ( '' !== $target_resource && class_exists( 'Full_Elementor_MCP_Journal' ) ) {
+			$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
+			if ( $entry && ! empty( $entry['resource_key'] ) && $entry['resource_key'] !== $target_resource ) {
+				return new \WP_Error(
+					'resource_mismatch',
+					sprintf(
+						/* translators: 1: journal resource, 2: target resource */
+						__( 'Target resource "%1$s" does not match journal resource key "%2$s". Cross-resource undo is prohibited.', 'full-elementor-mcp' ),
+						$target_resource,
+						$entry['resource_key']
+					),
+					array( 'journal_id' => $journal_id )
+				);
+			}
+		}
+
 		$options = array(
-			'dry_run'         => ( true === ( $input['dry_run'] ?? false ) ) || ( true === ( $input['_safety']['dry_run'] ?? false ) ),
-			'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-			'credential_uuid' => $input['credential_uuid'] ?? null,
+			'dry_run'                => ( true === ( $input['dry_run'] ?? false ) ) || ( true === ( $input['_safety']['dry_run'] ?? false ) ),
+			'user_id'                => (int) ( $input['_user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) ),
+			'credential_uuid'        => $input['_cred_uuid'] ?? null,
+			'request_uuid'           => $input['_request_uuid'] ?? null,
+			'owner_id'               => $input['_owner_id'] ?? null,
+			'_confirmation_consumer' => $input['_confirmation_consumer'] ?? null,
 		);
 
 		return self::undo_change( $journal_id, $options );
@@ -402,8 +521,12 @@ final class Full_Elementor_MCP_Undo_Manager {
 	 */
 	public static function execute_undo_last_change_ability( array $input ) {
 		$resource_key = '';
-		if ( ! empty( $input['resource_key'] ) && is_string( $input['resource_key'] ) ) {
-			$resource_key = sanitize_text_field( $input['resource_key'] );
+		if ( ! empty( $input['_resource_key'] ) && is_string( $input['_resource_key'] ) ) {
+			$resource_key = sanitize_text_field( $input['_resource_key'] );
+		} elseif ( ! empty( $input['target_resource'] ) && is_string( $input['target_resource'] ) ) {
+			$resource_key = sanitize_text_field( $input['target_resource'] );
+		} elseif ( ! empty( $input['target_resource_key'] ) && is_string( $input['target_resource_key'] ) ) {
+			$resource_key = sanitize_text_field( $input['target_resource_key'] );
 		} elseif ( ! empty( $input['post_id'] ) && is_numeric( $input['post_id'] ) ) {
 			$resource_key = 'post:' . (int) $input['post_id'];
 		} elseif ( ! empty( $input['page_id'] ) && is_numeric( $input['page_id'] ) ) {
@@ -411,13 +534,16 @@ final class Full_Elementor_MCP_Undo_Manager {
 		}
 
 		if ( '' === $resource_key ) {
-			return new \WP_Error( 'missing_resource_key', __( 'resource_key (or post_id) is required for undo-last-change.', 'full-elementor-mcp' ) );
+			return new \WP_Error( 'missing_resource_key', __( 'target_resource (or post_id) is required for undo-last-change.', 'full-elementor-mcp' ) );
 		}
 
 		$options = array(
-			'dry_run'         => ( true === ( $input['dry_run'] ?? false ) ) || ( true === ( $input['_safety']['dry_run'] ?? false ) ),
-			'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-			'credential_uuid' => $input['credential_uuid'] ?? null,
+			'dry_run'                => ( true === ( $input['dry_run'] ?? false ) ) || ( true === ( $input['_safety']['dry_run'] ?? false ) ),
+			'user_id'                => (int) ( $input['_user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) ),
+			'credential_uuid'        => $input['_cred_uuid'] ?? null,
+			'request_uuid'           => $input['_request_uuid'] ?? null,
+			'owner_id'               => $input['_owner_id'] ?? null,
+			'_confirmation_consumer' => $input['_confirmation_consumer'] ?? null,
 		);
 
 		return self::undo_last_change( $resource_key, $options );

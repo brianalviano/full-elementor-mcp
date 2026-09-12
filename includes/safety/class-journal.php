@@ -1081,11 +1081,15 @@ class Full_Elementor_MCP_Journal {
 		}
 
 		$resolver_args = array(
-			'post_id'           => $target_id,
-			'object_id'         => $target_id,
-			'page_id'           => $target_id,
-			'created_object_id' => $target_id,
-			'id'                => $target_id,
+			'post_id'               => $target_id,
+			'object_id'             => $target_id,
+			'page_id'               => $target_id,
+			'created_object_id'     => $target_id,
+			'id'                    => $target_id,
+			'resource_key'          => (string) ( $entry['resource_key'] ?? '' ),
+			'rollback_resource_key' => (string) ( $entry['resource_key'] ?? '' ),
+			'target_resource'       => (string) ( $entry['resource_key'] ?? '' ),
+			'object_type'           => (string) ( $entry['object_type'] ?? '' ),
 		);
 
 		// Resolve deterministic rollback resource key. Fail closed if unresolved.

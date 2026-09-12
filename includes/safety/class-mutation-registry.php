@@ -1120,15 +1120,18 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'managed_safety_action' => true,
 				'managed_delegate'      => array( 'Full_Elementor_MCP_Checkpoint_Manager', 'execute_restore_ability' ),
 				'resource_key_resolver' => static function ( array $args = array() ): string {
-					if ( ! empty( $args['resource_key'] ) ) {
-						return sanitize_text_field( (string) $args['resource_key'] );
-					}
 					$id_or_uuid = $args['checkpoint_id'] ?? ( $args['checkpoint_uuid'] ?? ( $args['id'] ?? '' ) );
 					if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) && ! empty( $id_or_uuid ) ) {
 						$row = Full_Elementor_MCP_Checkpoint_Manager::get_checkpoint( $id_or_uuid );
 						if ( ! empty( $row['resource_key'] ) ) {
 							return (string) $row['resource_key'];
 						}
+					}
+					if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource'] );
+					}
+					if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource_key'] );
 					}
 					return 'checkpoint:' . (string) $id_or_uuid;
 				},
@@ -1144,6 +1147,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'supports_rollback'     => true,
 				'is_destructive'        => false,
 				'security_profile'      => 'high_risk',
+				'high_risk'             => true,
 			)
 		);
 
@@ -1156,15 +1160,18 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'managed_safety_action' => true,
 				'managed_delegate'      => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_change_ability' ),
 				'resource_key_resolver' => static function ( array $args = array() ): string {
-					if ( ! empty( $args['resource_key'] ) ) {
-						return sanitize_text_field( (string) $args['resource_key'] );
-					}
 					$journal_id = absint( $args['journal_id'] ?? ( $args['change_id'] ?? ( $args['id'] ?? 0 ) ) );
 					if ( class_exists( 'Full_Elementor_MCP_Journal' ) && $journal_id > 0 ) {
 						$entry = Full_Elementor_MCP_Journal::get_entry( $journal_id );
 						if ( ! empty( $entry['resource_key'] ) ) {
 							return (string) $entry['resource_key'];
 						}
+					}
+					if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource'] );
+					}
+					if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource_key'] );
 					}
 					return 'journal:' . $journal_id;
 				},
@@ -1180,6 +1187,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'supports_rollback'     => true,
 				'is_destructive'        => false,
 				'security_profile'      => 'high_risk',
+				'high_risk'             => true,
 			)
 		);
 
@@ -1192,11 +1200,17 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'managed_safety_action' => true,
 				'managed_delegate'      => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_last_change_ability' ),
 				'resource_key_resolver' => static function ( array $args = array() ): string {
-					if ( ! empty( $args['resource_key'] ) ) {
-						return sanitize_text_field( (string) $args['resource_key'] );
+					if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource'] );
+					}
+					if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource_key'] );
 					}
 					$id = absint( $args['post_id'] ?? ( $args['page_id'] ?? 0 ) );
-					return self::build_resource_key( 'post', $id );
+					if ( $id > 0 ) {
+						return self::build_resource_key( 'post', $id );
+					}
+					return '';
 				},
 				'object_id_resolver'    => static function ( array $args = array() ): int {
 					return absint( $args['post_id'] ?? ( $args['page_id'] ?? 0 ) );
@@ -1210,6 +1224,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'supports_rollback'     => true,
 				'is_destructive'        => false,
 				'security_profile'      => 'high_risk',
+				'high_risk'             => true,
 			)
 		);
 
@@ -1221,9 +1236,9 @@ class Full_Elementor_MCP_Mutation_Registry {
 				'category'              => self::CATEGORY_COMPOSITE,
 				'managed_safety_action' => true,
 				'managed_delegate'      => static function ( array $input ) {
-					$res_key = (string) ( $input['resource_key'] ?? ( ! empty( $input['post_id'] ) ? 'post:' . (int) $input['post_id'] : '' ) );
+					$res_key = (string) ( $input['_resource_key'] ?? ( $input['target_resource'] ?? ( $input['target_resource_key'] ?? ( ! empty( $input['post_id'] ) ? 'post:' . (int) $input['post_id'] : '' ) ) ) );
 					if ( '' === $res_key ) {
-						return new \WP_Error( 'missing_resource_key', __( 'resource_key or post_id is required.', 'full-elementor-mcp' ) );
+						return new \WP_Error( 'missing_resource_key', __( 'target_resource or post_id is required.', 'full-elementor-mcp' ) );
 					}
 					$label = isset( $input['label'] ) ? sanitize_text_field( (string) $input['label'] ) : 'Manual Checkpoint';
 					if ( strlen( $label ) > 255 ) {
@@ -1232,13 +1247,15 @@ class Full_Elementor_MCP_Mutation_Registry {
 					if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
 						return new \WP_Error( 'checkpoint_unavailable', __( 'Checkpoint manager unavailable.', 'full-elementor-mcp' ) );
 					}
-					$res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save(
+					$user_id   = (int) ( $input['_user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) );
+					$cred_uuid = $input['_cred_uuid'] ?? null;
+					$res       = Full_Elementor_MCP_Checkpoint_Manager::create_manual_checkpoint(
 						$res_key,
-						'manual',
 						array(
 							'label'           => $label,
-							'user_id'         => (int) ( $input['user_id'] ?? 0 ),
-							'credential_uuid' => $input['credential_uuid'] ?? null,
+							'user_id'         => $user_id,
+							'credential_uuid' => $cred_uuid,
+							'source_ability'  => 'full-elementor-mcp/create-checkpoint',
 						)
 					);
 					if ( is_wp_error( $res ) ) {
@@ -1253,7 +1270,13 @@ class Full_Elementor_MCP_Mutation_Registry {
 					);
 				},
 				'resource_key_resolver' => static function ( array $args = array() ): string {
-					return (string) ( $args['resource_key'] ?? ( ! empty( $args['post_id'] ) ? 'post:' . (int) $args['post_id'] : '' ) );
+					if ( ! empty( $args['target_resource'] ) && is_string( $args['target_resource'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource'] );
+					}
+					if ( ! empty( $args['target_resource_key'] ) && is_string( $args['target_resource_key'] ) ) {
+						return sanitize_text_field( (string) $args['target_resource_key'] );
+					}
+					return (string) ( ! empty( $args['post_id'] ) ? 'post:' . (int) $args['post_id'] : '' );
 				},
 				'object_id_resolver'    => static function ( array $args = array() ): int {
 					return absint( $args['post_id'] ?? 0 );

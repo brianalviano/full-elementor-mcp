@@ -181,7 +181,7 @@ final class Full_Elementor_MCP_Audit_Logger {
 
 		// 5. Severity resolution:
 		$severity = isset( $data['severity'] ) ? sanitize_key( (string) $data['severity'] ) : self::SEVERITY_INFO;
-		if ( ! in_array( $severity, array( self::SEVERITY_INFO, self::SEVERITY_WARNING, self::SEVERITY_ERROR, self::SEVERITY_CRITICAL ), true ) ) {
+		if ( ! in_array( $severity, array( self::SEVERITY_INFO, self::SEVERITY_NOTICE, self::SEVERITY_WARNING, self::SEVERITY_ERROR, self::SEVERITY_CRITICAL, self::SEV_DEBUG ), true ) ) {
 			$severity = self::SEVERITY_INFO;
 		}
 
@@ -475,15 +475,16 @@ final class Full_Elementor_MCP_Audit_Logger {
 			return array();
 		}
 
-		$table     = Full_Elementor_MCP_Database_Installer::get_audit_log_table();
-		$limit     = max( 1, min( 100, $limit ) );
-		$offset    = max( 0, $offset );
+		$table         = Full_Elementor_MCP_Database_Installer::get_audit_log_table();
+		$limit         = max( 1, min( 200, $limit ) );
+		$offset        = max( 0, $offset );
 		$where_clauses = array( '1=1' );
 		$params        = array();
 
-		if ( ! empty( $filters['event'] ) ) {
+		$event = $filters['event'] ?? ( $filters['event_type'] ?? null );
+		if ( ! empty( $event ) ) {
 			$where_clauses[] = 'event = %s';
-			$params[]        = sanitize_key( (string) $filters['event'] );
+			$params[]        = sanitize_key( (string) $event );
 		}
 
 		if ( ! empty( $filters['ability'] ) ) {
@@ -491,9 +492,10 @@ final class Full_Elementor_MCP_Audit_Logger {
 			$params[]        = sanitize_text_field( (string) $filters['ability'] );
 		}
 
-		if ( ! empty( $filters['resource_key'] ) ) {
+		$res_key = $filters['resource_key'] ?? ( $filters['resource_filter'] ?? null );
+		if ( ! empty( $res_key ) ) {
 			$where_clauses[] = 'resource_key = %s';
-			$params[]        = sanitize_text_field( (string) $filters['resource_key'] );
+			$params[]        = sanitize_text_field( (string) $res_key );
 		}
 
 		if ( ! empty( $filters['severity'] ) ) {
@@ -526,9 +528,10 @@ final class Full_Elementor_MCP_Audit_Logger {
 			$params[]        = sanitize_key( (string) $filters['result_status'] );
 		}
 
-		if ( ! empty( $filters['date_from'] ) ) {
+		$date_from = $filters['date_from'] ?? ( $filters['since'] ?? null );
+		if ( ! empty( $date_from ) ) {
 			$where_clauses[] = 'timestamp >= %s';
-			$params[]        = sanitize_text_field( (string) $filters['date_from'] );
+			$params[]        = sanitize_text_field( (string) $date_from );
 		}
 
 		if ( ! empty( $filters['date_to'] ) ) {
@@ -567,9 +570,10 @@ final class Full_Elementor_MCP_Audit_Logger {
 		$where_clauses = array( '1=1' );
 		$params        = array();
 
-		if ( ! empty( $filters['event'] ) ) {
+		$event = $filters['event'] ?? ( $filters['event_type'] ?? null );
+		if ( ! empty( $event ) ) {
 			$where_clauses[] = 'event = %s';
-			$params[]        = sanitize_key( (string) $filters['event'] );
+			$params[]        = sanitize_key( (string) $event );
 		}
 
 		if ( ! empty( $filters['ability'] ) ) {
@@ -577,9 +581,10 @@ final class Full_Elementor_MCP_Audit_Logger {
 			$params[]        = sanitize_text_field( (string) $filters['ability'] );
 		}
 
-		if ( ! empty( $filters['resource_key'] ) ) {
+		$res_key = $filters['resource_key'] ?? ( $filters['resource_filter'] ?? null );
+		if ( ! empty( $res_key ) ) {
 			$where_clauses[] = 'resource_key = %s';
-			$params[]        = sanitize_text_field( (string) $filters['resource_key'] );
+			$params[]        = sanitize_text_field( (string) $res_key );
 		}
 
 		if ( ! empty( $filters['severity'] ) ) {
@@ -600,6 +605,27 @@ final class Full_Elementor_MCP_Audit_Logger {
 		if ( ! empty( $filters['checkpoint_uuid'] ) ) {
 			$where_clauses[] = 'checkpoint_uuid = %s';
 			$params[]        = sanitize_text_field( (string) $filters['checkpoint_uuid'] );
+		}
+
+		if ( ! empty( $filters['request_uuid'] ) ) {
+			$where_clauses[] = 'request_uuid = %s';
+			$params[]        = sanitize_text_field( (string) $filters['request_uuid'] );
+		}
+
+		if ( ! empty( $filters['result_status'] ) ) {
+			$where_clauses[] = 'result_status = %s';
+			$params[]        = sanitize_key( (string) $filters['result_status'] );
+		}
+
+		$date_from = $filters['date_from'] ?? ( $filters['since'] ?? null );
+		if ( ! empty( $date_from ) ) {
+			$where_clauses[] = 'timestamp >= %s';
+			$params[]        = sanitize_text_field( (string) $date_from );
+		}
+
+		if ( ! empty( $filters['date_to'] ) ) {
+			$where_clauses[] = 'timestamp <= %s';
+			$params[]        = sanitize_text_field( (string) $filters['date_to'] );
 		}
 
 		$where_sql = implode( ' AND ', $where_clauses );

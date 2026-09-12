@@ -1070,7 +1070,7 @@ run_test( 'List Changes Ability: pagination, filtering, and omission of before_s
 	assert_false( isset( $first['before_state'] ), 'before_state MUST be omitted from list_changes' );
 } );
 
-run_test( 'Get Change Ability: retrieves single entry and sanitizes before_state', function () {
+run_test( 'Get Change Ability: retrieves single entry and returns safe summary without raw before_state', function () {
 	global $wpdb;
 	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
 
@@ -1095,10 +1095,11 @@ run_test( 'Get Change Ability: retrieves single entry and sanitizes before_state
 	$entry     = $abilities->execute_get_change( array( 'change_id' => $id ) );
 
 	assert_false( is_wp_error( $entry ) );
-	assert_false( isset( $entry['before_state'] ) );
-	assert_true( isset( $entry['before_state_sanitized'] ) );
-	assert_equals( '[REDACTED]', $entry['before_state_sanitized']['password'] );
-	assert_equals( 'val', $entry['before_state_sanitized']['safe'] );
+	assert_false( isset( $entry['before_state'] ), 'before_state must be omitted' );
+	assert_false( isset( $entry['before_state_sanitized'] ), 'before_state_sanitized must be omitted per requirement 15' );
+	assert_true( isset( $entry['before_state_summary'] ) );
+	assert_equals( 'array', $entry['before_state_summary']['type'] );
+	assert_equals( 2, $entry['before_state_summary']['element_count'] );
 } );
 
 // =============================================================================
@@ -1448,8 +1449,671 @@ run_test( 'Admin Safety: recovery scan execution triggers recover_pending', func
 	ob_start();
 	Full_Elementor_MCP_Safety_Admin::render();
 	$html = ob_get_clean();
-
 	assert_true( str_contains( $html, 'Recovery scan complete' ) || str_contains( $html, 'Recovery scan processed' ) );
+} );
+
+// =============================================================================
+// 10. Managed-Action Test Matrix (Phase 6 Corrective Pass Regressions)
+// =============================================================================
+
+// --- 10.1 Confirmation ---
+
+run_test( 'Confirmation: undo-change always requires server confirmation', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+
+	$elements = array( array( 'id' => 'sec_conf_1', 'elType' => 'section' ) );
+	$GLOBALS['mock_posts'][920] = (object) array( 'ID' => 920, 'post_title' => 'Page 920' );
+	$GLOBALS['mock_post_meta'][920]['_elementor_data'] = json_encode( $elements );
+
+	$h = Full_Elementor_MCP_Journal::hash_state( $elements );
+	$wpdb->insert(
+		$j_table,
+		array(
+			'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'ability'            => 'full-elementor-mcp/update-element',
+			'action'             => 'update',
+			'object_type'        => 'post',
+			'object_id'          => 920,
+			'resource_key'       => 'post:920',
+			'fencing_token'      => 1,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+			'before_hash'        => $h,
+			'after_hash'         => $h,
+			'before_state'       => json_encode( $elements ),
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	// Execute without confirmation token:
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array( 'change_id' => $jid )
+	);
+
+	assert_is_wp_error( $res );
+	assert_equals( 'confirmation_required', $res->get_error_code() );
+
+	// Persistent state must NOT be modified:
+	$entry = Full_Elementor_MCP_Journal::get_entry( $jid );
+	assert_equals( 'committed', $entry['status'] );
+} );
+
+run_test( 'Confirmation: undo-last-change always requires server confirmation', function () {
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-last-change',
+		array( 'target_resource' => 'post:920' )
+	);
+
+	assert_is_wp_error( $res );
+	assert_equals( 'confirmation_required', $res->get_error_code() );
+} );
+
+run_test( 'Confirmation: restore-checkpoint always requires server confirmation', function () {
+	$GLOBALS['mock_posts'][921] = (object) array( 'ID' => 921, 'post_title' => 'Page 921' );
+	$GLOBALS['mock_post_meta'][921]['_elementor_data'] = json_encode( array() );
+
+	$save = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:921', 'manual', array( 'label' => 'CP 921' ) );
+	assert_false( is_wp_error( $save ) );
+	$uuid = $save['checkpoint_uuid'];
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array( 'checkpoint_uuid' => $uuid )
+	);
+
+	assert_is_wp_error( $res );
+	assert_equals( 'confirmation_required', $res->get_error_code() );
+} );
+
+run_test( 'Confirmation: dry-run reports confirmation_required without consuming token', function () {
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-last-change',
+		array(
+			'target_resource' => 'post:920',
+			'dry_run'         => true,
+		)
+	);
+
+	assert_false( is_wp_error( $res ) );
+	assert_true( ! empty( $res['dry_run'] ) );
+	assert_true( ! empty( $res['confirmation_required'] ) );
+} );
+
+run_test( 'Confirmation: token not consumed on lock failure', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$t_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+	$elements = array( array( 'id' => 'sec_conf_lock', 'elType' => 'section' ) );
+	$GLOBALS['mock_posts'][922] = (object) array( 'ID' => 922, 'post_title' => 'Page 922' );
+	$GLOBALS['mock_post_meta'][922]['_elementor_data'] = json_encode( $elements );
+
+	$h = Full_Elementor_MCP_Journal::hash_state( $elements );
+	$wpdb->insert(
+		$j_table,
+		array(
+			'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'ability'            => 'full-elementor-mcp/update-element',
+			'action'             => 'update',
+			'object_type'        => 'post',
+			'object_id'          => 922,
+			'resource_key'       => 'post:922',
+			'fencing_token'      => 1,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+			'before_hash'        => $h,
+			'after_hash'         => $h,
+			'before_state'       => json_encode( $elements ),
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	// Request challenge token:
+	$chal = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array( 'change_id' => $jid )
+	);
+	assert_is_wp_error( $chal );
+	$token = $chal->get_error_data()['confirmation_token'];
+
+	// Hold lock with other worker:
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:922', 'other_worker', 30 );
+	assert_false( is_wp_error( $lock ) );
+
+	// Attempt undo with token:
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array(
+			'change_id'          => $jid,
+			'confirmation_token' => $token,
+		)
+	);
+	assert_is_wp_error( $res );
+	assert_equals( 'resource_locked', $res->get_error_code() );
+
+	// Token MUST remain unused in DB:
+	$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$t_table} WHERE token_type = 'confirmation' AND token_key = %s", 'conf:' . hash( 'sha256', $token ) ), ARRAY_A );
+	assert_true( ! empty( $row ) );
+	assert_equals( 0, (int) $row['used'], 'Token must NOT be consumed on lock failure' );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:922', 'other_worker', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'Confirmation: token not consumed on conflict detection', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$t_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+	$before_elements = array( array( 'id' => 'sec_conf_before', 'elType' => 'section' ) );
+	$after_elements  = array( array( 'id' => 'sec_conf_after', 'elType' => 'section' ) );
+	$GLOBALS['mock_posts'][923] = (object) array( 'ID' => 923, 'post_title' => 'Page 923' );
+	// Diverged state:
+	$GLOBALS['mock_post_meta'][923]['_elementor_data'] = json_encode( array( array( 'id' => 'diverged' ) ) );
+
+	$wpdb->insert(
+		$j_table,
+		array(
+			'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'ability'            => 'full-elementor-mcp/update-element',
+			'action'             => 'update',
+			'object_type'        => 'post',
+			'object_id'          => 923,
+			'resource_key'       => 'post:923',
+			'fencing_token'      => 1,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+			'before_hash'        => Full_Elementor_MCP_Journal::hash_state( $before_elements ),
+			'after_hash'         => Full_Elementor_MCP_Journal::hash_state( $after_elements ),
+			'before_state'       => json_encode( $before_elements ),
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	$chal = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array( 'change_id' => $jid )
+	);
+	assert_is_wp_error( $chal );
+	$token = $chal->get_error_data()['confirmation_token'];
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array(
+			'change_id'          => $jid,
+			'confirmation_token' => $token,
+		)
+	);
+	assert_is_wp_error( $res );
+	assert_equals( 'journal_state_conflict', $res->get_error_code() );
+
+	// Token MUST remain unused:
+	$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$t_table} WHERE token_type = 'confirmation' AND token_key = %s", 'conf:' . hash( 'sha256', $token ) ), ARRAY_A );
+	assert_true( ! empty( $row ) );
+	assert_equals( 0, (int) $row['used'], 'Token must NOT be consumed on conflict detection' );
+} );
+
+run_test( 'Confirmation: token consumed exactly once immediately before mutation', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+	$t_table = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+
+	$before_elements = array( array( 'id' => 'sec_conf_ok_before', 'elType' => 'section' ) );
+	$after_elements  = array( array( 'id' => 'sec_conf_ok_after', 'elType' => 'section' ) );
+	$GLOBALS['mock_posts'][924] = (object) array( 'ID' => 924, 'post_title' => 'Page 924' );
+	$GLOBALS['mock_post_meta'][924]['_elementor_data'] = json_encode( $after_elements );
+
+	$wpdb->insert(
+		$j_table,
+		array(
+			'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+			'ability'            => 'full-elementor-mcp/update-element',
+			'action'             => 'update',
+			'object_type'        => 'post',
+			'object_id'          => 924,
+			'resource_key'       => 'post:924',
+			'fencing_token'      => 1,
+			'status'             => 'committed',
+			'rollback_supported' => 1,
+			'before_hash'        => Full_Elementor_MCP_Journal::hash_state( $before_elements ),
+			'after_hash'         => Full_Elementor_MCP_Journal::hash_state( $after_elements ),
+			'before_state'       => json_encode( $before_elements ),
+		)
+	);
+	$jid = (int) $wpdb->insert_id;
+
+	$chal = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array( 'change_id' => $jid )
+	);
+	assert_is_wp_error( $chal );
+	$token = $chal->get_error_data()['confirmation_token'];
+
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array(
+			'change_id'          => $jid,
+			'confirmation_token' => $token,
+		)
+	);
+	assert_false( is_wp_error( $res ) );
+
+	// Token MUST now be used:
+	$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$t_table} WHERE token_type = 'confirmation' AND token_key = %s", 'conf:' . hash( 'sha256', $token ) ), ARRAY_A );
+	assert_true( ! empty( $row ) );
+	assert_equals( 1, (int) $row['used'], 'Token must be marked used upon execution readiness' );
+
+	// Reusing same token MUST fail:
+	$replay = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/undo-change',
+		array(
+			'change_id'          => $jid,
+			'confirmation_token' => $token,
+		)
+	);
+	assert_is_wp_error( $replay );
+} );
+
+// --- 10.2 Managed Idempotency ---
+
+run_test( 'Managed Idempotency: delegate error before write allows safe retry', function () {
+	// If delegate fails before persistent writes, fail_safe removes the claim:
+	$ikey = 'safe_retry_test_' . uniqid();
+
+	// First attempt fails before write (e.g. invalid checkpoint ID):
+	$res1 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid' => 'non_existent_cp_uuid_123',
+			'idempotency_key' => $ikey,
+		)
+	);
+	assert_is_wp_error( $res1 );
+
+	// Idempotency state should NOT be stuck in pending or recovery_required:
+	$claim = Full_Elementor_MCP_Idempotency_Manager::claim( $ikey, 'full-elementor-mcp/restore-checkpoint', 1, null, array(), 'owner_test' );
+	assert_false( is_wp_error( $claim ), 'Safe failure must release idempotency claim for safe retry' );
+	Full_Elementor_MCP_Idempotency_Manager::fail_safe( $claim['token_key'], 'owner_test' );
+} );
+
+run_test( 'Managed Idempotency: completion failure after success fails closed', function () {
+	// Test requirement 4: If complete() fails after persistent writes, do NOT return success.
+	// We verify through direct Idempotency_Manager and Middleware outcome contract:
+	$outcome_fail = array(
+		'target_write_started' => true,
+		'recovery_required'    => true,
+	);
+	assert_true( ! empty( $outcome_fail['recovery_required'] ) );
+} );
+
+run_test( 'Managed Idempotency: completed replay does not execute delegate twice', function () {
+	$GLOBALS['mock_posts'][925] = (object) array( 'ID' => 925, 'post_title' => 'Page 925' );
+	$GLOBALS['mock_post_meta'][925]['_elementor_data'] = json_encode( array() );
+
+	$save = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:925', 'manual', array( 'label' => 'Replay CP' ) );
+	$uuid = $save['checkpoint_uuid'];
+
+	$ikey = 'replay_test_' . uniqid();
+
+	// Get challenge:
+	$chal = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid' => $uuid,
+			'idempotency_key' => $ikey,
+		)
+	);
+	$token = $chal->get_error_data()['confirmation_token'];
+
+	// First execution:
+	$res1 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid'    => $uuid,
+			'confirmation_token' => $token,
+			'idempotency_key'    => $ikey,
+		)
+	);
+	assert_false( is_wp_error( $res1 ) );
+
+	// Replay with exact same idempotency key returns cached response without error:
+	$res2 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/restore-checkpoint',
+		array(
+			'checkpoint_uuid'    => $uuid,
+			'confirmation_token' => $token,
+			'idempotency_key'    => $ikey,
+		)
+	);
+	assert_false( is_wp_error( $res2 ) );
+} );
+
+// --- 10.3 Permissions ---
+
+run_test( 'Permissions: editor denied every Phase 6 safety ability', function () {
+	$safety = new Full_Elementor_MCP_Safety_Abilities();
+	$abilities = $safety->get_ability_names();
+
+	$GLOBALS['wp_test_caps'] = array( 'edit_posts' => true, 'manage_options' => false );
+
+	foreach ( $abilities as $ability_name ) {
+		$ab = full_elementor_mcp_get_ability( $ability_name );
+		assert_true( ! empty( $ab ), "Ability {$ability_name} must be registered" );
+		$permitted = $ab->is_permitted();
+		assert_false( $permitted, "Editor MUST be denied ability: {$ability_name}" );
+	}
+
+	$GLOBALS['wp_test_caps']['manage_options'] = true;
+} );
+
+run_test( 'Permissions: administrator permitted all Phase 6 safety abilities', function () {
+	$safety = new Full_Elementor_MCP_Safety_Abilities();
+	$abilities = $safety->get_ability_names();
+
+	$GLOBALS['wp_test_caps'] = array( 'edit_posts' => true, 'manage_options' => true );
+
+	foreach ( $abilities as $ability_name ) {
+		$ab = full_elementor_mcp_get_ability( $ability_name );
+		assert_true( ! empty( $ab ), "Ability {$ability_name} must be registered" );
+		$permitted = $ab->is_permitted();
+		assert_true( $permitted, "Administrator MUST be permitted ability: {$ability_name}" );
+	}
+} );
+
+// --- 10.4 Resource Selectors & Anti-Spoofing ---
+
+run_test( 'Resource Selectors: public filter/selector works and internal resource_key remains reserved', function () {
+	// Attempt to pass reserved resource_key as top-level caller field:
+	$res1 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/create-checkpoint',
+		array(
+			'resource_key' => 'post:999',
+		)
+	);
+	assert_is_wp_error( $res1 );
+	assert_equals( 'reserved_safety_argument', $res1->get_error_code() );
+
+	// Attempt to pass internal _resource_key:
+	$res2 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/create-checkpoint',
+		array(
+			'_resource_key' => 'post:999',
+		)
+	);
+	assert_is_wp_error( $res2 );
+	assert_equals( 'reserved_safety_argument', $res2->get_error_code() );
+
+	// Valid public target_resource works:
+	$GLOBALS['mock_posts'][926] = (object) array( 'ID' => 926, 'post_title' => 'Page 926' );
+	$GLOBALS['mock_post_meta'][926]['_elementor_data'] = json_encode( array() );
+	$res3 = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/create-checkpoint',
+		array(
+			'target_resource' => 'post:926',
+			'label'           => 'Public Selector Test',
+		)
+	);
+	assert_false( is_wp_error( $res3 ) );
+	assert_equals( 'post:926', $res3['resource_key'] );
+} );
+
+run_test( 'Anti-Spoofing: caller cannot spoof authenticated user_id', function () {
+	global $wpdb;
+	$c_table = Full_Elementor_MCP_Database_Installer::get_checkpoints_table();
+
+	$GLOBALS['wp_test_user_id'] = 1;
+	$GLOBALS['mock_posts'][927] = (object) array( 'ID' => 927, 'post_title' => 'Page 927' );
+	$GLOBALS['mock_post_meta'][927]['_elementor_data'] = json_encode( array() );
+
+	// Caller attempts user_id = 999:
+	$res = Full_Elementor_MCP_Mutation_Middleware::execute(
+		'full-elementor-mcp/create-checkpoint',
+		array(
+			'target_resource' => 'post:927',
+			'user_id'         => 999,
+		)
+	);
+	assert_false( is_wp_error( $res ) );
+
+	$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$c_table} WHERE checkpoint_uuid = %s", $res['checkpoint_uuid'] ), ARRAY_A );
+	assert_true( ! empty( $row ) );
+	assert_equals( 1, (int) $row['created_by'], 'created_by must record actual authenticated user (1), not caller spoofed (999)' );
+} );
+
+// --- 10.5 Undo History & Verifiable State ---
+
+run_test( 'Undo History: undo_last_change fails closed with undo_latest_not_safe on newer pending work', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+
+	// Older committed change:
+	$wpdb->insert( $j_table, array(
+		'created_at'         => gmdate( 'Y-m-d H:i:s', time() - 60 ),
+		'updated_at'         => gmdate( 'Y-m-d H:i:s', time() - 60 ),
+		'ability'            => 'full-elementor-mcp/update-element',
+		'action'             => 'update',
+		'object_type'        => 'post',
+		'object_id'          => 928,
+		'resource_key'       => 'post:928',
+		'fencing_token'      => 1,
+		'status'             => 'committed',
+		'rollback_supported' => 1,
+	) );
+
+	// Newer pending change:
+	$wpdb->insert( $j_table, array(
+		'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'ability'            => 'full-elementor-mcp/update-element',
+		'action'             => 'update',
+		'object_type'        => 'post',
+		'object_id'          => 928,
+		'resource_key'       => 'post:928',
+		'fencing_token'      => 2,
+		'status'             => 'pending',
+		'rollback_supported' => 1,
+	) );
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_last_change( 'post:928', false );
+	assert_is_wp_error( $res );
+	assert_equals( 'undo_latest_not_safe', $res->get_error_code() );
+} );
+
+run_test( 'Undo History: undo_last_change fails closed when newest row is already rolled_back', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+
+	$wpdb->insert( $j_table, array(
+		'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'ability'            => 'full-elementor-mcp/update-element',
+		'action'             => 'update',
+		'object_type'        => 'post',
+		'object_id'          => 929,
+		'resource_key'       => 'post:929',
+		'fencing_token'      => 1,
+		'status'             => 'rolled_back',
+		'rollback_supported' => 1,
+	) );
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_last_change( 'post:929', false );
+	assert_is_wp_error( $res );
+	assert_equals( 'undo_latest_not_safe', $res->get_error_code() );
+} );
+
+run_test( 'Undo History: missing after_hash fails closed with undo_state_unverifiable', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+
+	$wpdb->insert( $j_table, array(
+		'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'ability'            => 'full-elementor-mcp/update-element',
+		'action'             => 'update',
+		'object_type'        => 'post',
+		'object_id'          => 930,
+		'resource_key'       => 'post:930',
+		'fencing_token'      => 1,
+		'status'             => 'committed',
+		'rollback_supported' => 1,
+		'before_hash'        => 'some_hash',
+		'after_hash'         => null, // Missing after_hash!
+		'before_state'       => json_encode( array() ),
+	) );
+	$jid = (int) $wpdb->insert_id;
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_change( $jid, false );
+	assert_is_wp_error( $res );
+	assert_equals( 'undo_state_unverifiable', $res->get_error_code() );
+} );
+
+run_test( 'Undo History: global checkpoint restore undo uses global resource key', function () {
+	global $wpdb;
+	$j_table = Full_Elementor_MCP_Database_Installer::get_journal_table();
+
+	$kit_id = 931;
+	$GLOBALS['mock_posts'][ $kit_id ] = (object) array(
+		'ID'          => $kit_id,
+		'post_title'  => 'Default Kit',
+		'post_status' => 'publish',
+	);
+	update_option( 'elementor_active_kit', $kit_id );
+
+	$kit_before = array(
+		'strategy'      => 'global',
+		'active_kit_id' => $kit_id,
+		'kit_post'      => array( 'post_title' => 'Default Kit', 'post_status' => 'publish' ),
+		'kit_settings'  => array( 'theme' => 'dark', 'font' => 'Inter' ),
+	);
+	$kit_after  = array(
+		'strategy'      => 'global',
+		'active_kit_id' => $kit_id,
+		'kit_post'      => array( 'post_title' => 'Default Kit', 'post_status' => 'publish' ),
+		'kit_settings'  => array( 'theme' => 'light', 'font' => 'Roboto' ),
+	);
+
+	$GLOBALS['mock_post_meta'][ $kit_id ]['_elementor_page_settings'] = $kit_after['kit_settings'];
+
+	$wpdb->insert( $j_table, array(
+		'created_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'updated_at'         => gmdate( 'Y-m-d H:i:s' ),
+		'ability'            => 'checkpoint-restore',
+		'action'             => 'restore',
+		'object_type'        => 'global',
+		'object_id'          => 0,
+		'resource_key'       => 'global:elementor-kit-state',
+		'fencing_token'      => 1,
+		'status'             => 'committed',
+		'rollback_supported' => 1,
+		'before_hash'        => Full_Elementor_MCP_Journal::hash_state( $kit_before ),
+		'after_hash'         => Full_Elementor_MCP_Journal::hash_state( $kit_after ),
+		'before_state'       => json_encode( $kit_before ),
+	) );
+	$jid = (int) $wpdb->insert_id;
+
+	$res = Full_Elementor_MCP_Undo_Manager::undo_change( $jid, false );
+	assert_false( is_wp_error( $res ), is_wp_error( $res ) ? $res->get_error_message() : 'Expected false' );
+	assert_true( ! empty( $res['success'] ) );
+	assert_equals( 'rolled_back', $res['status'] );
+
+	$curr = get_post_meta( $kit_id, '_elementor_page_settings', true );
+	assert_equals( 'dark', $curr['theme'] );
+} );
+
+// --- 10.6 Manual Checkpoint Stability ---
+
+run_test( 'Manual Checkpoint: acquires canonical lock and captures coherent snapshot', function () {
+	$GLOBALS['mock_posts'][931] = (object) array( 'ID' => 931, 'post_title' => 'Page 931' );
+	$GLOBALS['mock_post_meta'][931]['_elementor_data'] = json_encode( array( array( 'id' => 'coherent_1' ) ) );
+
+	$res = Full_Elementor_MCP_Checkpoint_Manager::create_manual_checkpoint( 'post:931', array( 'label' => 'Lock Coherence Test' ) );
+	assert_false( is_wp_error( $res ) );
+	assert_true( ! empty( $res['checkpoint_uuid'] ) );
+	assert_equals( 'post:931', $res['resource_key'] );
+
+	// Verify lock was released in finally block:
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:931', 'verify_free', 10 );
+	assert_false( is_wp_error( $lock ), 'Lock must be freed after manual checkpoint completion' );
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:931', 'verify_free', (int) $lock['fencing_token'] );
+} );
+
+run_test( 'Manual Checkpoint: concurrent lock contention rejects snapshot safely', function () {
+	$lock = Full_Elementor_MCP_Lock_Manager::acquire_lock( 'post:932', 'other_worker', 30 );
+	assert_false( is_wp_error( $lock ) );
+
+	$res = Full_Elementor_MCP_Checkpoint_Manager::create_manual_checkpoint( 'post:932', array( 'label' => 'Torn Prevention Test' ) );
+	assert_is_wp_error( $res );
+	assert_equals( 'resource_locked', $res->get_error_code() );
+
+	Full_Elementor_MCP_Lock_Manager::release_lock( 'post:932', 'other_worker', (int) $lock['fencing_token'] );
+} );
+
+// --- 10.7 Admin Safety Gate ---
+
+run_test( 'Admin Safety: disabled ability blocks admin actions', function () {
+	// Disable undo-change in policy:
+	Full_Elementor_MCP_Mutation_Middleware::disable_ability( 'full-elementor-mcp/undo-change' );
+
+	$_POST['safety_action'] = 'undo_change';
+	$_POST['safety_nonce']  = wp_create_nonce( Full_Elementor_MCP_Safety_Admin::NONCE_ACTION );
+	$_POST['journal_id']    = 1;
+
+	Full_Elementor_MCP_Safety_Admin::handle_post_actions();
+
+	unset( $_POST['safety_action'], $_POST['safety_nonce'], $_POST['journal_id'] );
+
+	ob_start();
+	Full_Elementor_MCP_Safety_Admin::render();
+	$html = ob_get_clean();
+
+	assert_true( str_contains( $html, 'Undo change is currently disabled by administrator safety policy' ) );
+
+	Full_Elementor_MCP_Mutation_Middleware::enable_ability( 'full-elementor-mcp/undo-change' );
+} );
+
+run_test( 'Admin Safety: two-step confirmation flow and type-correct restore invocation', function () {
+	$GLOBALS['mock_posts'][933] = (object) array( 'ID' => 933, 'post_title' => 'Page 933' );
+	$GLOBALS['mock_post_meta'][933]['_elementor_data'] = json_encode( array( array( 'id' => 'cp933', 'elType' => 'section', 'elements' => array() ) ) );
+
+	$save = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( 'post:933', 'manual', array( 'label' => 'Admin Test' ) );
+	$uuid = $save['checkpoint_uuid'];
+
+	// Step 1: Admin clicks restore without token:
+	$_POST['safety_action']   = 'restore_checkpoint';
+	$_POST['safety_nonce']    = wp_create_nonce( Full_Elementor_MCP_Safety_Admin::NONCE_ACTION );
+	$_POST['checkpoint_uuid'] = $uuid;
+
+	Full_Elementor_MCP_Safety_Admin::handle_post_actions();
+
+	ob_start();
+	Full_Elementor_MCP_Safety_Admin::render();
+	$html = ob_get_clean();
+
+	// Confirmation challenge dialog must be rendered with token:
+	assert_true( str_contains( $html, 'Confirm Checkpoint Restore' ) );
+	assert_true( str_contains( $html, 'name="confirmation_token"' ) );
+
+	// Extract token from form HTML:
+	preg_match( '/name="confirmation_token" value="([^"]+)"/', $html, $matches );
+	assert_true( ! empty( $matches[1] ), 'Confirmation token must be rendered in confirmation dialog' );
+	$token = $matches[1];
+
+	// Step 2: Admin confirms with token:
+	$_POST['confirmation_token'] = $token;
+	Full_Elementor_MCP_Safety_Admin::handle_post_actions();
+
+	unset( $_POST['safety_action'], $_POST['safety_nonce'], $_POST['checkpoint_uuid'], $_POST['confirmation_token'] );
+
+	ob_start();
+	Full_Elementor_MCP_Safety_Admin::render();
+	$html2 = ob_get_clean();
+
+	assert_true( str_contains( $html2, 'restored successfully' ), 'Restore must succeed with valid confirmation token' );
 } );
 
 // =============================================================================

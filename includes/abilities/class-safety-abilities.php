@@ -197,27 +197,27 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => true ),
 				),
 				'execute_callback'    => array( $this, 'execute_list_changes' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
-						'resource_key' => array(
+						'resource_filter' => array(
 							'type'        => 'string',
 							'description' => __( 'Optional canonical resource key filter (e.g. post:123).', 'full-elementor-mcp' ),
 						),
-						'status'       => array(
+						'status'          => array(
 							'type'        => 'string',
 							'description' => __( 'Optional status filter (pending, committed, rolled_back, failed).', 'full-elementor-mcp' ),
 						),
-						'since'        => array(
+						'since'           => array(
 							'type'        => 'string',
 							'description' => __( 'Optional ISO UTC timestamp lower bound.', 'full-elementor-mcp' ),
 						),
-						'limit'        => array(
+						'limit'           => array(
 							'type'        => 'integer',
 							'description' => __( 'Maximum number of items to return (1-100, default 20).', 'full-elementor-mcp' ),
 						),
-						'offset'       => array(
+						'offset'          => array(
 							'type'        => 'integer',
 							'description' => __( 'Offset for pagination (default 0).', 'full-elementor-mcp' ),
 						),
@@ -230,6 +230,10 @@ class Full_Elementor_MCP_Safety_Abilities {
 	public function execute_list_changes( array $input = array() ): array {
 		if ( ! class_exists( 'Full_Elementor_MCP_Journal' ) ) {
 			return array( 'changes' => array() );
+		}
+
+		if ( isset( $input['resource_filter'] ) && ! isset( $input['resource_key'] ) ) {
+			$input['resource_key'] = $input['resource_filter'];
 		}
 
 		$entries = Full_Elementor_MCP_Journal::list_entries( $input );
@@ -259,7 +263,7 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => true ),
 				),
 				'execute_callback'    => array( $this, 'execute_get_change' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
@@ -292,14 +296,22 @@ class Full_Elementor_MCP_Safety_Abilities {
 			return new \WP_Error( 'change_not_found', __( 'Journal entry not found.', 'full-elementor-mcp' ) );
 		}
 
-		// Sanitize before_state: redact passwords/tokens if present:
+		// Never expose raw before_state or arbitrary historical content:
 		if ( ! empty( $entry['before_state'] ) && is_string( $entry['before_state'] ) ) {
-			$decoded = json_decode( $entry['before_state'], true );
-			if ( is_array( $decoded ) && class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
-				$entry['before_state_sanitized'] = Full_Elementor_MCP_Audit_Logger::sanitize_audit_args( $decoded );
+			$raw = (string) $entry['before_state'];
+			$entry['before_state_summary'] = array(
+				'byte_length' => strlen( $raw ),
+				'type'        => 'json',
+				'hash'        => $entry['before_hash'] ?? null,
+			);
+			$decoded = json_decode( $raw, true );
+			if ( is_array( $decoded ) ) {
+				$entry['before_state_summary']['type']          = 'array';
+				$entry['before_state_summary']['element_count'] = count( $decoded );
 			}
-			unset( $entry['before_state'] );
 		}
+		unset( $entry['before_state'] );
+		unset( $entry['before_state_sanitized'] );
 
 		return $entry;
 	}
@@ -322,11 +334,11 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => true ),
 				),
 				'execute_callback'    => array( $this, 'execute_list_checkpoints' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
-						'resource_key'       => array(
+						'resource_filter'    => array(
 							'type'        => 'string',
 							'description' => __( 'Optional canonical resource key filter.', 'full-elementor-mcp' ),
 						),
@@ -361,6 +373,10 @@ class Full_Elementor_MCP_Safety_Abilities {
 			return array( 'checkpoints' => array() );
 		}
 
+		if ( isset( $input['resource_filter'] ) && ! isset( $input['resource_key'] ) ) {
+			$input['resource_key'] = $input['resource_filter'];
+		}
+
 		$checkpoints = Full_Elementor_MCP_Checkpoint_Manager::list_checkpoints( $input );
 		return array(
 			'checkpoints' => $checkpoints,
@@ -388,7 +404,7 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => true ),
 				),
 				'execute_callback'    => array( $this, 'execute_get_checkpoint' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
@@ -452,31 +468,31 @@ class Full_Elementor_MCP_Safety_Abilities {
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
-						'event_type'   => array(
+						'event_type'      => array(
 							'type'        => 'string',
 							'description' => __( 'Optional event type filter.', 'full-elementor-mcp' ),
 						),
-						'severity'     => array(
+						'severity'        => array(
 							'type'        => 'string',
 							'description' => __( 'Optional severity filter (debug, info, notice, warning, error, critical).', 'full-elementor-mcp' ),
 						),
-						'request_uuid' => array(
+						'request_uuid'    => array(
 							'type'        => 'string',
 							'description' => __( 'Optional request UUID correlation filter.', 'full-elementor-mcp' ),
 						),
-						'resource_key' => array(
+						'resource_filter' => array(
 							'type'        => 'string',
 							'description' => __( 'Optional resource key filter.', 'full-elementor-mcp' ),
 						),
-						'since'        => array(
+						'since'           => array(
 							'type'        => 'string',
 							'description' => __( 'Optional ISO UTC timestamp lower bound.', 'full-elementor-mcp' ),
 						),
-						'limit'        => array(
+						'limit'           => array(
 							'type'        => 'integer',
 							'description' => __( 'Maximum items to return (1-200, default 50).', 'full-elementor-mcp' ),
 						),
-						'offset'       => array(
+						'offset'          => array(
 							'type'        => 'integer',
 							'description' => __( 'Pagination offset (default 0).', 'full-elementor-mcp' ),
 						),
@@ -489,6 +505,10 @@ class Full_Elementor_MCP_Safety_Abilities {
 	public function execute_list_audit_events( array $input = array() ): array {
 		if ( ! class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {
 			return array( 'events' => array() );
+		}
+
+		if ( isset( $input['resource_filter'] ) && ! isset( $input['resource_key'] ) ) {
+			$input['resource_key'] = $input['resource_filter'];
 		}
 
 		$events = Full_Elementor_MCP_Audit_Logger::query( $input );
@@ -518,7 +538,7 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => false ),
 				),
 				'execute_callback'    => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_change_ability' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
@@ -529,6 +549,10 @@ class Full_Elementor_MCP_Safety_Abilities {
 						'journal_id'         => array(
 							'type'        => 'integer',
 							'description' => __( 'Alias for change_id.', 'full-elementor-mcp' ),
+						),
+						'target_resource'    => array(
+							'type'        => 'string',
+							'description' => __( 'Optional expected target resource key for verification.', 'full-elementor-mcp' ),
 						),
 						'dry_run'            => array(
 							'type'        => 'boolean',
@@ -562,23 +586,27 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => false ),
 				),
 				'execute_callback'    => array( 'Full_Elementor_MCP_Undo_Manager', 'execute_undo_last_change_ability' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
-						'resource_key'       => array(
+						'target_resource'     => array(
 							'type'        => 'string',
-							'description' => __( 'The canonical resource key (e.g. post:123).', 'full-elementor-mcp' ),
+							'description' => __( 'The canonical target resource (e.g. post:123 or global:elementor-kit-state).', 'full-elementor-mcp' ),
 						),
-						'post_id'            => array(
+						'target_resource_key' => array(
+							'type'        => 'string',
+							'description' => __( 'Alias for target_resource.', 'full-elementor-mcp' ),
+						),
+						'post_id'             => array(
 							'type'        => 'integer',
-							'description' => __( 'The post ID (alternative to resource_key).', 'full-elementor-mcp' ),
+							'description' => __( 'The post ID (alternative to target_resource).', 'full-elementor-mcp' ),
 						),
-						'dry_run'            => array(
+						'dry_run'             => array(
 							'type'        => 'boolean',
 							'description' => __( 'When true, returns preview of undo without persistent modifications.', 'full-elementor-mcp' ),
 						),
-						'confirmation_token' => array(
+						'confirmation_token'  => array(
 							'type'        => 'string',
 							'description' => __( 'Confirmation challenge token for execution.', 'full-elementor-mcp' ),
 						),
@@ -606,19 +634,27 @@ class Full_Elementor_MCP_Safety_Abilities {
 					'annotations' => array( 'readonly' => false ),
 				),
 				'execute_callback'    => array( 'Full_Elementor_MCP_Checkpoint_Manager', 'execute_restore_ability' ),
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
-						'checkpoint_uuid'    => array(
+						'checkpoint_uuid'     => array(
 							'type'        => 'string',
 							'description' => __( 'The UUID of the checkpoint to restore.', 'full-elementor-mcp' ),
 						),
-						'dry_run'            => array(
+						'target_resource'     => array(
+							'type'        => 'string',
+							'description' => __( 'Optional expected target resource key for verification.', 'full-elementor-mcp' ),
+						),
+						'target_resource_key' => array(
+							'type'        => 'string',
+							'description' => __( 'Alias for target_resource.', 'full-elementor-mcp' ),
+						),
+						'dry_run'             => array(
 							'type'        => 'boolean',
 							'description' => __( 'When true, analyzes restore plan without modifying persistent state.', 'full-elementor-mcp' ),
 						),
-						'confirmation_token' => array(
+						'confirmation_token'  => array(
 							'type'        => 'string',
 							'description' => __( 'Confirmation challenge token for execution.', 'full-elementor-mcp' ),
 						),
@@ -654,19 +690,23 @@ class Full_Elementor_MCP_Safety_Abilities {
 					}
 					return new \WP_Error( 'delegate_missing', __( 'Create checkpoint delegate missing.', 'full-elementor-mcp' ) );
 				},
-				'permission_callback' => array( $this, 'check_edit_permission' ),
+				'permission_callback' => array( $this, 'check_admin_permission' ),
 				'input_schema'        => array(
 					'type'       => 'object',
 					'properties' => array(
-						'resource_key' => array(
+						'target_resource'     => array(
 							'type'        => 'string',
-							'description' => __( 'The canonical resource key (e.g. post:123).', 'full-elementor-mcp' ),
+							'description' => __( 'The canonical resource key (e.g. post:123 or global:elementor-kit-state).', 'full-elementor-mcp' ),
 						),
-						'post_id'      => array(
+						'target_resource_key' => array(
+							'type'        => 'string',
+							'description' => __( 'Alias for target_resource.', 'full-elementor-mcp' ),
+						),
+						'post_id'             => array(
 							'type'        => 'integer',
 							'description' => __( 'The post ID to checkpoint.', 'full-elementor-mcp' ),
 						),
-						'label'        => array(
+						'label'               => array(
 							'type'        => 'string',
 							'description' => __( 'Human-readable label for this checkpoint.', 'full-elementor-mcp' ),
 						),
