@@ -169,6 +169,10 @@ class Full_Elementor_MCP_Plugin {
 			return;
 		}
 
+		if ( ! is_object( $mcp_adapter ) || ! method_exists( $mcp_adapter, 'create_server' ) ) {
+			return;
+		}
+
 		// Optional STDIO transport (used by the bundled `bin/full-elementor-mcp-proxy.mjs`
 		// for desktop AI clients like Claude Desktop). Only register the
 		// class when the MCP Adapter ships it — older versions only had

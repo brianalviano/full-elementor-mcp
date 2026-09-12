@@ -30,6 +30,22 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 	private static array $ability_registry = array();
 
 	/**
+	 * Test-only fault injection hook for simulating process crashes at real safety boundaries.
+	 *
+	 * @var ?\Closure(string, array<string, mixed>): void
+	 */
+	private static ?\Closure $test_fault_hook = null;
+
+	/**
+	 * Sets or clears a test-only fault injection hook.
+	 *
+	 * @param ?\Closure(string, array<string, mixed>): void $hook Hook closure or null.
+	 */
+	public static function set_test_fault_hook( ?\Closure $hook ): void {
+		self::$test_fault_hook = $hook;
+	}
+
+	/**
 	 * Reserved internal safety fields that caller must never supply.
 	 */
 	const RESERVED_SAFETY_FIELDS = array(
@@ -958,6 +974,16 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 
 		$journal_id = (int) $journal_result;
 
+		if ( null !== self::$test_fault_hook ) {
+			call_user_func( self::$test_fault_hook, 'after_wal_begin', array(
+				'journal_id'    => $journal_id,
+				'resource_key'  => $resource_key,
+				'fencing_token' => $fencing_token,
+				'owner_id'      => $owner_id,
+				'ability'       => $ability,
+			) );
+		}
+
 		// 17. Attach WAL Journal to Idempotency Claim:
 		if ( $idemp_token_key ) {
 			$attach_res = Full_Elementor_MCP_Idempotency_Manager::attach_journal_id( $idemp_token_key, $owner_id, $journal_id );
@@ -1382,6 +1408,17 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 				} else {
 					$after_state = $result;
 				}
+			}
+
+			if ( null !== self::$test_fault_hook ) {
+				call_user_func( self::$test_fault_hook, 'before_journal_commit', array(
+					'journal_id'    => $journal_id,
+					'resource_key'  => $resource_key,
+					'fencing_token' => $fencing_token,
+					'owner_id'      => $owner_id,
+					'ability'       => $ability,
+					'created_id'    => $created_id ?? null,
+				) );
 			}
 
 			$commit_res = Full_Elementor_MCP_Journal::commit( $journal_id, $after_state, $fencing_token );

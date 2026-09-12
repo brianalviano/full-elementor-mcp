@@ -3,16 +3,14 @@
  * Worker Process for Real MySQL Multi-Process Concurrency Testing.
  *
  * Runs as an independent OS process with its own independent MySQL connection.
- *
- * Actions:
- * - lock: Contend for a resource lock with leasing and fencing token.
- * - idempotency: Register or claim an idempotency key with args hash.
- * - confirmation: Consume a one-time confirmation token atomically.
- * - journal_cas: Attempt terminal status transition on a journal row.
- * - checkpoint_insert: Insert a checkpoint with a given UUID.
- * - undo: Attempt atomic undo execution on a journal row.
- * - restore: Attempt resource lock and checkpoint restore.
- * - safe_write: Attempt conditional write with a specific fencing token.
+ * Bootstraps the real Safe Elementor MCP safety runtime and invokes production APIs:
+ * - Full_Elementor_MCP_Lock_Manager
+ * - Full_Elementor_MCP_Idempotency_Manager
+ * - Full_Elementor_MCP_Confirmation_Manager
+ * - Full_Elementor_MCP_Journal
+ * - Full_Elementor_MCP_Checkpoint_Manager
+ * - Full_Elementor_MCP_Undo_Manager
+ * - Full_Elementor_MCP_Safe_Writes
  *
  * Output is emitted as a single JSON object to STDOUT.
  *
@@ -25,47 +23,32 @@ if ( php_sapi_name() !== 'cli' ) {
 	exit( 1 );
 }
 
-function get_worker_pdo(): PDO {
-	$env_host = getenv( 'DB_HOST' ) ?: getenv( 'MYSQL_HOST' ) ?: '127.0.0.1';
-	$env_port = (int) ( getenv( 'DB_PORT' ) ?: getenv( 'MYSQL_PORT' ) ?: 0 );
-	$env_user = getenv( 'DB_USER' ) ?: getenv( 'MYSQL_USER' ) ?: 'root';
-	$env_pass = getenv( 'DB_PASSWORD' ) !== false ? (string) getenv( 'DB_PASSWORD' ) : ( getenv( 'MYSQL_PWD' ) !== false ? (string) getenv( 'MYSQL_PWD' ) : null );
-	$dbname   = getenv( 'DB_NAME' ) ?: getenv( 'MYSQL_DATABASE' ) ?: 'safe_elementor_test';
+// Ensure safety test harness and real MySQL $wpdb wrapper are initialized
+require_once __DIR__ . '/test-mysql-safety.php';
 
-	$candidates = array();
-	if ( $env_port > 0 && null !== $env_pass ) {
-		$candidates[] = array( 'host' => $env_host, 'port' => $env_port, 'user' => $env_user, 'pass' => $env_pass );
-	} elseif ( $env_port > 0 ) {
-		$candidates[] = array( 'host' => $env_host, 'port' => $env_port, 'user' => $env_user, 'pass' => 'root' );
-		$candidates[] = array( 'host' => $env_host, 'port' => $env_port, 'user' => $env_user, 'pass' => 'mysql' );
-		$candidates[] = array( 'host' => $env_host, 'port' => $env_port, 'user' => $env_user, 'pass' => '' );
-	} else {
-		if ( null !== $env_pass ) {
-			$candidates[] = array( 'host' => $env_host, 'port' => 3306, 'user' => $env_user, 'pass' => $env_pass );
-			$candidates[] = array( 'host' => $env_host, 'port' => 3307, 'user' => $env_user, 'pass' => $env_pass );
-		}
-		$candidates[] = array( 'host' => $env_host, 'port' => 3306, 'user' => 'root', 'pass' => 'root' );
-		$candidates[] = array( 'host' => $env_host, 'port' => 3306, 'user' => 'root', 'pass' => '' );
-		$candidates[] = array( 'host' => $env_host, 'port' => 3307, 'user' => 'root', 'pass' => 'mysql' );
-	}
+$inc_dir = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR;
+require_once $inc_dir . 'class-compatibility-checker.php';
+require_once $inc_dir . 'safety/class-database-installer.php';
+require_once $inc_dir . 'safety/class-safety-settings.php';
+require_once $inc_dir . 'safety/class-lock-manager.php';
+require_once $inc_dir . 'safety/class-security-guard.php';
+require_once $inc_dir . 'safety/class-elementor-features.php';
+require_once $inc_dir . 'safety/class-tree-validator.php';
+require_once $inc_dir . 'safety/class-security-strategies.php';
+require_once $inc_dir . 'safety/class-mutation-registry.php';
+require_once $inc_dir . 'safety/class-journal.php';
+require_once $inc_dir . 'safety/class-mutation-context.php';
+require_once $inc_dir . 'safety/class-safe-writes.php';
+require_once $inc_dir . 'safety/class-confirmation-manager.php';
+require_once $inc_dir . 'safety/class-idempotency-manager.php';
+require_once $inc_dir . 'safety/class-checkpoint-crypto.php';
+require_once $inc_dir . 'safety/class-checkpoint-strategies.php';
+require_once $inc_dir . 'safety/class-checkpoint-manager.php';
+require_once $inc_dir . 'safety/class-audit-logger.php';
+require_once $inc_dir . 'safety/class-undo-manager.php';
+require_once $inc_dir . 'safety/class-mutation-middleware.php';
 
-	foreach ( $candidates as $c ) {
-		try {
-			$pdo = new PDO( "mysql:host={$c['host']};port={$c['port']};dbname={$dbname}", $c['user'], $c['pass'], array(
-				PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-				PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-			) );
-			return $pdo;
-		} catch ( Exception $e ) {
-			// try next
-		}
-	}
-
-	fwrite( STDERR, "Worker failed to connect to MySQL\n" );
-	exit( 2 );
-}
-
-$pdo = get_worker_pdo();
+Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
 
 // Parse CLI options
 $options = getopt( '', array(
@@ -92,11 +75,6 @@ if ( $delay_ms > 0 ) {
 
 $hold_ms = (int) ( $options['hold_ms'] ?? 0 );
 
-$prefix = 'wp_';
-$tbl_tokens      = $prefix . 'elementor_mcp_tokens';
-$tbl_journal     = $prefix . 'elementor_mcp_journal';
-$tbl_checkpoints = $prefix . 'elementor_mcp_checkpoints';
-
 $result = array(
 	'worker'  => $worker,
 	'action'  => $action,
@@ -108,204 +86,244 @@ try {
 
 		case 'lock':
 			$resource = $options['resource'] ?? 'post:1';
-			$token_key = 'lock:' . $resource;
+			$res      = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource, $worker, 10 );
 
-			// Atomic attempt to acquire via INSERT:
-			$stmt = $pdo->prepare(
-				"INSERT INTO `{$tbl_tokens}` (token_key, token_type, owner_id, fencing_token, expires_at)
-				 VALUES (?, 'lock', ?, 1, UTC_TIMESTAMP() + INTERVAL 10 SECOND)"
-			);
-			try {
-				$stmt->execute( array( $token_key, $worker ) );
-				$result['success'] = true;
-				$result['status']  = 'acquired';
-				$result['fencing_token'] = 1;
-			} catch ( PDOException $e ) {
-				// Lock exists; check if lease has expired or attempt atomic takeover:
-				$check = $pdo->prepare( "SELECT owner_id, fencing_token, expires_at <= UTC_TIMESTAMP() as is_expired FROM `{$tbl_tokens}` WHERE token_key = ?" );
-				$check->execute( array( $token_key ) );
-				$row = $check->fetch();
+			if ( ! is_wp_error( $res ) && ! empty( $res['acquired'] ) ) {
+				$result['success']       = true;
+				$result['status']        = 'acquired';
+				$result['fencing_token'] = (int) $res['fencing_token'];
 
-				if ( $row && $row['is_expired'] ) {
-					// Expired: attempt atomic CAS takeover
-					$new_token = (int) $row['fencing_token'] + 1;
-					$takeover = $pdo->prepare(
-						"UPDATE `{$tbl_tokens}` SET owner_id = ?, fencing_token = ?, expires_at = UTC_TIMESTAMP() + INTERVAL 10 SECOND
-						 WHERE token_key = ? AND fencing_token = ?"
-					);
-					$takeover->execute( array( $worker, $new_token, $token_key, $row['fencing_token'] ) );
-					if ( $takeover->rowCount() > 0 ) {
-						$result['success'] = true;
-						$result['status']  = 'recovered';
-						$result['fencing_token'] = $new_token;
-					} else {
-						$result['status'] = 'contended';
-						$result['error']  = 'CAS takeover collision';
-					}
-				} else {
-					$result['status'] = 'busy';
-					$result['current_owner'] = $row['owner_id'] ?? 'unknown';
-					$result['fencing_token'] = (int) ( $row['fencing_token'] ?? 0 );
+				if ( $hold_ms > 0 ) {
+					usleep( $hold_ms * 1000 );
 				}
-			}
-
-			if ( $result['success'] && $hold_ms > 0 ) {
-				usleep( $hold_ms * 1000 );
+			} else {
+				$result['success'] = false;
+				$result['status']  = 'busy';
+				global $wpdb;
+				$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $resource );
+				$tokens_t = Full_Elementor_MCP_Database_Installer::get_tokens_table();
+				$lock_row = $wpdb->get_row(
+					$wpdb->prepare( "SELECT owner_id, fencing_token FROM {$tokens_t} WHERE token_key = %s", $lock_key ),
+					ARRAY_A
+				);
+				$result['current_owner'] = ! empty( $lock_row['owner_id'] ) ? $lock_row['owner_id'] : 'unknown';
+				$result['fencing_token'] = ! empty( $lock_row['fencing_token'] ) ? (int) $lock_row['fencing_token'] : 0;
 			}
 			break;
 
 		case 'idempotency':
 			$key       = $options['key'] ?? 'idem-test';
-			$args_hash = $options['args_hash'] ?? hash( 'sha256', 'default-args' );
-			$token_key = 'idempotency:' . $key;
+			$args_hash = $options['args_hash'] ?? '';
+			$args      = ! empty( $args_hash ) ? array( 'hash' => $args_hash ) : array( 'default' => 'args' );
+			$ability   = 'full-elementor-mcp/update-element';
 
-			$payload = json_encode( array( 'status' => 'in_progress', 'args_hash' => $args_hash ) );
-			$stmt = $pdo->prepare(
-				"INSERT INTO `{$tbl_tokens}` (token_key, token_type, owner_id, fencing_token, payload, expires_at)
-				 VALUES (?, 'idempotency', ?, 1, ?, UTC_TIMESTAMP() + INTERVAL 60 SECOND)"
+			$claim = Full_Elementor_MCP_Idempotency_Manager::claim(
+				$key,
+				$ability,
+				1,
+				null,
+				$args,
+				$worker
 			);
-			try {
-				$stmt->execute( array( $token_key, $worker, $payload ) );
+
+			// In concurrent duplicate races, if another worker is in progress, poll briefly for completion:
+			$start_wait = microtime( true );
+			while ( is_wp_error( $claim ) && 'idempotency_in_progress' === $claim->get_error_code() && ( microtime( true ) - $start_wait ) < 2.0 ) {
+				usleep( 30000 ); // 30ms
+				$claim = Full_Elementor_MCP_Idempotency_Manager::claim(
+					$key,
+					$ability,
+					1,
+					null,
+					$args,
+					$worker
+				);
+			}
+
+			if ( is_wp_error( $claim ) ) {
+				$result['success'] = false;
+				$result['status']  = 'conflict';
+				$result['error']   = $claim->get_error_code();
+			} elseif ( 'completed' === ( $claim['status'] ?? '' ) ) {
+				$result['success'] = false;
+				$result['status']  = 'replayed';
+				$result['data']    = $claim['result'] ?? array();
+			} elseif ( 'claimed' === ( $claim['status'] ?? '' ) ) {
+				if ( $hold_ms > 0 ) {
+					usleep( $hold_ms * 1000 );
+				}
+				$res_payload = array( 'status' => 'success', 'worker' => $worker );
+				Full_Elementor_MCP_Idempotency_Manager::complete(
+					$claim['token_key'],
+					$worker,
+					$res_payload
+				);
 				$result['success'] = true;
 				$result['status']  = 'executed';
-			} catch ( PDOException $e ) {
-				// Duplicate idempotency attempt: read existing payload
-				$sel = $pdo->prepare( "SELECT payload FROM `{$tbl_tokens}` WHERE token_key = ?" );
-				$sel->execute( array( $token_key ) );
-				$row = $sel->fetch();
-				$existing = json_decode( (string) ( $row['payload'] ?? '' ), true );
-
-				if ( is_array( $existing ) && ( $existing['args_hash'] ?? '' ) === $args_hash ) {
-					$result['success'] = false;
-					$result['status']  = 'replayed';
-				} else {
-					$result['success'] = false;
-					$result['status']  = 'conflict';
-					$result['error']   = 'Idempotency key reused with conflicting arguments';
-				}
+				$result['data']    = $res_payload;
+			} else {
+				$result['success'] = false;
+				$result['status']  = 'busy';
 			}
 			break;
 
 		case 'confirmation':
-			$token_key = 'confirmation:' . ( $options['token'] ?? 'test-conf' );
+			$token        = $options['token'] ?? 'test-conf';
+			$action_name  = 'full-elementor-mcp/delete-page';
+			$resource_key = 'post:42';
+			$args         = array( 'post_id' => 42, 'force' => true );
 
-			// Single-use atomic consume: UPDATE ... WHERE used = 0
-			$stmt = $pdo->prepare(
-				"UPDATE `{$tbl_tokens}` SET used = 1, owner_id = ?
-				 WHERE token_key = ? AND used = 0 AND expires_at > UTC_TIMESTAMP()"
+			$consume_res = Full_Elementor_MCP_Confirmation_Manager::consume(
+				$token,
+				$action_name,
+				$args,
+				1,
+				null,
+				$resource_key
 			);
-			$stmt->execute( array( $worker, $token_key ) );
-			if ( $stmt->rowCount() > 0 ) {
-				$result['success'] = true;
-				$result['status']  = 'consumed';
-			} else {
+
+			if ( is_wp_error( $consume_res ) ) {
 				$result['success'] = false;
 				$result['status']  = 'already_consumed_or_expired';
+				$result['error']   = $consume_res->get_error_code();
+			} else {
+				$result['success'] = true;
+				$result['status']  = 'consumed';
 			}
 			break;
 
 		case 'journal_cas':
 			$journal_id    = (int) ( $options['journal_id'] ?? 0 );
 			$target_status = $options['status'] ?? 'committed';
+			$fencing_token = (int) ( $options['fencing_token'] ?? 1 );
 
-			$stmt = $pdo->prepare(
-				"UPDATE `{$tbl_journal}` SET status = ? WHERE id = ? AND status = 'pending'"
-			);
-			$stmt->execute( array( $target_status, $journal_id ) );
-			if ( $stmt->rowCount() > 0 ) {
-				$result['success'] = true;
-				$result['status']  = $target_status;
+			if ( 'committed' === $target_status ) {
+				$cas_res = Full_Elementor_MCP_Journal::commit(
+					$journal_id,
+					array(),
+					$fencing_token
+				);
 			} else {
+				$cas_res = Full_Elementor_MCP_Journal::mark_failed(
+					$journal_id,
+					'failed_by_' . $worker,
+					$fencing_token
+				);
+			}
+
+			if ( is_wp_error( $cas_res ) ) {
 				$result['success'] = false;
 				$result['status']  = 'cas_failed';
+				$result['error']   = $cas_res->get_error_code();
+			} else {
+				$result['success'] = true;
+				$result['status']  = $target_status;
 			}
 			break;
 
 		case 'checkpoint_insert':
-			$uuid     = $options['uuid'] ?? 'chk-' . microtime( true );
-			$resource = $options['resource'] ?? 'post:1';
+			$uuid     = $options['uuid'] ?? ( 'chk-' . bin2hex( random_bytes( 4 ) ) );
+			$resource = $options['resource'] ?? 'global:elementor-kit-state';
 
-			$stmt = $pdo->prepare(
-				"INSERT INTO `{$tbl_checkpoints}` (checkpoint_uuid, resource_key, object_type, object_id, state_hash)
-				 VALUES (?, ?, 'post', 1, 'test-hash')"
+			$chk_res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save(
+				$resource,
+				'manual',
+				array(
+					'checkpoint_uuid' => $uuid,
+					'label'           => 'Collision test ' . $worker,
+					'state'           => array( 'strategy' => 'global', 'active_kit_id' => 1, 'kit_settings' => array() ),
+					'state_schema'    => 'checkpoint_strategy_v2',
+				)
 			);
-			try {
-				$stmt->execute( array( $uuid, $resource ) );
-				$result['success'] = true;
-				$result['status']  = 'inserted';
-			} catch ( PDOException $e ) {
+
+			if ( is_wp_error( $chk_res ) ) {
 				$result['success'] = false;
 				$result['status']  = 'duplicate_uuid_rejected';
-				$result['error']   = $e->getMessage();
+				$result['error']   = $chk_res->get_error_code();
+			} else {
+				$result['success'] = true;
+				$result['status']  = 'inserted';
+				$result['uuid']    = $chk_res['checkpoint_uuid'] ?? $uuid;
 			}
 			break;
 
 		case 'undo':
 			$journal_id = (int) ( $options['journal_id'] ?? 0 );
 
-			// Check and atomically claim undo via CAS:
-			// status: committed -> undo_in_progress
-			$stmt = $pdo->prepare(
-				"UPDATE `{$tbl_journal}` SET status = 'undo_in_progress', error_message = ?
-				 WHERE id = ? AND status = 'committed'"
+			$undo_res = Full_Elementor_MCP_Undo_Manager::undo_change(
+				$journal_id,
+				array( 'user_id' => 1 )
 			);
-			$stmt->execute( array( 'claimed_by:' . $worker, $journal_id ) );
-			if ( $stmt->rowCount() > 0 ) {
-				if ( $hold_ms > 0 ) {
-					usleep( $hold_ms * 1000 );
-				}
-				// Finish undo
-				$fin = $pdo->prepare( "UPDATE `{$tbl_journal}` SET status = 'undone' WHERE id = ? AND status = 'undo_in_progress'" );
-				$fin->execute( array( $journal_id ) );
-				$result['success'] = true;
-				$result['status']  = 'undone';
-			} else {
+
+			if ( is_wp_error( $undo_res ) ) {
 				$result['success'] = false;
 				$result['status']  = 'conflict_already_undone_or_in_progress';
+				$result['error']   = $undo_res->get_error_code();
+			} else {
+				$result['success'] = true;
+				$result['status']  = 'undone';
+				$result['data']    = $undo_res;
 			}
 			break;
 
 		case 'restore':
 			$resource = $options['resource'] ?? 'post:1';
-			$token_key = 'restore:' . $resource;
 
-			// Restore lock acquire:
-			$stmt = $pdo->prepare(
-				"INSERT INTO `{$tbl_tokens}` (token_key, token_type, owner_id, fencing_token, expires_at)
-				 VALUES (?, 'restore_lock', ?, 1, UTC_TIMESTAMP() + INTERVAL 15 SECOND)"
+			// Production restore engine acquires canonical restore lock
+			$res = Full_Elementor_MCP_Lock_Manager::acquire_lock(
+				'restore:' . $resource,
+				$worker,
+				15
 			);
-			try {
-				$stmt->execute( array( $token_key, $worker ) );
+
+			if ( ! is_wp_error( $res ) && ! empty( $res['acquired'] ) ) {
 				if ( $hold_ms > 0 ) {
 					usleep( $hold_ms * 1000 );
 				}
-				// Clean release:
-				$pdo->prepare( "DELETE FROM `{$tbl_tokens}` WHERE token_key = ? AND owner_id = ?" )->execute( array( $token_key, $worker ) );
+				Full_Elementor_MCP_Lock_Manager::release_lock(
+					'restore:' . $resource,
+					$worker,
+					(int) $res['fencing_token']
+				);
 				$result['success'] = true;
 				$result['status']  = 'restored';
-			} catch ( PDOException $e ) {
+			} else {
 				$result['success'] = false;
 				$result['status']  = 'restore_locked_by_other';
+				$result['error']   = is_wp_error( $res ) ? $res->get_error_code() : 'locked';
 			}
 			break;
 
 		case 'safe_write':
-			$resource = $options['resource'] ?? 'post:1';
+			$resource       = $options['resource'] ?? 'post:1';
 			$expected_token = (int) ( $options['fencing_token'] ?? 1 );
-			$token_key = 'lock:' . $resource;
 
-			// Verify current lock generation:
-			$check = $pdo->prepare( "SELECT fencing_token FROM `{$tbl_tokens}` WHERE token_key = ?" );
-			$check->execute( array( $token_key ) );
-			$current_token = (int) $check->fetchColumn();
+			// Enter mutation context with stale fencing token
+			$ctx = Full_Elementor_MCP_Mutation_Context::enter( array(
+				'ability'       => 'full-elementor-mcp/update-element',
+				'request_uuid'  => wp_generate_uuid4(),
+				'user_id'       => 1,
+				'resource_key'  => $resource,
+				'object_id'     => 1,
+				'owner_id'      => $worker,
+				'fencing_token' => $expected_token,
+				'journal_id'    => 1,
+				'is_dry_run'    => false,
+				'is_rollback'   => false,
+				'is_readonly'   => false,
+				'is_create'     => false,
+			) );
 
-			if ( $current_token === $expected_token ) {
-				$result['success'] = true;
-				$result['status']  = 'write_committed';
-			} else {
+			$write_res = Full_Elementor_MCP_Safe_Writes::assert_write_boundary( $resource );
+			Full_Elementor_MCP_Mutation_Context::leave( $ctx );
+
+			if ( is_wp_error( $write_res ) ) {
 				$result['success'] = false;
 				$result['status']  = 'fencing_token_mismatch';
-				$result['error']   = "Stale token: expected {$expected_token}, found {$current_token}";
+				$result['error']   = $write_res->get_error_code();
+			} else {
+				$result['success'] = true;
+				$result['status']  = 'write_committed';
 			}
 			break;
 
@@ -314,7 +332,7 @@ try {
 			break;
 	}
 } catch ( Throwable $t ) {
-	$result['error'] = $t->getMessage();
+	$result['error'] = $t->getMessage() . ' (' . $t->getFile() . ':' . $t->getLine() . ')';
 }
 
 echo json_encode( $result ) . "\n";

@@ -81,6 +81,30 @@ echo "Connected to MySQL " . $pdo->getAttribute( PDO::ATTR_SERVER_VERSION ) . "\
 require_once __DIR__ . '/test-mysql-safety.php';
 Full_Elementor_MCP_Database_Installer::install();
 
+$inc_dir = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR;
+require_once $inc_dir . 'class-compatibility-checker.php';
+require_once $inc_dir . 'safety/class-database-installer.php';
+require_once $inc_dir . 'safety/class-safety-settings.php';
+require_once $inc_dir . 'safety/class-lock-manager.php';
+require_once $inc_dir . 'safety/class-security-guard.php';
+require_once $inc_dir . 'safety/class-elementor-features.php';
+require_once $inc_dir . 'safety/class-tree-validator.php';
+require_once $inc_dir . 'safety/class-security-strategies.php';
+require_once $inc_dir . 'safety/class-mutation-registry.php';
+require_once $inc_dir . 'safety/class-journal.php';
+require_once $inc_dir . 'safety/class-mutation-context.php';
+require_once $inc_dir . 'safety/class-safe-writes.php';
+require_once $inc_dir . 'safety/class-confirmation-manager.php';
+require_once $inc_dir . 'safety/class-idempotency-manager.php';
+require_once $inc_dir . 'safety/class-checkpoint-crypto.php';
+require_once $inc_dir . 'safety/class-checkpoint-strategies.php';
+require_once $inc_dir . 'safety/class-checkpoint-manager.php';
+require_once $inc_dir . 'safety/class-audit-logger.php';
+require_once $inc_dir . 'safety/class-undo-manager.php';
+require_once $inc_dir . 'safety/class-mutation-middleware.php';
+
+Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+
 $crash_script    = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-crash-runner.php';
 $recovery_script = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-recovery-runner.php';
 $php_bin         = PHP_BINARY;
@@ -196,21 +220,24 @@ function run_fresh_recovery( string $php_bin, string $recovery_script, int $grac
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 1: WAL crash before target write recovered truthfully by fresh process', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$res = 'post:' . bin2hex( random_bytes( 4 ) );
+	$object_id = 7711;
+	$res       = "post:{$object_id}";
 
 	// 1. Crash worker in WAL phase:
 	run_crash_worker( $php_bin, $crash_script, array(
-		'scenario' => 'wal_before_write',
-		'resource' => $res,
+		'scenario'  => 'wal_before_write',
+		'resource'  => $res,
+		'object_id' => $object_id,
 	) );
 
 	// Verify pending WAL and active lock exist in MySQL:
-	$j_row = $pdo->query( "SELECT id, status, fencing_token FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}'" )->fetch();
+	$j_row = $pdo->query( "SELECT id, status, fencing_token FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}' ORDER BY id DESC LIMIT 1" )->fetch();
 	assert_true( ! empty( $j_row ), 'Pending journal row must exist' );
 	assert_equals( 'pending', $j_row['status'] );
 
 	// 2. Simulate expiration of the abandoned lock (beyond grace period):
-	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = 'lock:{$res}'" );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res );
+	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = '{$lock_key}'" );
 	$pdo->exec( "UPDATE `wp_elementor_mcp_journal` SET created_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE id = {$j_row['id']}" );
 
 	// 3. Boot fresh PHP process to execute recovery scan:
@@ -226,19 +253,22 @@ run_test( 'Crash Scenario 1: WAL crash before target write recovered truthfully 
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 2: Crash after write before commit reconciles conservatively without blind overwrite', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$res = 'post:' . bin2hex( random_bytes( 4 ) );
+	$object_id = 7712;
+	$res       = "post:{$object_id}";
 
 	// 1. Worker writes target state, then abruptly dies:
 	run_crash_worker( $php_bin, $crash_script, array(
-		'scenario' => 'write_before_commit',
-		'resource' => $res,
+		'scenario'  => 'write_before_commit',
+		'resource'  => $res,
+		'object_id' => $object_id,
 	) );
 
-	$j_row = $pdo->query( "SELECT id, status FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}'" )->fetch();
+	$j_row = $pdo->query( "SELECT id, status FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}' ORDER BY id DESC LIMIT 1" )->fetch();
 	assert_true( ! empty( $j_row ) );
 
 	// 2. Expire lease:
-	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = 'lock:{$res}'" );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res );
+	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = '{$lock_key}'" );
 	$pdo->exec( "UPDATE `wp_elementor_mcp_journal` SET created_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE id = {$j_row['id']}" );
 
 	// 3. Fresh recovery process:
@@ -254,22 +284,21 @@ run_test( 'Crash Scenario 2: Crash after write before commit reconciles conserva
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 3: CREATE crash preserves durable created_object_id binding without destructive overwrite', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$res = 'template:' . bin2hex( random_bytes( 4 ) );
 	$created_id = 9912;
 
 	// 1. Worker creates object, binds created_object_id, then dies before commit:
 	run_crash_worker( $php_bin, $crash_script, array(
 		'scenario'  => 'create_crash',
-		'resource'  => $res,
 		'object_id' => $created_id,
 	) );
 
-	$j_row = $pdo->query( "SELECT id, created_object_id, status FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}'" )->fetch();
+	$j_row = $pdo->query( "SELECT id, created_object_id, status, resource_key FROM `wp_elementor_mcp_journal` WHERE ability = 'full-elementor-mcp/create-page' ORDER BY id DESC LIMIT 1" )->fetch();
 	assert_true( ! empty( $j_row ) );
 	assert_equals( $created_id, (int) $j_row['created_object_id'] );
 
 	// 2. Expire lease:
-	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = 'lock:{$res}'" );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $j_row['resource_key'] );
+	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = '{$lock_key}'" );
 	$pdo->exec( "UPDATE `wp_elementor_mcp_journal` SET created_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE id = {$j_row['id']}" );
 
 	// 3. Fresh recovery process:
@@ -287,19 +316,22 @@ run_test( 'Crash Scenario 3: CREATE crash preserves durable created_object_id bi
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 4: Checkpoint restore crash preserves restore recovery evidence', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$res = 'post:' . bin2hex( random_bytes( 4 ) );
+	$object_id = 7714;
+	$res       = "post:{$object_id}";
 
 	// 1. Worker dies during checkpoint restore:
 	run_crash_worker( $php_bin, $crash_script, array(
-		'scenario' => 'restore_crash',
-		'resource' => $res,
+		'scenario'  => 'restore_crash',
+		'resource'  => $res,
+		'object_id' => $object_id,
 	) );
 
-	$j_row = $pdo->query( "SELECT id, status FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}'" )->fetch();
+	$j_row = $pdo->query( "SELECT id, status, resource_key FROM `wp_elementor_mcp_journal` WHERE ability = 'checkpoint-restore' AND resource_key = '{$res}' ORDER BY id DESC LIMIT 1" )->fetch();
 	assert_true( ! empty( $j_row ) );
 
 	// 2. Expire lease:
-	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = 'restore:{$res}'" );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $j_row['resource_key'] );
+	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE token_key = '{$lock_key}'" );
 	$pdo->exec( "UPDATE `wp_elementor_mcp_journal` SET created_at = UTC_TIMESTAMP() - INTERVAL 120 SECOND WHERE id = {$j_row['id']}" );
 
 	// 3. Fresh recovery process:

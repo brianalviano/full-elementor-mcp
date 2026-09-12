@@ -87,6 +87,30 @@ echo "Executing multi-process races against MySQL " . $pdo->getAttribute( PDO::A
 require_once __DIR__ . '/test-mysql-safety.php';
 Full_Elementor_MCP_Database_Installer::install();
 
+$inc_dir = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR;
+require_once $inc_dir . 'class-compatibility-checker.php';
+require_once $inc_dir . 'safety/class-database-installer.php';
+require_once $inc_dir . 'safety/class-safety-settings.php';
+require_once $inc_dir . 'safety/class-lock-manager.php';
+require_once $inc_dir . 'safety/class-security-guard.php';
+require_once $inc_dir . 'safety/class-elementor-features.php';
+require_once $inc_dir . 'safety/class-tree-validator.php';
+require_once $inc_dir . 'safety/class-security-strategies.php';
+require_once $inc_dir . 'safety/class-mutation-registry.php';
+require_once $inc_dir . 'safety/class-journal.php';
+require_once $inc_dir . 'safety/class-mutation-context.php';
+require_once $inc_dir . 'safety/class-safe-writes.php';
+require_once $inc_dir . 'safety/class-confirmation-manager.php';
+require_once $inc_dir . 'safety/class-idempotency-manager.php';
+require_once $inc_dir . 'safety/class-checkpoint-crypto.php';
+require_once $inc_dir . 'safety/class-checkpoint-strategies.php';
+require_once $inc_dir . 'safety/class-checkpoint-manager.php';
+require_once $inc_dir . 'safety/class-audit-logger.php';
+require_once $inc_dir . 'safety/class-undo-manager.php';
+require_once $inc_dir . 'safety/class-mutation-middleware.php';
+
+Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+
 $worker_script = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-mysql-runner.php';
 $php_bin       = PHP_BINARY;
 
@@ -303,13 +327,15 @@ run_test( 'Race 3: Idempotency with conflicting args rejects second execution as
 // ---------------------------------------------------------------------
 
 run_test( 'Race 4: Confirmation double-consume race succeeds for exactly one worker', function () use ( $pdo, $php_bin, $worker_script ) {
-	$token_id = 'conf-' . bin2hex( random_bytes( 4 ) );
-
-	$stmt = $pdo->prepare(
-		"INSERT INTO `wp_elementor_mcp_tokens` (token_key, token_type, fencing_token, expires_at, used)
-		 VALUES (?, 'confirmation', 1, UTC_TIMESTAMP() + INTERVAL 30 SECOND, 0)"
+	$conf = Full_Elementor_MCP_Confirmation_Manager::create_challenge(
+		'full-elementor-mcp/delete-page',
+		array( 'post_id' => 42, 'force' => true ),
+		1,
+		null,
+		'post:42',
+		array( 'destructive_action' )
 	);
-	$stmt->execute( array( 'confirmation:' . $token_id ) );
+	$token_id = $conf['confirmation_token'];
 
 	$w1 = spawn_worker( $php_bin, $worker_script, array(
 		'action' => 'confirmation',
@@ -337,8 +363,8 @@ run_test( 'Race 4: Confirmation double-consume race succeeds for exactly one wor
 
 run_test( 'Race 5: Journal CAS allows only one legal terminal transition', function () use ( $pdo, $php_bin, $worker_script ) {
 	$stmt = $pdo->prepare(
-		"INSERT INTO `wp_elementor_mcp_journal` (ability, action, object_type, object_id, resource_key, status)
-		 VALUES ('elementor_mutation', 'update', 'post', 88, 'post:88', 'pending')"
+		"INSERT INTO `wp_elementor_mcp_journal` (ability, action, object_type, object_id, resource_key, status, fencing_token)
+		 VALUES ('full-elementor-mcp/update-element', 'update_element', 'post', 88, 'post:88', 'pending', 1)"
 	);
 	$stmt->execute();
 	$journal_id = (int) $pdo->lastInsertId();
@@ -378,14 +404,16 @@ run_test( 'Race 6: Checkpoint UUID uniqueness race rejects collision without cre
 	$uuid = 'colliding-uuid-' . bin2hex( random_bytes( 4 ) );
 
 	$w1 = spawn_worker( $php_bin, $worker_script, array(
-		'action' => 'checkpoint_insert',
-		'worker' => 'worker-chk-1',
-		'uuid'   => $uuid,
+		'action'   => 'checkpoint_insert',
+		'worker'   => 'worker-chk-1',
+		'uuid'     => $uuid,
+		'resource' => 'global:elementor-kit-state',
 	) );
 	$w2 = spawn_worker( $php_bin, $worker_script, array(
-		'action' => 'checkpoint_insert',
-		'worker' => 'worker-chk-2',
-		'uuid'   => $uuid,
+		'action'   => 'checkpoint_insert',
+		'worker'   => 'worker-chk-2',
+		'uuid'     => $uuid,
+		'resource' => 'global:elementor-kit-state',
 	) );
 
 	$r1 = wait_worker( $w1 );
@@ -408,11 +436,12 @@ run_test( 'Race 6: Checkpoint UUID uniqueness race rejects collision without cre
 // ---------------------------------------------------------------------
 
 run_test( 'Race 7: Concurrent undo race allows exactly one worker to perform persistent rollback', function () use ( $pdo, $php_bin, $worker_script ) {
+	$empty_hash = Full_Elementor_MCP_Journal::hash_state( array() );
 	$stmt = $pdo->prepare(
-		"INSERT INTO `wp_elementor_mcp_journal` (ability, action, object_type, object_id, resource_key, status)
-		 VALUES ('elementor_mutation', 'update', 'post', 99, 'post:99', 'committed')"
+		"INSERT INTO `wp_elementor_mcp_journal` (ability, action, object_type, object_id, resource_key, status, rollback_supported, before_hash, after_hash, fencing_token)
+		 VALUES ('full-elementor-mcp/update-element', 'update_element', 'post', 99, 'post:99', 'committed', 1, ?, ?, 1)"
 	);
-	$stmt->execute();
+	$stmt->execute( array( $empty_hash, $empty_hash ) );
 	$journal_id = (int) $pdo->lastInsertId();
 
 	$w1 = spawn_worker( $php_bin, $worker_script, array(
@@ -490,7 +519,8 @@ run_test( 'Race 9: Stale writer loses lease to Worker B; Worker A persistent Saf
 	assert_equals( 1, $rA['data']['fencing_token'] );
 
 	// 2. Worker A's lease expires: expire it manually in MySQL:
-	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 5 SECOND WHERE token_key = 'lock:{$resource}'" );
+	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $resource );
+	$pdo->exec( "UPDATE `wp_elementor_mcp_tokens` SET expires_at = UTC_TIMESTAMP() - INTERVAL 5 SECOND WHERE token_key = '{$lock_key}'" );
 
 	// 3. Worker B recovers the expired lease with CAS, advancing generation to 2:
 	$wB = spawn_worker( $php_bin, $worker_script, array(

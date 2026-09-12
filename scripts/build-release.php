@@ -101,6 +101,7 @@ $banned_dir_prefixes = array(
 );
 
 $banned_file_patterns = array(
+	'/\.git.*$/i',
 	'/\.DS_Store$/i',
 	'/Thumbs\.db$/i',
 	'/desktop\.ini$/i',

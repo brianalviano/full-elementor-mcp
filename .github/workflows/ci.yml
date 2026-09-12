@@ -64,6 +64,9 @@ jobs:
       - name: Run Phase 7 Release & Concurrency Tests
         run: php tests/test-phase7-release-concurrency.php
 
+      - name: Run Elementor Compatibility Suite
+        run: php tests/test-elementor-compatibility.php
+
   wordpress-integration:
     name: WordPress Integration (WP ${{ matrix.wp-version }})
     runs-on: ubuntu-latest
@@ -235,3 +238,12 @@ jobs:
           DB_PASSWORD: root
           DB_NAME: safe_elementor_test
         run: php tests/test-phase6-upgrade-smoke.php
+
+      - name: Execute WordPress Package Lifecycle Suite
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: root
+          DB_NAME: safe_elementor_test
+        run: php tests/test-wordpress-package-lifecycle.php

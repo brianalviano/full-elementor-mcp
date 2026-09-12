@@ -52,6 +52,44 @@ jobs:
         id: verify_ver
         run: php scripts/verify-release-version.php "${{ steps.target.outputs.target_version }}"
 
+      - name: Verify Pre-Existing Git Tag Points to Current HEAD
+        id: verify_tag
+        run: |
+          RAW_TARGET="${{ steps.target.outputs.target_version }}"
+          TAG_NAME="$RAW_TARGET"
+          if [[ ! "$TAG_NAME" =~ ^v ]]; then
+            TAG_NAME="v${TAG_NAME}"
+          fi
+          echo "Verifying pre-existing Git tag: ${TAG_NAME}..."
+
+          git fetch --tags --force origin 2>/dev/null || true
+
+          RESOLVED_TAG=""
+          if git rev-parse "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            RESOLVED_TAG="${TAG_NAME}"
+          elif git rev-parse "refs/tags/${RAW_TARGET}" >/dev/null 2>&1; then
+            RESOLVED_TAG="${RAW_TARGET}"
+          else
+            echo "FATAL: Pre-existing Git tag '${TAG_NAME}' or '${RAW_TARGET}' was not found."
+            echo "Release dispatch must NEVER create a Git tag implicitly. Maintainer must create and push the tag first."
+            exit 1
+          fi
+
+          TAG_COMMIT=$(git rev-list -n 1 "refs/tags/${RESOLVED_TAG}")
+          HEAD_COMMIT="${{ github.sha }}"
+
+          echo "Tag '${RESOLVED_TAG}' points to: ${TAG_COMMIT}"
+          echo "Workflow commit SHA:           ${HEAD_COMMIT}"
+
+          if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+            echo "FATAL: Pre-existing tag '${RESOLVED_TAG}' points to ${TAG_COMMIT}, which does not match workflow HEAD ${HEAD_COMMIT}."
+            echo "Releases may only be published for commits strictly pointed to by the tag."
+            exit 1
+          fi
+
+          echo "Tag verification successful: ${RESOLVED_TAG} matches HEAD."
+          echo "tag_name=${RESOLVED_TAG}" >> $GITHUB_OUTPUT
+
       - name: Run Standalone Test Suite (Phases 1-7)
         run: |
           php tests/test-phase1-foundation.php
@@ -61,6 +99,7 @@ jobs:
           php tests/test-phase5-checkpoints.php
           php tests/test-phase6-audit-tools.php
           php tests/test-phase7-release-concurrency.php
+          php tests/test-elementor-compatibility.php
 
       - name: Run MySQL Safety & Concurrency Suites
         env:
@@ -95,7 +134,7 @@ jobs:
       - name: Create Draft Release on GitHub
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.target.outputs.target_version }}
+          tag_name: ${{ steps.verify_tag.outputs.tag_name }}
           name: Safe Elementor MCP ${{ steps.verify_ver.outputs.version }}
           draft: true
           prerelease: ${{ steps.verify_ver.outputs.is_prerelease == 'true' }}

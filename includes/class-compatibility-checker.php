@@ -123,7 +123,17 @@ class Full_Elementor_MCP_Compatibility_Checker {
 			$has_api = method_exists( $cls, 'create_server' );
 		}
 
-		$supported = $loaded && ( 'unknown' === $version || version_compare( $version, self::MIN_MCP_ADAPTER_VER, '>=' ) );
+		$version_ok = ( 'unknown' === $version || version_compare( $version, self::MIN_MCP_ADAPTER_VER, '>=' ) );
+		$supported  = $loaded && $has_api && $version_ok;
+
+		$message = 'WordPress MCP Adapter detected and compatible.';
+		if ( ! $loaded ) {
+			$message = 'WordPress MCP Adapter plugin not loaded.';
+		} elseif ( ! $has_api ) {
+			$message = 'WordPress MCP Adapter is loaded but does not implement required create_server() API.';
+		} elseif ( ! $version_ok ) {
+			$message = sprintf( 'WordPress MCP Adapter %s is unsupported. Minimum required is %s.', $version, self::MIN_MCP_ADAPTER_VER );
+		}
 
 		return array(
 			'loaded'        => (bool) $loaded,
@@ -134,7 +144,7 @@ class Full_Elementor_MCP_Compatibility_Checker {
 			'meets_minimum' => (bool) $supported,
 			'required'      => self::MIN_MCP_ADAPTER_VER,
 			'has_api'       => (bool) $has_api,
-			'message'       => $loaded ? 'WordPress MCP Adapter detected.' : 'WordPress MCP Adapter plugin not loaded.',
+			'message'       => $message,
 		);
 	}
 
@@ -247,7 +257,7 @@ class Full_Elementor_MCP_Compatibility_Checker {
 	 */
 	public static function is_mcp_adapter_active(): bool {
 		$mcp = self::check_mcp_adapter();
-		return (bool) $mcp['loaded'];
+		return $mcp['loaded'] && $mcp['supported'];
 	}
 
 	/**
@@ -278,6 +288,10 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		$mcp = self::check_mcp_adapter();
 		if ( ! $mcp['loaded'] ) {
 			$missing[] = 'WordPress MCP Adapter plugin';
+		} elseif ( ! $mcp['has_api'] ) {
+			$missing[] = 'WordPress MCP Adapter (missing required create_server API)';
+		} elseif ( ! $mcp['supported'] ) {
+			$missing[] = sprintf( 'WordPress MCP Adapter (>= %s, current version %s is unsupported)', self::MIN_MCP_ADAPTER_VER, $mcp['version'] );
 		}
 
 		$abi = self::check_abilities_api();

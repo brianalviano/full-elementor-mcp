@@ -50,6 +50,22 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 	public const DEFAULT_PRUNE_BATCH_LIMIT = 50;
 
 	/**
+	 * Test-only fault injection hook for simulating process crashes during checkpoint operations.
+	 *
+	 * @var ?\Closure(string, array<string, mixed>): void
+	 */
+	private static ?\Closure $test_fault_hook = null;
+
+	/**
+	 * Sets or clears a test-only fault injection hook.
+	 *
+	 * @param ?\Closure(string, array<string, mixed>): void $hook Hook closure or null.
+	 */
+	public static function set_test_fault_hook( ?\Closure $hook ): void {
+		self::$test_fault_hook = $hook;
+	}
+
+	/**
 	 * Determines the checkpoint requirement level for a given mutation call.
 	 *
 	 * @param string               $ability  The ability being invoked.
@@ -166,9 +182,13 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 
 		// 5. Bounded retry loop for unique UUID generation and DB insertion:
 		for ( $attempt = 0; $attempt < 3; $attempt++ ) {
-			$uuid = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
-			if ( empty( $uuid ) ) {
-				$uuid = bin2hex( random_bytes( 16 ) );
+			if ( ! empty( $meta['checkpoint_uuid'] ) ) {
+				$uuid = sanitize_text_field( (string) $meta['checkpoint_uuid'] );
+			} else {
+				$uuid = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 16 ) );
+				if ( empty( $uuid ) ) {
+					$uuid = bin2hex( random_bytes( 16 ) );
+				}
 			}
 
 			// Encrypt state via AEAD with bound AAD including checkpoint_type and restore_capability:
@@ -279,6 +299,9 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			if ( false !== $res && $res > 0 ) {
 				$inserted      = true;
 				$checkpoint_id = (int) $wpdb->insert_id;
+				break;
+			}
+			if ( ! empty( $meta['checkpoint_uuid'] ) ) {
 				break;
 			}
 		}
@@ -938,6 +961,16 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 			}
 
 			$journal_id = (int) $journal_id;
+
+			if ( null !== self::$test_fault_hook ) {
+				call_user_func( self::$test_fault_hook, 'after_restore_wal_begin', array(
+					'journal_id'    => $journal_id,
+					'resource_key'  => $resource_key,
+					'fencing_token' => $fencing_token,
+					'owner_id'      => $owner_id,
+					'checkpoint_id' => $row['id'],
+				) );
+			}
 
 			// 12. Enter Mutation Context with active fence:
 			$context_token = Full_Elementor_MCP_Mutation_Context::enter( array(

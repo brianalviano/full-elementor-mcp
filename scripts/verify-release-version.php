@@ -87,6 +87,38 @@ if ( $stable_tag !== $base_version ) {
 	$mismatches[] = "readme.txt Stable tag is '{$stable_tag}', expected '{$base_version}'";
 }
 
+// 4. Check CHANGELOG.md entry
+$changelog_file = $repo_root . DIRECTORY_SEPARATOR . 'CHANGELOG.md';
+if ( file_exists( $changelog_file ) ) {
+	$changelog_content = (string) file_get_contents( $changelog_file );
+	if ( ! preg_match( '/##\s*\[?' . preg_quote( $base_version, '/' ) . '\]?/i', $changelog_content ) ) {
+		$mismatches[] = "CHANGELOG.md does not contain an entry for version '{$base_version}'";
+	} else {
+		echo " [PASS] CHANGELOG.md entry exists for: {$base_version}\n";
+	}
+}
+
+// 5. Check dist/manifest.json if present
+$manifest_file = $repo_root . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . 'manifest.json';
+if ( file_exists( $manifest_file ) ) {
+	$manifest_data = json_decode( (string) file_get_contents( $manifest_file ), true );
+	if ( isset( $manifest_data['version'] ) && $manifest_data['version'] !== $base_version ) {
+		$mismatches[] = "dist/manifest.json version '{$manifest_data['version']}' != target '{$base_version}'";
+	} else {
+		echo " [PASS] dist/manifest.json version matches: {$base_version}\n";
+	}
+}
+
+// 6. Check dist ZIP filename if present
+$zip_artifact = $repo_root . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . "safe-elementor-mcp-{$base_version}.zip";
+if ( file_exists( $zip_artifact ) ) {
+	if ( filesize( $zip_artifact ) < 1000 ) {
+		$mismatches[] = "dist/safe-elementor-mcp-{$base_version}.zip is corrupt or too small";
+	} else {
+		echo " [PASS] dist/safe-elementor-mcp-{$base_version}.zip exists and is valid\n";
+	}
+}
+
 if ( ! empty( $mismatches ) ) {
 	fwrite( STDERR, "\nFAILED: Version consistency check failed:\n" );
 	foreach ( $mismatches as $err ) {
@@ -99,7 +131,7 @@ if ( ! empty( $mismatches ) ) {
 echo " [PASS] FULL_ELEMENTOR_MCP_VERSION matches: {$const_version}\n";
 echo " [PASS] Plugin header Version matches: {$header_version}\n";
 echo " [PASS] readme.txt Stable tag matches: {$stable_tag}\n";
-echo "\nAll version consistency checks passed successfully!\n";
+echo "\nAll authoritative version consistency checks passed successfully!\n";
 
 // If in GitHub Actions, write output parameters
 $github_output = getenv( 'GITHUB_OUTPUT' );
