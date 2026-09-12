@@ -84,9 +84,10 @@ Safe Elementor MCP solves all of these challenges with **131+ specialized tools*
 ## Requirements
 
 - **PHP**: 8.0 or higher (fully tested on 8.0, 8.1, 8.2, 8.3, 8.4).
-- **WordPress**: 6.9 or higher (with Abilities API).
-- **Elementor**: 3.20+ (or 4.0+ for atomic components).
-- **WordPress MCP Adapter**: Required for exposing abilities over the MCP protocol.
+- **WordPress**: 6.9 to 7.1 (with Abilities API).
+- **Elementor**: Minimum 3.20.0 required (or 4.0+ for atomic components). Elementor Pro is optional; Pro abilities degrade cleanly when absent.
+- **WordPress MCP Adapter**: Minimum tested version 0.1.0+ (gracefully degrades if absent; tools remain registered in WordPress Abilities API).
+- **Database**: MySQL 8.0+ or MariaDB 10.5+ with InnoDB and utf8mb4.
 - **Crypto Backend**: PHP `sodium` extension (preferred) or `openssl` with AES-256-GCM support.
 
 ---
@@ -94,9 +95,9 @@ Safe Elementor MCP solves all of these challenges with **131+ specialized tools*
 ## Installation & Setup
 
 1. **Install Plugin**:
-   Download `safe-elementor-mcp.zip` from [Releases](https://github.com/brianalviano/full-elementor-mcp/releases) and install via **Plugins → Add New → Upload Plugin**, or clone into `wp-content/plugins/safe-elementor-mcp/`.
+   Download `safe-elementor-mcp-1.8.0.zip` from [Releases](https://github.com/brianalviano/full-elementor-mcp/releases) and install via **Plugins → Add New → Upload Plugin**, or extract into `wp-content/plugins/full-elementor-mcp/`.
 2. **Activate Plugin**:
-   The plugin verifies system prerequisites automatically during activation.
+   The plugin verifies system prerequisites automatically during activation. All safety database tables are provisioned via `dbDelta()`.
 3. **Configure MCP Credentials**:
    Generate an **Application Password** in WordPress under **Users → Profile**.
 4. **Connect Your MCP Client**:

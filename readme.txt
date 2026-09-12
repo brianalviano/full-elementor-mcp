@@ -2,7 +2,7 @@
 Contributors: brianalviano
 Tags: elementor, mcp, ai, model-context-protocol, page-builder, claude, ai-agent, openai, gemini
 Requires at least: 6.9
-Tested up to: 6.9
+Tested up to: 7.1
 Requires PHP: 8.0
 Stable tag: 1.8.0
 License: GPL-3.0-or-later

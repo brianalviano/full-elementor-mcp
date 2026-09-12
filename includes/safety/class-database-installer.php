@@ -269,29 +269,70 @@ class Full_Elementor_MCP_Database_Installer {
 		global $wpdb;
 
 		$col_defs = array(
-			'checkpoint_uuid'         => "varchar(64) NOT NULL default ''",
-			'resource_key'            => "varchar(128) NOT NULL default ''",
+			// Tokens table
+			'token_key'               => "varchar(128) NOT NULL",
+			'token_type'              => "varchar(20) NOT NULL",
+			'owner_id'                => "varchar(64) default NULL",
+			'payload'                 => "longtext default NULL",
+			'expires_at'              => "datetime NOT NULL",
+			'used'                    => "tinyint(1) NOT NULL default 0",
+
+			// Journal table
+			'ability'                 => "varchar(100) NOT NULL",
+			'action'                  => "varchar(20) NOT NULL",
 			'object_type'             => "varchar(30) NOT NULL default ''",
 			'object_id'               => "bigint(20) unsigned NOT NULL default 0",
+			'created_object_id'       => "bigint(20) unsigned default NULL",
+			'resource_key'            => "varchar(128) NOT NULL default ''",
+			'rollback_supported'      => "tinyint(1) NOT NULL default 0",
+			'fencing_token'           => "bigint(20) unsigned NOT NULL default 0",
+			'before_state'            => "longtext default NULL",
+			'before_hash'             => "varchar(64) default NULL",
+			'after_hash'              => "varchar(64) default NULL",
+			'status'                  => "varchar(20) NOT NULL default 'pending'",
+			'error_message'           => "text default NULL",
+			'user_id'                 => "bigint(20) unsigned default NULL",
+			'credential_uuid'         => "varchar(64) default NULL",
+			'updated_at'              => "datetime NOT NULL default CURRENT_TIMESTAMP on update CURRENT_TIMESTAMP",
+
+			// Checkpoints table
+			'checkpoint_uuid'         => "varchar(64) NOT NULL default ''",
 			'checkpoint_type'         => "varchar(30) NOT NULL default 'automatic'",
 			'restore_capability'      => "varchar(30) NOT NULL default 'exact'",
 			'payload_schema_version'  => "int(10) unsigned NOT NULL default 2",
 			'crypto_envelope_version' => "int(10) unsigned NOT NULL default 0",
+			'encryption_algorithm'    => "varchar(30) NOT NULL default 'none'",
+			'key_version'             => "int(10) unsigned NOT NULL default 1",
+			'key_id'                  => "varchar(64) default NULL",
 			'nonce'                   => "varchar(64) NOT NULL default ''",
 			'auth_tag'                => "varchar(64) default NULL",
 			'encrypted_payload'       => "longtext default NULL",
 			'state_hash'              => "varchar(64) NOT NULL default ''",
 			'compression_algorithm'   => "varchar(20) default 'none'",
+			'size_bytes'              => "bigint(20) unsigned default 0",
+			'label'                   => "varchar(255) NOT NULL default ''",
+			'description'             => "text default NULL",
+			'trigger_type'            => "varchar(20) NOT NULL default 'manual'",
+			'file_path'               => "varchar(500) NOT NULL default ''",
+			'file_hash_hmac'          => "varchar(64) NOT NULL default ''",
 			'source_ability'          => "varchar(100) default NULL",
 			'source_journal_id'       => "bigint(20) unsigned default NULL",
-			'credential_uuid'         => "varchar(64) default NULL",
+			'created_by'              => "bigint(20) unsigned default NULL",
 			'is_pinned'               => "tinyint(1) NOT NULL default 0",
-			'rollback_supported'      => "tinyint(1) NOT NULL default 0",
+
+			// Audit log table
 			'event_uuid'              => "varchar(64) NOT NULL default ''",
+			'timestamp'               => "datetime NOT NULL default CURRENT_TIMESTAMP",
+			'event'                   => "varchar(50) NOT NULL",
 			'request_uuid'            => "varchar(64) default NULL",
+			'ip_address'              => "varchar(45) default NULL",
 			'severity'                => "varchar(20) NOT NULL default 'info'",
 			'error_code'              => "varchar(64) default NULL",
+			'args_sanitized'          => "longtext default NULL",
 			'metadata_sanitized'      => "longtext default NULL",
+			'result_status'           => "varchar(20) default NULL",
+			'change_id'               => "bigint(20) unsigned default NULL",
+			'execution_time_ms'       => "int(10) unsigned default 0",
 		);
 
 		$expected = self::get_expected_schema();
@@ -305,6 +346,55 @@ class Full_Elementor_MCP_Database_Installer {
 				if ( ! in_array( $col_lower, $actual, true ) && isset( $col_defs[ $col_lower ] ) ) {
 					$def = $col_defs[ $col_lower ];
 					$wpdb->query( "ALTER TABLE {$table} ADD COLUMN {$col_lower} {$def}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				}
+			}
+		}
+
+		self::ensure_missing_indexes();
+	}
+
+	/**
+	 * Ensures all required indexes exist on all safety tables.
+	 */
+	public static function ensure_missing_indexes(): void {
+		global $wpdb;
+
+		$index_defs = array(
+			// Journal
+			'idx_status'          => 'status',
+			'idx_object'          => 'object_type, object_id',
+			'idx_resource'        => 'resource_key',
+			'idx_created'         => 'created_at',
+
+			// Checkpoints
+			'idx_checkpoint_type' => 'checkpoint_type',
+
+			// Audit Log
+			'idx_timestamp'       => 'timestamp',
+			'idx_event'           => 'event',
+			'idx_ability'         => 'ability',
+			'idx_change'          => 'change_id',
+			'idx_request'         => 'request_uuid',
+			'idx_checkpoint'      => 'checkpoint_uuid',
+			'idx_severity'        => 'severity',
+			'idx_event_uuid'      => 'event_uuid',
+
+			// Tokens
+			'idx_type_expires'    => 'token_type, expires_at',
+			'idx_used'            => 'used',
+		);
+
+		$expected = self::get_expected_schema();
+		foreach ( $expected as $table => $spec ) {
+			$actual_indexes = self::get_table_indexes( $table );
+			if ( empty( $actual_indexes ) ) {
+				continue;
+			}
+			foreach ( $spec['indexes'] as $idx ) {
+				$idx_lower = strtolower( $idx );
+				if ( ! in_array( $idx_lower, $actual_indexes, true ) && isset( $index_defs[ $idx_lower ] ) ) {
+					$cols = $index_defs[ $idx_lower ];
+					@$wpdb->query( "ALTER TABLE {$table} ADD KEY {$idx_lower} ({$cols})" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				}
 			}
 		}

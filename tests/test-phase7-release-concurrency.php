@@ -811,7 +811,7 @@ run_test( 'Release Packaging: scripts/build-release.php produces valid single-ro
 
 	for ( $i = 0; $i < $zip->numFiles; $i++ ) {
 		$name = $zip->statIndex( $i )['name'];
-		assert_true( str_starts_with( $name, 'safe-elementor-mcp/' ), "Entry {$name} must start with safe-elementor-mcp/" );
+		assert_true( str_starts_with( $name, 'full-elementor-mcp/' ), "Entry {$name} must start with full-elementor-mcp/" );
 		assert_false( str_contains( $name, '.git/' ), "Entry {$name} must not contain .git/" );
 		assert_false( str_contains( $name, 'tests/' ), "Entry {$name} must not contain tests/" );
 		assert_false( str_contains( $name, 'scripts/' ), "Entry {$name} must not contain scripts/" );

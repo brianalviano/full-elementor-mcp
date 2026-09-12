@@ -91,9 +91,17 @@ The safety engine operates exclusively on 4 dedicated tables:
 
 ---
 
-## 3. Backward Compatibility Invariant
+## 3. Backward Compatibility & System Requirements
 
 To ensure existing client configurations, automation scripts, and database integrations continue operating seamlessly:
+- **Plugin Directory & Packaging**: The distribution ZIP is named `safe-elementor-mcp-X.Y.Z.zip`, while the internal root directory is strictly `full-elementor-mcp/` so in-place upgrades never break WordPress `active_plugins` options or require re-activation.
 - **Machine Identifiers**: Prefix `full_elementor_mcp_*`, constants (`FULL_ELEMENTOR_MCP_VERSION`, etc.), option names, and database table names remain unchanged.
 - **Ability Names**: Ability names remain prefixed with `full-elementor-mcp/` (e.g. `full-elementor-mcp/add-heading`).
 - **Public Product Identity**: The public branding, documentation, and user-facing admin consoles use **Safe Elementor MCP**.
+
+### Compatibility Requirements
+- **WordPress**: 6.9 to 7.1 (fully tested on both 6.9 and 7.1 core with real MySQL).
+- **Elementor**: Minimum 3.20.0 required. Elementor 4.0+ activates the Atomic architecture (`e-flexbox`, `e-div-block`, etc.). Elementor Pro is optional; Pro abilities degrade cleanly when absent.
+- **WordPress MCP Adapter**: Minimum tested version 0.1.0+. If the MCP Adapter is absent, the plugin operates in standalone mode, emitting an admin notice and registering tools via the WordPress Abilities API.
+- **PHP**: 8.0, 8.1, 8.2, 8.3, 8.4.
+- **Database**: MySQL 8.0+ / MariaDB 10.5+ with InnoDB and utf8mb4.

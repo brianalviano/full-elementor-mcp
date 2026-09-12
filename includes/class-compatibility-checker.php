@@ -20,9 +20,11 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class Full_Elementor_MCP_Compatibility_Checker {
 
-	public const MIN_PHP_VERSION = '8.0';
-	public const MIN_WP_VERSION  = '6.9';
-	public const TESTED_WP_VER   = '6.9';
+	public const MIN_PHP_VERSION       = '8.0';
+	public const MIN_WP_VERSION        = '6.9';
+	public const TESTED_WP_VER         = '7.1';
+	public const MIN_ELEMENTOR_VERSION = '3.20.0';
+	public const MIN_MCP_ADAPTER_VER   = '0.1.0';
 
 	/**
 	 * Checks PHP version requirement.
@@ -54,17 +56,20 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		$supported = version_compare( $current, self::MIN_WP_VERSION, '>=' );
 
 		return array(
-			'supported' => $supported,
-			'current'   => $current,
-			'required'  => self::MIN_WP_VERSION,
-			'message'   => $supported
+			'supported'     => $supported,
+			'meets_minimum' => $supported,
+			'version'       => $current,
+			'current'       => $current,
+			'required'      => self::MIN_WP_VERSION,
+			'tested_up_to'  => self::TESTED_WP_VER,
+			'message'       => $supported
 				? sprintf( 'WordPress %s satisfies minimum %s.', $current, self::MIN_WP_VERSION )
 				: sprintf( 'WordPress %s is unsupported. Minimum required is %s.', $current, self::MIN_WP_VERSION ),
 		);
 	}
 
 	/**
-	 * Checks Elementor and Elementor Pro availability.
+	 * Checks Elementor and Elementor Pro availability and version.
 	 *
 	 * @return array<string, mixed>
 	 */
@@ -74,23 +79,62 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		$pro_loaded  = defined( 'ELEMENTOR_PRO_VERSION' ) || class_exists( '\ElementorPro\Plugin' );
 		$pro_version = defined( 'ELEMENTOR_PRO_VERSION' ) ? ELEMENTOR_PRO_VERSION : ( $pro_loaded ? 'active' : 'not loaded' );
 
+		$supported = false;
+		$message   = 'Elementor is not loaded.';
+
+		if ( $loaded && 'not loaded' !== $version ) {
+			$supported = version_compare( $version, self::MIN_ELEMENTOR_VERSION, '>=' );
+			$message   = $supported
+				? sprintf( 'Elementor %s satisfies minimum %s.', $version, self::MIN_ELEMENTOR_VERSION )
+				: sprintf( 'Elementor %s is unsupported. Minimum required is %s.', $version, self::MIN_ELEMENTOR_VERSION );
+		}
+
 		return array(
-			'loaded'      => (bool) $loaded,
-			'version'     => (string) $version,
-			'pro_loaded'  => (bool) $pro_loaded,
-			'pro_version' => (string) $pro_version,
+			'loaded'        => (bool) $loaded,
+			'installed'     => (bool) $loaded,
+			'active'        => (bool) $loaded,
+			'version'       => (string) $version,
+			'supported'     => (bool) $supported,
+			'meets_minimum' => (bool) $supported,
+			'required'      => self::MIN_ELEMENTOR_VERSION,
+			'message'       => $message,
+			'pro_loaded'    => (bool) $pro_loaded,
+			'pro_version'   => (string) $pro_version,
 		);
 	}
 
 	/**
-	 * Checks WordPress MCP Adapter availability.
+	 * Checks WordPress MCP Adapter availability and API contract.
 	 *
 	 * @return array<string, mixed>
 	 */
 	public static function check_mcp_adapter(): array {
 		$loaded = class_exists( '\WP\MCP\Core\McpAdapter' ) || class_exists( 'WP_MCP_Adapter' );
+		$version = 'unknown';
+		if ( defined( '\WP\MCP\Core\McpAdapter::VERSION' ) ) {
+			$version = constant( '\WP\MCP\Core\McpAdapter::VERSION' );
+		} elseif ( defined( 'WP_MCP_ADAPTER_VERSION' ) ) {
+			$version = constant( 'WP_MCP_ADAPTER_VERSION' );
+		}
+
+		$has_api = false;
+		if ( $loaded ) {
+			$cls = class_exists( '\WP\MCP\Core\McpAdapter' ) ? '\WP\MCP\Core\McpAdapter' : 'WP_MCP_Adapter';
+			$has_api = method_exists( $cls, 'create_server' );
+		}
+
+		$supported = $loaded && ( 'unknown' === $version || version_compare( $version, self::MIN_MCP_ADAPTER_VER, '>=' ) );
+
 		return array(
-			'loaded' => (bool) $loaded,
+			'loaded'        => (bool) $loaded,
+			'installed'     => (bool) $loaded,
+			'active'        => (bool) $loaded,
+			'version'       => (string) $version,
+			'supported'     => (bool) $supported,
+			'meets_minimum' => (bool) $supported,
+			'required'      => self::MIN_MCP_ADAPTER_VER,
+			'has_api'       => (bool) $has_api,
+			'message'       => $loaded ? 'WordPress MCP Adapter detected.' : 'WordPress MCP Adapter plugin not loaded.',
 		);
 	}
 
@@ -160,7 +204,60 @@ class Full_Elementor_MCP_Compatibility_Checker {
 			);
 		}
 
+		$elem = self::check_elementor();
+		if ( ! $elem['loaded'] || ! $elem['supported'] ) {
+			return new \WP_Error(
+				'missing_dependency',
+				sprintf(
+					/* translators: 1: required Elementor version, 2: current version */
+					__( 'Safe Elementor MCP requires Elementor %1$s or higher to be installed and active. Current: %2$s. Plugin activation aborted.', 'full-elementor-mcp' ),
+					self::MIN_ELEMENTOR_VERSION,
+					$elem['version']
+				)
+			);
+		}
+
 		return true;
+	}
+
+	/**
+	 * Returns true if Elementor is loaded and meets the minimum version requirement.
+	 *
+	 * @return bool
+	 */
+	public static function is_elementor_active(): bool {
+		$elem = self::check_elementor();
+		return $elem['loaded'] && $elem['supported'];
+	}
+
+	/**
+	 * Returns true if Elementor Pro is active.
+	 *
+	 * @return bool
+	 */
+	public static function is_elementor_pro_active(): bool {
+		$elem = self::check_elementor();
+		return (bool) $elem['pro_loaded'];
+	}
+
+	/**
+	 * Returns true if WordPress MCP Adapter is active.
+	 *
+	 * @return bool
+	 */
+	public static function is_mcp_adapter_active(): bool {
+		$mcp = self::check_mcp_adapter();
+		return (bool) $mcp['loaded'];
+	}
+
+	/**
+	 * Returns the WordPress MCP Adapter version.
+	 *
+	 * @return string
+	 */
+	public static function get_mcp_adapter_version(): string {
+		$mcp = self::check_mcp_adapter();
+		return (string) $mcp['version'];
 	}
 
 	/**
@@ -173,7 +270,9 @@ class Full_Elementor_MCP_Compatibility_Checker {
 
 		$elem = self::check_elementor();
 		if ( ! $elem['loaded'] ) {
-			$missing[] = 'Elementor (page builder)';
+			$missing[] = sprintf( 'Elementor (>= %s)', self::MIN_ELEMENTOR_VERSION );
+		} elseif ( ! $elem['supported'] ) {
+			$missing[] = sprintf( 'Elementor (>= %s) (current version %s is unsupported)', self::MIN_ELEMENTOR_VERSION, $elem['version'] );
 		}
 
 		$mcp = self::check_mcp_adapter();
@@ -211,7 +310,7 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		$status = 'healthy';
 		if ( ! $php['supported'] || ! $wp['supported'] || ! $crypto['supported'] ) {
 			$status = 'incompatible';
-		} elseif ( ! empty( $missing ) ) {
+		} elseif ( ! empty( $missing ) || ( $elem['loaded'] && ! $elem['supported'] ) ) {
 			$status = 'degraded';
 		}
 

@@ -5,7 +5,7 @@
  * Description:       A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
  * Version:           1.8.0
  * Requires at least: 6.9
- * Tested up to:      6.9
+ * Tested up to:      7.1
  * Requires PHP:      8.0
  * Author:            Brian Alviano
  * Author URI:        https://github.com/brianalviano

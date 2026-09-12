@@ -202,7 +202,7 @@ foreach ( $php_files_to_lint as $php_file ) {
 echo "      All " . count( $php_files_to_lint ) . " PHP files passed syntax check.\n";
 
 // 5. Create Dist Directory and Build ZIP
-echo "[4/6] Packaging ZIP artifact with single-root directory 'safe-elementor-mcp/'...\n";
+echo "[4/6] Packaging ZIP artifact with backward-compatible root directory 'full-elementor-mcp/'...\n";
 if ( ! is_dir( $dist_dir ) ) {
 	if ( ! mkdir( $dist_dir, 0755, true ) ) {
 		fwrite( STDERR, "FATAL: Failed to create dist directory: {$dist_dir}\n" );
@@ -228,7 +228,7 @@ if ( true !== $zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE 
 }
 
 $manifest_files = array();
-$single_root    = 'safe-elementor-mcp/';
+$single_root    = 'full-elementor-mcp/';
 
 // Sort files alphabetically for deterministic packaging
 ksort( $files_to_package );
@@ -266,19 +266,19 @@ if ( $zip_entry_count !== count( $files_to_package ) ) {
 }
 
 $mandatory_entries = array(
-	'safe-elementor-mcp/full-elementor-mcp.php',
-	'safe-elementor-mcp/uninstall.php',
-	'safe-elementor-mcp/readme.txt',
-	'safe-elementor-mcp/LICENSE',
-	'safe-elementor-mcp/includes/class-compatibility-checker.php',
-	'safe-elementor-mcp/includes/safety/class-database-installer.php',
+	'full-elementor-mcp/full-elementor-mcp.php',
+	'full-elementor-mcp/uninstall.php',
+	'full-elementor-mcp/readme.txt',
+	'full-elementor-mcp/LICENSE',
+	'full-elementor-mcp/includes/class-compatibility-checker.php',
+	'full-elementor-mcp/includes/safety/class-database-installer.php',
 );
 
 for ( $i = 0; $i < $zip_entry_count; $i++ ) {
 	$stat = $verify_zip->statIndex( $i );
 	$name = $stat['name'];
 
-	// Invariant 1: Must start with safe-elementor-mcp/
+	// Invariant 1: Must start with full-elementor-mcp/
 	if ( ! str_starts_with( $name, $single_root ) ) {
 		fwrite( STDERR, "FATAL: File {$name} violates single-root requirement (must start with {$single_root})\n" );
 		exit( 1 );
@@ -310,7 +310,8 @@ file_put_contents( $sha256_file, "{$zip_sha256}  {$zip_filename}\n" );
 
 $manifest = array(
 	'product_name'        => 'Safe Elementor MCP',
-	'slug'                => 'safe-elementor-mcp',
+	'slug'                => 'full-elementor-mcp',
+	'plugin_basename'     => 'full-elementor-mcp/full-elementor-mcp.php',
 	'version'             => $version,
 	'zip_filename'        => $zip_filename,
 	'zip_sha256'          => $zip_sha256,

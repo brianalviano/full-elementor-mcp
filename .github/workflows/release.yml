@@ -7,28 +7,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 1.8.0)'
+        description: 'Release version (e.g. 1.8.0 or 1.8.0-rc1)'
         required: true
         default: '1.8.0'
 
 jobs:
-  build-and-release:
-    name: Build and Publish Release
+  verify-and-release:
+    name: Verify, Build, and Draft Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: safe_elementor_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup PHP 8.0
+      - name: Setup PHP 8.2
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.0'
-          extensions: curl, mbstring, json, sodium, openssl, pdo_sqlite, sqlite3, zip
+          php-version: '8.2'
+          extensions: curl, mbstring, json, sodium, openssl, pdo_sqlite, sqlite3, pdo_mysql, mysqli, zip
           coverage: none
 
-      - name: Run Complete Test Suite
+      - name: Determine Target Version
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "target_version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "target_version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enforce Tag / Source Version Consistency
+        id: verify_ver
+        run: php scripts/verify-release-version.php "${{ steps.target.outputs.target_version }}"
+
+      - name: Run Standalone Test Suite (Phases 1-7)
         run: |
           php tests/test-phase1-foundation.php
           php tests/test-phase2-journal.php
@@ -38,13 +62,43 @@ jobs:
           php tests/test-phase6-audit-tools.php
           php tests/test-phase7-release-concurrency.php
 
-      - name: Build Release Archive
+      - name: Run MySQL Safety & Concurrency Suites
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: root
+          DB_NAME: safe_elementor_test
+        run: |
+          php tests/test-mysql-safety.php
+          php tests/test-mysql-concurrency.php
+          php tests/test-process-crash-recovery.php
+
+      - name: Build Release Package
         run: php scripts/build-release.php
 
-      - name: Upload Release Assets
+      - name: Verify Release Package & Single Root full-elementor-mcp/
+        run: |
+          test -f dist/manifest.json || { echo "Missing manifest.json"; exit 1; }
+          test -f dist/safe-elementor-mcp-1.8.0.zip || { echo "Missing ZIP"; exit 1; }
+          test -f dist/safe-elementor-mcp-1.8.0.zip.sha256 || { echo "Missing SHA256"; exit 1; }
+
+      - name: Execute Pre-Phase 7 Upgrade Smoke Test from Phase 6 Baseline
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: root
+          DB_NAME: safe_elementor_test
+        run: php tests/test-phase6-upgrade-smoke.php
+
+      - name: Create Draft Release on GitHub
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ steps.target.outputs.target_version }}
+          name: Safe Elementor MCP ${{ steps.verify_ver.outputs.version }}
+          draft: true
+          prerelease: ${{ steps.verify_ver.outputs.is_prerelease == 'true' }}
           files: |
             dist/*.zip
             dist/*.sha256

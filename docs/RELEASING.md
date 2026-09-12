@@ -17,7 +17,7 @@ Before building a release, verify the following:
   - `Full_Elementor_MCP_Database_Installer::DB_VERSION` corresponds to the current schema (1.4.0).
   - Exactly 4 safety tables maintained (`journal`, `checkpoints`, `audit_log`, `tokens`).
 - [ ] **Test Suite Green**:
-  - Run all 7 test suites:
+  - Run all unit and integration test suites:
     ```bash
     php tests/test-phase1-foundation.php
     php tests/test-phase2-journal.php
@@ -26,6 +26,11 @@ Before building a release, verify the following:
     php tests/test-phase5-checkpoints.php
     php tests/test-phase6-audit-tools.php
     php tests/test-phase7-release-concurrency.php
+    php tests/test-mysql-safety.php
+    php tests/test-mysql-concurrency.php
+    php tests/test-process-crash-recovery.php
+    php tests/test-wordpress-integration.php
+    php tests/test-phase6-upgrade-smoke.php
     ```
 - [ ] **Syntax Lint**:
   - `find . -name "*.php" -exec php -l {} +` passes with zero errors on PHP 8.0 through 8.4.
@@ -43,10 +48,11 @@ php scripts/build-release.php
 ### Packaging Actions:
 1. **Pre-Flight Scans**:
    - Scans all files for accidental credentials, private keys, and tokens.
-   - Verifies version alignment across headers and constants.
+   - Verifies version alignment across headers and constants via `scripts/verify-release-version.php`.
    - Runs `php -l` on all PHP files included in the build.
 2. **Deterministic Single-Root Assembly**:
-   - Compiles distribution archive with single root directory: `safe-elementor-mcp/`.
+   - Compiles distribution archive with internal single root directory: `full-elementor-mcp/`.
+   - The archive itself is named `safe-elementor-mcp-X.Y.Z.zip` (with `safe-elementor-mcp.zip` symlink/copy).
    - Excludes VCS files (`.git/`), CI workflows (`.github/`), test suites (`tests/`), build scripts (`scripts/`), and scratch files.
 3. **Artifacts Output to `dist/`**:
    - `dist/safe-elementor-mcp-X.Y.Z.zip`
@@ -54,29 +60,36 @@ php scripts/build-release.php
    - `dist/safe-elementor-mcp-X.Y.Z.zip.sha256`
    - `dist/manifest.json` containing build timestamp, file list, and per-file SHA-256 hashes.
 4. **Post-Build Validation**:
-   - Inspects the produced ZIP to verify single-root compliance and absence of excluded directories.
+   - Inspects the produced ZIP to verify single-root `full-elementor-mcp/` compliance and absence of excluded directories.
+   - Executes `tests/test-phase6-upgrade-smoke.php` to verify seamless upgrade from Phase 6 baseline.
 
 ---
 
 ## 3. Safe Release Tagging & Publication
 
 > [!IMPORTANT]
-> Releases and Git tags are **NEVER** created or pushed automatically by AI assistants. The human maintainer retains sole authority over release publication.
+> Releases and Git tags are **NEVER** published automatically to public channels by CI/CD or AI assistants. The human maintainer retains sole authority over release publication. All GitHub releases created by CI are created as **DRAFT** releases (`draft: true`).
 
 Once all tests pass and `scripts/build-release.php` succeeds:
 
-1. Review git diff:
+1. Review git diff and status:
    ```bash
    git status
    git diff
    ```
-2. Commit release changes:
+2. Verify version consistency:
+   ```bash
+   php scripts/verify-release-version.php vX.Y.Z
+   ```
+3. Commit release changes:
    ```bash
    git commit -m "Release vX.Y.Z"
    ```
-3. Tag the release:
+4. Tag the release:
    ```bash
    git tag -a vX.Y.Z -m "Release vX.Y.Z"
    git push origin main --tags
    ```
-4. GitHub Actions will trigger `.github/workflows/release.yml` upon tag push, running the automated test suite, packaging the release, and attaching the artifacts (`.zip`, `.sha256`, `manifest.json`) to the GitHub Release draft.
+   *(For release candidates, tag as `vX.Y.Z-rc1`. CI will automatically mark the draft release with `prerelease: true`.)*
+5. GitHub Actions will trigger `.github/workflows/release.yml`, executing the comprehensive test suite, verifying version consistency, packaging the archive, and creating a **Draft GitHub Release** with attached artifacts (`.zip`, `.sha256`, `manifest.json`).
+6. The maintainer reviews the draft release on GitHub and publishes it manually.
