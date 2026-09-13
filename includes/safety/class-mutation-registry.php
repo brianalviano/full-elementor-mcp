@@ -188,7 +188,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 		$descriptor['is_destructive']                 = ! empty( $descriptor['is_destructive'] );
 		$descriptor['supports_rollback']              = (bool) $descriptor['supports_rollback'];
 
-		// Phase 3 security and validation metadata:
+		// Security and validation metadata:
 		$descriptor['requires_tree_validation'] = isset( $descriptor['requires_tree_validation'] )
 			? (bool) $descriptor['requires_tree_validation']
 			: ( self::CATEGORY_ELEMENTOR_DATA === $descriptor['category'] );
@@ -1107,13 +1107,13 @@ class Full_Elementor_MCP_Mutation_Registry {
 			);
 		}
 
-		// Phase 5 internal strategy: ensure checkpoint-restore is registered upon core strategy initialization:
+		// Internal strategy: ensure checkpoint-restore is registered upon core strategy initialization:
 		if ( class_exists( 'Full_Elementor_MCP_Checkpoint_Manager' ) ) {
 			Full_Elementor_MCP_Checkpoint_Manager::ensure_restore_strategy_registered();
 		}
 
 		// ---------------------------------------------------------------------
-		// 9. Phase 6 Managed Safety Actions (restore-checkpoint, undo-change, undo-last-change, create-checkpoint)
+		// 9. Managed Safety Actions (restore-checkpoint, undo-change, undo-last-change, create-checkpoint)
 		// ---------------------------------------------------------------------
 		self::register(
 			array(
@@ -1497,7 +1497,7 @@ class Full_Elementor_MCP_Mutation_Registry {
 			return new \WP_Error( 'invalid_before_state', __( 'Before-state must be an array of Elementor elements.', 'full-elementor-mcp' ) );
 		}
 
-		// Phase 3: Validate tree structure before restoring to persistent storage.
+		// Validate tree structure before restoring to persistent storage.
 		// Malformed or corrupted journal state must NOT be written back into Elementor.
 		if ( class_exists( 'Full_Elementor_MCP_Tree_Validator' ) ) {
 			$tree_validation = Full_Elementor_MCP_Tree_Validator::validate_document(

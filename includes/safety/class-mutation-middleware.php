@@ -15,8 +15,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Authoritative Central Safety Middleware.
  *
- * Connects Phase 1 (Locks & Fencing), Phase 2 (WAL Journal & Recovery), and
- * Phase 3 (Tree Validator & Security Strategies) into ONE authoritative execution layer.
+ * Connects Locks & Fencing, WAL Journal & Recovery, and
+ * Tree Validator & Security Strategies into ONE authoritative execution layer.
  *
  * @since 1.8.0
  */
@@ -680,7 +680,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			$idemp_token_key = $claim['token_key'] ?? null;
 		}
 
-		// 14.5. Managed Safety Action Execution (Phase 6):
+		// 14.5. Managed Safety Action Execution:
 		// Checkpoint restores and Undos manage their own WAL / locks.
 		// Caller input must NEVER declare this; it is strictly read from Mutation Registry.
 		if ( $is_managed_safety ) {
@@ -922,7 +922,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 			return $delegate_result;
 		}
 
-		// 15. Acquire Phase 1 Lock:
+		// 15. Acquire Resource Lock:
 		$lock_result = Full_Elementor_MCP_Lock_Manager::acquire_lock( $resource_key, $owner_id, 30 );
 		if ( is_wp_error( $lock_result ) ) {
 			if ( $idemp_token_key ) {

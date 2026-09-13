@@ -26,7 +26,7 @@ class Full_Elementor_MCP_Database_Installer {
 	/**
 	 * Current database schema version.
 	 *
-	 * 1.4.0: Phase 6 forensic audit trail correlation columns and indexes.
+	 * 1.4.0: Forensic audit trail correlation columns and indexes.
 	 */
 	public const DB_VERSION = '1.4.0';
 
@@ -153,7 +153,7 @@ class Full_Elementor_MCP_Database_Installer {
 				KEY idx_created (created_at)
 			) {$charset_collate};",
 
-			// 3. Forensic Audit Log table (Phase 6 extended correlation schema).
+			// 3. Forensic Audit Log table (extended correlation schema).
 			"CREATE TABLE {$audit_log_table} (
 				id bigint(20) unsigned NOT NULL auto_increment,
 				event_uuid varchar(64) NOT NULL default '',
@@ -635,7 +635,7 @@ class Full_Elementor_MCP_Database_Installer {
 				'primary'       => 'id',
 				'single_unique' => 'checkpoint_uuid',
 			),
-			// Audit log table: forensic mutation history (Phase 6 extended correlation schema).
+			// Audit log table: forensic mutation history (extended correlation schema).
 			self::get_audit_log_table()   => array(
 				'columns'       => array(
 					'id',

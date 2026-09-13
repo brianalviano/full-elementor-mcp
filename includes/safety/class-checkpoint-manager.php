@@ -684,7 +684,7 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Restores a historical checkpoint to its target resource with full Phase 4 safety.
+	 * Restores a historical checkpoint to its target resource with full middleware safety.
 	 *
 	 * Order of Operations:
 	 * 1. Fetch checkpoint record

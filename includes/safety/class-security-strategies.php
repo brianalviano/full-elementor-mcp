@@ -1144,7 +1144,7 @@ class Full_Elementor_MCP_Security_Strategies {
 	/**
 	 * Classifies an ability and its payload for security risks, executable code, and confirmation gating.
 	 *
-	 * Does not falsely sanitize code; produces honest security classification metadata for Phase 4.
+	 * Does not falsely sanitize code; produces honest security classification metadata for middleware.
 	 *
 	 * @param string               $ability Ability name (e.g. 'full-elementor-mcp/add-custom-js').
 	 * @param array<string, mixed> $args    Input arguments.
@@ -1268,7 +1268,7 @@ class Full_Elementor_MCP_Security_Strategies {
 	/**
 	 * Authoritative security profile resolver combining static registry metadata and dynamic payload analysis.
 	 *
-	 * Single Phase 3 entrypoint for Phase 4 middleware.
+	 * Single security entrypoint for mutation middleware.
 	 *
 	 * @param string               $ability Ability name (e.g. 'full-elementor-mcp/add-custom-js').
 	 * @param array<string, mixed> $args    Input arguments for dynamic classification.

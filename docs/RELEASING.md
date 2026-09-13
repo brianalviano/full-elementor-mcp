@@ -61,7 +61,7 @@ php scripts/build-release.php
    - `dist/manifest.json` containing build timestamp, file list, and per-file SHA-256 hashes.
 4. **Post-Build Validation**:
    - Inspects the produced ZIP to verify single-root `full-elementor-mcp/` compliance and absence of excluded directories.
-   - Executes `tests/test-phase6-upgrade-smoke.php` to verify seamless upgrade from Phase 6 baseline.
+   - Executes `tests/test-phase6-upgrade-smoke.php` to verify seamless upgrade from earlier release baseline.
 
 ---
 

@@ -2,7 +2,7 @@
 
 ## 1. Architectural Overview
 
-Safe Elementor MCP is an enterprise-grade WordPress plugin providing an official Model Context Protocol (MCP) server for Elementor and Elementor Pro. It enables autonomous AI agents to query, design, construct, style, and manage pages safely.
+Safe Elementor MCP is a WordPress plugin providing a Model Context Protocol (MCP) server for Elementor and Elementor Pro. It enables autonomous AI agents to query, design, construct, style, and manage pages safely.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐

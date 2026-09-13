@@ -3,7 +3,7 @@
  * Safe User-Facing Undo Manager for Safe Elementor MCP.
  *
  * Orchestrates user-facing rollbacks with strict conflict detection,
- * durable pre-undo encrypted checkpoints, and frozen Phase 2 WAL rollback guarantees.
+ * durable pre-undo encrypted checkpoints, and WAL rollback guarantees.
  *
  * @package Full_Elementor_MCP
  * @since   1.8.0
@@ -171,7 +171,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 	 * 4. Capture current live resource state under lock.
 	 * 5. Verify live state equals journal after-state (conflict detection). Never overwrite newer changes.
 	 * 6. Create durable pre-undo encrypted checkpoint before modifying persistent state.
-	 * 7. Execute frozen Phase 2 Journal::rollback() under active lock and fencing.
+	 * 7. Execute Journal::rollback() under active lock and fencing.
 	 * 8. Verify exact persistent state matches journal before_hash.
 	 * 9. Mark audit trail and return structured success result.
 	 * 10. Always release lock safely in finally block.
@@ -426,7 +426,7 @@ final class Full_Elementor_MCP_Undo_Manager {
 				}
 			}
 
-			// 7. Execute frozen Phase 2 Journal::rollback() under active lock and fencing:
+			// 7. Execute Journal::rollback() under active lock and fencing:
 			$rollback_result = Full_Elementor_MCP_Journal::rollback(
 				$journal_id,
 				$owner_id,

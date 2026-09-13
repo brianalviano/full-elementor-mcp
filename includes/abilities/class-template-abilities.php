@@ -378,7 +378,7 @@ class Full_Elementor_MCP_Template_Abilities {
 		);
 	}
 
-	// ── Phase 6: Theme Builder Template Tools ─────────────────────────
+	// ── Theme Builder Template Tools ─────────────────────────────────
 
 	private function register_create_theme_template(): void {
 		full_elementor_mcp_register_ability(
@@ -538,7 +538,7 @@ class Full_Elementor_MCP_Template_Abilities {
 		return array( 'success' => true );
 	}
 
-	// ── Phase 6: Dynamic Tags ─────────────────────────────────────────
+	// ── Dynamic Tags ─────────────────────────────────────────────────
 
 	private function register_list_dynamic_tags(): void {
 		full_elementor_mcp_register_ability(
@@ -720,7 +720,7 @@ class Full_Elementor_MCP_Template_Abilities {
 		return array( 'success' => true );
 	}
 
-	// ── Phase 6: Popup Builder ────────────────────────────────────────
+	// ── Popup Builder ────────────────────────────────────────────────
 
 	private function register_create_popup(): void {
 		full_elementor_mcp_register_ability(

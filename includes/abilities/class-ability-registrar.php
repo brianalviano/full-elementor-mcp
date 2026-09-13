@@ -84,37 +84,37 @@ class Full_Elementor_MCP_Ability_Registrar {
 	 * @return string[] Array of registered ability names.
 	 */
 	public function register_all(): array {
-		// Phase 1: Query/discovery abilities (P0 — read-only).
+		// Query and discovery abilities (read-only).
 		$query = new Full_Elementor_MCP_Query_Abilities( $this->data, $this->schema_generator );
 		$query->register();
 		$this->ability_names = array_merge( $this->ability_names, $query->get_ability_names() );
 
-		// Phase 2: Page CRUD abilities (P1).
+		// Page CRUD abilities.
 		$pages = new Full_Elementor_MCP_Page_Abilities( $this->data, $this->factory );
 		$pages->register();
 		$this->ability_names = array_merge( $this->ability_names, $pages->get_ability_names() );
 
-		// Phase 2: Layout/container abilities (P1).
+		// Layout and container abilities.
 		$layout = new Full_Elementor_MCP_Layout_Abilities( $this->data, $this->factory );
 		$layout->register();
 		$this->ability_names = array_merge( $this->ability_names, $layout->get_ability_names() );
 
-		// Phase 3: Widget abilities — universal + convenience (P1/P2).
+		// Widget abilities — universal and convenience.
 		$widgets = new Full_Elementor_MCP_Widget_Abilities( $this->data, $this->factory, $this->schema_generator, $this->validator );
 		$widgets->register();
 		$this->ability_names = array_merge( $this->ability_names, $widgets->get_ability_names() );
 
-		// Phase 4: Template abilities (P2).
+		// Template abilities.
 		$templates = new Full_Elementor_MCP_Template_Abilities( $this->data, $this->factory );
 		$templates->register();
 		$this->ability_names = array_merge( $this->ability_names, $templates->get_ability_names() );
 
-		// Phase 4: Global settings abilities (P2).
+		// Global settings abilities.
 		$globals = new Full_Elementor_MCP_Global_Abilities( $this->data );
 		$globals->register();
 		$this->ability_names = array_merge( $this->ability_names, $globals->get_ability_names() );
 
-		// Phase 5: Composite abilities (P2).
+		// Composite abilities.
 		$composite = new Full_Elementor_MCP_Composite_Abilities( $this->data, $this->factory );
 		$composite->register();
 		$this->ability_names = array_merge( $this->ability_names, $composite->get_ability_names() );
@@ -144,7 +144,7 @@ class Full_Elementor_MCP_Ability_Registrar {
 		$atomic_layout->register();
 		$this->ability_names = array_merge( $this->ability_names, $atomic_layout->get_ability_names() );
 
-		// Phase 6: Safety, audit, and undo abilities.
+		// Safety, audit, and undo abilities.
 		if ( class_exists( 'Full_Elementor_MCP_Safety_Abilities' ) ) {
 			$safety = new Full_Elementor_MCP_Safety_Abilities();
 			$safety->register();

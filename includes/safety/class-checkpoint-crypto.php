@@ -194,7 +194,7 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 			if ( $salt_key['key_id'] === $key_id ) {
 				return $salt_key;
 			}
-			// Legacy Phase 5 key compatibility:
+			// Legacy checkpoint key compatibility:
 			// If key_id is 'wp_salt_v1', allow attempting with current salt key material under key_id 'wp_salt_v1'
 			if ( 'wp_salt_v1' === $key_id ) {
 				return array(
@@ -302,7 +302,7 @@ final class Full_Elementor_MCP_Checkpoint_Crypto {
 	 * Cryptographically binds ciphertext to the checkpoint UUID, resource key, schema version,
 	 * algorithm, and key metadata to prevent row-swapping or metadata tampering.
 	 *
-	 * Envelope v1 (legacy Phase 5): binds uuid, algorithm, key_id, key_version, payload_schema_version, resource_key.
+	 * Envelope v1 (legacy envelope): binds uuid, algorithm, key_id, key_version, payload_schema_version, resource_key.
 	 * Envelope v2 (current): also binds checkpoint_type and restore_capability.
 	 *
 	 * @param array<string, mixed> $meta             Required metadata fields.

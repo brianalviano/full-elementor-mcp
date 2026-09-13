@@ -1909,7 +1909,7 @@ class Full_Elementor_MCP_Widget_Abilities {
 		);
 	}
 
-	// ── Phase 5: Missing Widget Convenience Tools ─────────────────────
+	// ── Widget Convenience Tools ─────────────────────────────────────
 
 	private function register_add_menu_anchor(): void {
 		$this->register_convenience_tool(
@@ -2396,7 +2396,7 @@ class Full_Elementor_MCP_Widget_Abilities {
 		);
 	}
 
-	// ── Phase 6: WooCommerce Widget Convenience Tools ─────────────────
+	// ── WooCommerce Widget Convenience Tools ─────────────────────────
 
 	private function register_add_wc_products(): void {
 		$this->register_convenience_tool(

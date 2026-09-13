@@ -128,7 +128,7 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 == Changelog ==
 
 = 1.8.0 =
-* Major release: Enterprise-grade safety engine with WAL mutations, cryptographic checkpoints, lock fencing, audit logging, and Admin recovery console.
+* Major release: Safety layer with WAL mutations, encrypted checkpoints, lock fencing, audit logging, and Admin recovery console.
 * Pre-flight compatibility diagnostics with strict activation/deactivation guards.
 * Safe uninstall policy: audit and safety data preserved by default.
 * Rebrand to Safe Elementor MCP with backward-compatible machine interfaces.

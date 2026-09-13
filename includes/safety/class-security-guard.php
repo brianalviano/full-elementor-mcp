@@ -366,7 +366,7 @@ class Full_Elementor_MCP_Security_Guard {
 	/**
 	 * Defense-in-depth URL and IP validation for remote downloads.
 	 *
-	 * Delegates directly to the authoritative Phase 3 Security Strategies layer.
+	 * Delegates directly to the authoritative Security Strategies layer.
 	 *
 	 * @param string $url External URL to validate.
 	 * @return true|\WP_Error True if valid, WP_Error if unsafe.

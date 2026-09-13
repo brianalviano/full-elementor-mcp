@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Manages cryptographically random, short-lived, argument-bound confirmation tokens.
  *
- * Enforces Phase 4 confirmation gates for high-risk, irreversible, or protected mutations.
+ * Enforces confirmation gates for high-risk, irreversible, or protected mutations.
  * All tokens are single-use, bound strictly to user, credential UUID, ability,
  * canonical semantic arguments hash, and canonical resource key.
  *

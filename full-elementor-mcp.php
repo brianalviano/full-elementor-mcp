@@ -103,7 +103,7 @@ function full_elementor_mcp_register_ability( string $name, array $args ) {
 	if ( isset( $args['output_schema'] ) && is_array( $args['output_schema'] ) ) {
 		$args['output_schema'] = full_elementor_mcp_sanitize_schema( $args['output_schema'] );
 	}
-	// Phase 4: Route ability execution through central safety middleware:
+	// Route ability execution through central safety middleware:
 	if ( ! class_exists( 'Full_Elementor_MCP_Mutation_Middleware' ) ) {
 		return new \WP_Error(
 			'safety_middleware_missing',

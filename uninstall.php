@@ -22,7 +22,7 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 
 $should_delete_all = (bool) get_option( 'full_elementor_mcp_delete_data_on_uninstall', false );
 
-// In standalone test harnesses, default to true when unset to ensure Phase 1 test suite can verify complete purges.
+// In standalone test harnesses, default to true when unset to ensure the test suite can verify complete purges.
 if ( ! $should_delete_all && isset( $GLOBALS['wp_test_options'] ) && ! array_key_exists( 'full_elementor_mcp_delete_data_on_uninstall', $GLOBALS['wp_test_options'] ) ) {
 	$should_delete_all = true;
 }

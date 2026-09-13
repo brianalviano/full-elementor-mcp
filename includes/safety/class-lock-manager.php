@@ -647,8 +647,8 @@ class Full_Elementor_MCP_Lock_Manager {
 	 * Retrieves cached idempotent mutation result if exists, valid, and matches arguments.
 	 *
 	 * Strictly identity-bound: requires idempotency_key, ability, user_id, credential_uuid, and args.
-	 * Note: Phase 1 provides foundational identity-bound result caching and argument conflict validation.
-	 * Full atomic execution claim orchestration ('pending' -> 'completed') will be implemented in Phase 4 middleware.
+	 * Note: Provides foundational identity-bound result caching and argument conflict validation.
+	 * Full atomic execution claim orchestration ('pending' -> 'completed') is implemented in mutation middleware.
 	 *
 	 * @param string      $idempotency_key Caller idempotency UUID or key.
 	 * @param string      $ability         Target ability name.

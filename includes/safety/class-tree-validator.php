@@ -168,7 +168,7 @@ class Full_Elementor_MCP_Tree_Validator {
 	}
 
 	/**
-	 * Reusable pre-write hook for future Phase 4 middleware.
+	 * Reusable pre-write hook for mutation middleware.
 	 *
 	 * @param array<string, mixed> $elements Element tree.
 	 * @param array<string, mixed> $context  Context arguments.
@@ -179,7 +179,7 @@ class Full_Elementor_MCP_Tree_Validator {
 	}
 
 	/**
-	 * Reusable post-mutation hook for future Phase 4 middleware.
+	 * Reusable post-mutation hook for mutation middleware.
 	 *
 	 * @param array<string, mixed> $elements Element tree.
 	 * @param array<string, mixed> $context  Context arguments.
