@@ -3,19 +3,29 @@
  * Isolated Worker Process Runner for WordPress Package Lifecycle Suite.
  *
  * Executes isolated lifecycle phases in separate PHP processes to prevent
- * in-memory class collisions between frozen Phase 6 baseline and Phase 7 HEAD.
+ * in-memory class collisions between frozen Phase 6 baseline and Phase 7 HEAD,
+ * while operating on genuinely database-isolated WordPress installations.
  *
- * Usage:
- *   php tests/worker-lifecycle-runner.php --action=clean-install --wp-path=<path> --zip-file=<path>
- *   php tests/worker-lifecycle-runner.php --action=verify-clean-install --wp-path=<path>
- *   php tests/worker-lifecycle-runner.php --action=seed-phase6 --wp-path=<path>
- *   php tests/worker-lifecycle-runner.php --action=upgrade-package --wp-path=<path> --zip-file=<path>
- *   php tests/worker-lifecycle-runner.php --action=verify-upgrade --wp-path=<path> --seed-data=<json>
+ * Actions:
+ *   --action=init-site              Installs fresh WP schema via wp_install() and activates Elementor & MCP Adapter
+ *   --action=assert-pre-install     Asserts clean state (no full-elementor-mcp active, no dir, no tables, no db option)
+ *   --action=clean-install          Installs built ZIP via Plugin_Upgrader and activates
+ *   --action=verify-clean-install   Verifies authentic bootstrap, schema, 4 tables, Abilities API, and MCP Adapter
+ *   --action=seed-phase6            Activates Phase 6, seeds state, and creates checkpoint via Phase 6 Checkpoint_Manager
+ *   --action=upgrade-package        Executes public Plugin_Upgrader overwrite install of built Phase 7 ZIP
+ *   --action=verify-upgrade         Verifies post-upgrade Phase 7 state, migration, decryption, and registrations
  *
  * @package Safe_Elementor_MCP
  */
 
 declare(strict_types=1);
+
+if ( ! isset( $_SERVER['HTTP_HOST'] ) ) {
+	$_SERVER['HTTP_HOST'] = 'localhost';
+}
+if ( ! isset( $_SERVER['SERVER_NAME'] ) ) {
+	$_SERVER['SERVER_NAME'] = 'localhost';
+}
 
 $options = getopt( '', array(
 	'action:',
@@ -39,7 +49,7 @@ if ( ! empty( $options['seed-file'] ) && file_exists( $options['seed-file'] ) ) 
 }
 
 if ( ! $action || ! $wp_path || ! is_dir( $wp_path ) ) {
-	fwrite( STDERR, "Usage: worker-lifecycle-runner.php --action=<action> --wp-path=<path> [--zip-file=<zip>] [--seed-data=<json>]\n" );
+	fwrite( STDERR, "Usage: worker-lifecycle-runner.php --action=<action> --wp-path=<path> [--zip-file=<zip>] [--seed-file=<file>]\n" );
 	exit( 2 );
 }
 
@@ -47,6 +57,104 @@ $wp_load = rtrim( $wp_path, '/\\' ) . DIRECTORY_SEPARATOR . 'wp-load.php';
 if ( ! file_exists( $wp_load ) ) {
 	fwrite( STDERR, "FATAL: wp-load.php not found at {$wp_load}\n" );
 	exit( 2 );
+}
+
+// ---------------------------------------------------------------------
+// ACTION: init-site
+// ---------------------------------------------------------------------
+if ( 'init-site' === $action ) {
+	if ( ! defined( 'WP_INSTALLING' ) ) {
+		define( 'WP_INSTALLING', true );
+	}
+	require_once $wp_load;
+	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+	require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+	// 1. Install fresh WordPress core database schema into isolated database
+	$install_res = wp_install( 'Safe Lifecycle Site', 'admin', 'admin@example.com', true, '', 'adminpass123' );
+	if ( is_wp_error( $install_res ) ) {
+		fwrite( STDERR, "FATAL: wp_install failed: " . $install_res->get_error_message() . "\n" );
+		exit( 1 );
+	}
+
+	// 2. Activate required dependency: Elementor
+	$elem_file = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'elementor/elementor.php';
+	if ( ! file_exists( $elem_file ) ) {
+		fwrite( STDERR, "FATAL: Elementor plugin not found at {$elem_file}\n" );
+		exit( 1 );
+	}
+
+	$elem_act = activate_plugin( 'elementor/elementor.php' );
+	if ( is_wp_error( $elem_act ) ) {
+		fwrite( STDERR, "FATAL: Elementor activation failed: " . $elem_act->get_error_message() . "\n" );
+		exit( 1 );
+	}
+	if ( ! is_plugin_active( 'elementor/elementor.php' ) ) {
+		fwrite( STDERR, "FATAL: Elementor is not active after activate_plugin()\n" );
+		exit( 1 );
+	}
+
+	// 3. Activate required dependency: official WordPress MCP Adapter
+	$mcp_file = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'mcp-adapter/mcp-adapter.php';
+	if ( ! file_exists( $mcp_file ) ) {
+		fwrite( STDERR, "FATAL: MCP Adapter plugin not found at {$mcp_file}\n" );
+		exit( 1 );
+	}
+
+	$mcp_act = activate_plugin( 'mcp-adapter/mcp-adapter.php' );
+	if ( is_wp_error( $mcp_act ) ) {
+		fwrite( STDERR, "FATAL: MCP Adapter activation failed: " . $mcp_act->get_error_message() . "\n" );
+		exit( 1 );
+	}
+	if ( ! is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) ) {
+		fwrite( STDERR, "FATAL: MCP Adapter is not active after activate_plugin()\n" );
+		exit( 1 );
+	}
+
+	// 4. Ensure admin user has full capabilities
+	wp_set_current_user( 1 );
+
+	echo json_encode( array(
+		'success'   => true,
+		'elementor' => true,
+		'mcp'       => true,
+	) );
+	exit( 0 );
+}
+
+// ---------------------------------------------------------------------
+// ACTION: assert-pre-install
+// ---------------------------------------------------------------------
+if ( 'assert-pre-install' === $action ) {
+	require_once $wp_load;
+	require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	global $wpdb;
+
+	if ( is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) ) {
+		fwrite( STDERR, "FATAL: full-elementor-mcp/full-elementor-mcp.php is already active before clean install\n" );
+		exit( 1 );
+	}
+
+	$target_dir = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'full-elementor-mcp';
+	if ( is_dir( $target_dir ) || file_exists( $target_dir ) ) {
+		fwrite( STDERR, "FATAL: full-elementor-mcp directory already exists before clean install\n" );
+		exit( 1 );
+	}
+
+	$existing_tables = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}elementor_mcp_%'" );
+	if ( ! empty( $existing_tables ) ) {
+		fwrite( STDERR, "FATAL: Safe Elementor MCP tables already exist before clean install: " . implode( ', ', $existing_tables ) . "\n" );
+		exit( 1 );
+	}
+
+	$existing_ver = get_option( 'full_elementor_mcp_db_version' );
+	if ( false !== $existing_ver ) {
+		fwrite( STDERR, "FATAL: full_elementor_mcp_db_version option already exists before clean install\n" );
+		exit( 1 );
+	}
+
+	echo json_encode( array( 'success' => true ) );
+	exit( 0 );
 }
 
 // ---------------------------------------------------------------------
@@ -96,6 +204,7 @@ if ( 'clean-install' === $action ) {
 if ( 'verify-clean-install' === $action ) {
 	require_once $wp_load;
 	require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	global $wpdb;
 
 	$installed_dir   = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'full-elementor-mcp';
 	$installed_entry = $installed_dir . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
@@ -122,27 +231,55 @@ if ( 'verify-clean-install' === $action ) {
 		exit( 1 );
 	}
 
-	// Bootstrap installed plugin
+	// Verify schema created by authentic activation/bootstrap (DO NOT call install() manually):
 	require_once $installed_entry;
 	require_once $installed_dir . DIRECTORY_SEPARATOR . 'includes/safety/class-database-installer.php';
-	\Full_Elementor_MCP_Database_Installer::install();
 
 	if ( ! \Full_Elementor_MCP_Database_Installer::verify_schema() ) {
-		fwrite( STDERR, "FATAL: Full_Elementor_MCP_Database_Installer::verify_schema() failed\n" );
+		fwrite( STDERR, "FATAL: Full_Elementor_MCP_Database_Installer::verify_schema() failed - schema was not created by activation\n" );
 		exit( 1 );
 	}
 
-	global $wpdb;
 	$safety_tables = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}elementor_mcp_%'" );
 	if ( 4 !== count( $safety_tables ) ) {
 		fwrite( STDERR, "FATAL: Expected exactly 4 safety tables, found " . count( $safety_tables ) . "\n" );
 		exit( 1 );
 	}
 
+	// Verify Abilities API initialization and registration of representative ability
+	do_action( 'wp_abilities_api_categories_init' );
+	do_action( 'wp_abilities_api_init' );
+
+	$sample_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'full-elementor-mcp/list-widgets' ) : null;
+	if ( null === $sample_ability ) {
+		fwrite( STDERR, "FATAL: Abilities API did not register full-elementor-mcp/list-widgets\n" );
+		exit( 1 );
+	}
+
+	// Verify MCP Adapter initialization and server registration
+	$adapter_instance = null;
+	if ( class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
+		$adapter_instance = method_exists( '\WP\MCP\Core\McpAdapter', 'instance' )
+			? \WP\MCP\Core\McpAdapter::instance()
+			: new \WP\MCP\Core\McpAdapter();
+	} elseif ( class_exists( 'WP_MCP_Adapter' ) ) {
+		$adapter_instance = new WP_MCP_Adapter();
+	}
+
+	if ( ! is_object( $adapter_instance ) ) {
+		fwrite( STDERR, "FATAL: McpAdapter class not found or could not instantiate\n" );
+		exit( 1 );
+	}
+
+	// Fire mcp_adapter_init hook to execute register_mcp_server
+	do_action( 'mcp_adapter_init', $adapter_instance );
+
 	echo json_encode( array(
-		'success'       => true,
-		'version'       => $data['Version'],
-		'safety_tables' => count( $safety_tables ),
+		'success'                => true,
+		'version'                => $data['Version'],
+		'safety_tables'          => count( $safety_tables ),
+		'abilities_registered'   => true,
+		'mcp_server_registered'  => true,
 	) );
 	exit( 0 );
 }
@@ -155,9 +292,15 @@ if ( 'seed-phase6' === $action ) {
 	require_once ABSPATH . 'wp-admin/includes/plugin.php';
 	global $wpdb;
 
-	// Activate required dependencies first
-	activate_plugin( 'elementor/elementor.php' );
-	activate_plugin( 'mcp-adapter/mcp-adapter.php' );
+	// Verify required dependencies are active
+	if ( ! is_plugin_active( 'elementor/elementor.php' ) ) {
+		fwrite( STDERR, "FATAL: Elementor is not active in Phase 6 environment\n" );
+		exit( 1 );
+	}
+	if ( ! is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) ) {
+		fwrite( STDERR, "FATAL: MCP Adapter is not active in Phase 6 environment\n" );
+		exit( 1 );
+	}
 
 	// Activate frozen Phase 6 plugin
 	$p6_main = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'full-elementor-mcp/full-elementor-mcp.php';
@@ -169,6 +312,10 @@ if ( 'seed-phase6' === $action ) {
 	$act_res = activate_plugin( 'full-elementor-mcp/full-elementor-mcp.php' );
 	if ( is_wp_error( $act_res ) ) {
 		fwrite( STDERR, "FATAL: Phase 6 activation failed: " . $act_res->get_error_message() . "\n" );
+		exit( 1 );
+	}
+	if ( ! is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) ) {
+		fwrite( STDERR, "FATAL: Phase 6 plugin is not active after activate_plugin()\n" );
 		exit( 1 );
 	}
 
@@ -184,54 +331,8 @@ if ( 'seed-phase6' === $action ) {
 	);
 	update_option( 'full_elementor_mcp_settings', $test_settings );
 
-	// 2. Clean up any existing state for test post 6601
-	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_tokens` WHERE token_key = 'lock:post:6601'" );
-	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_journal` WHERE resource_key = 'post:6601'" );
-	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_audit_log` WHERE resource_key = 'post:6601'" );
-	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_checkpoints` WHERE resource_key LIKE '%6601%'" );
-
-	// 3. Insert Phase 6 journal row
-	$wpdb->insert(
-		$wpdb->prefix . 'elementor_mcp_journal',
-		array(
-			'ability'       => 'full-elementor-mcp/update-element',
-			'action'        => 'update',
-			'object_type'   => 'post',
-			'object_id'     => 6601,
-			'resource_key'  => 'post:6601',
-			'fencing_token' => 42,
-			'status'        => 'committed',
-			'created_at'    => gmdate( 'Y-m-d H:i:s' ),
-		)
-	);
-
-	// 4. Insert Phase 6 audit log
-	$wpdb->insert(
-		$wpdb->prefix . 'elementor_mcp_audit_log',
-		array(
-			'event'        => 'mutation_committed',
-			'ability'      => 'full-elementor-mcp/update-element',
-			'user_id'      => 1,
-			'resource_key' => 'post:6601',
-			'timestamp'    => gmdate( 'Y-m-d H:i:s' ),
-		)
-	);
-
-	// 5. Insert Phase 6 token row
-	$wpdb->insert(
-		$wpdb->prefix . 'elementor_mcp_tokens',
-		array(
-			'token_key'     => 'lock:post:6601',
-			'token_type'    => 'lock',
-			'fencing_token' => 42,
-			'expires_at'    => gmdate( 'Y-m-d H:i:s', time() + 300 ),
-			'created_at'    => gmdate( 'Y-m-d H:i:s' ),
-		)
-	);
-
-	// 6. Create real Elementor post in WordPress
+	// 2. Create real Elementor post in WordPress
 	$p6_post_id = wp_insert_post( array(
-		'import_id'   => 6601,
 		'post_title'  => 'Phase 6 Authentic Baseline Page',
 		'post_type'   => 'page',
 		'post_status' => 'publish',
@@ -254,7 +355,46 @@ if ( 'seed-phase6' === $action ) {
 	update_post_meta( $p6_post_id, '_elementor_page_settings', array( 'background_color' => '#112233' ) );
 	update_post_meta( $p6_post_id, '_elementor_edit_mode', 'builder' );
 
-	// 7. Create real encrypted checkpoint using ACTUAL Phase 6 Checkpoint_Manager production code:
+	// 3. Insert Phase 6 journal row targeting actual generated post_id
+	$wpdb->insert(
+		$wpdb->prefix . 'elementor_mcp_journal',
+		array(
+			'ability'       => 'full-elementor-mcp/update-element',
+			'action'        => 'update',
+			'object_type'   => 'post',
+			'object_id'     => $p6_post_id,
+			'resource_key'  => "post:{$p6_post_id}",
+			'fencing_token' => 42,
+			'status'        => 'committed',
+			'created_at'    => gmdate( 'Y-m-d H:i:s' ),
+		)
+	);
+
+	// 4. Insert Phase 6 audit log
+	$wpdb->insert(
+		$wpdb->prefix . 'elementor_mcp_audit_log',
+		array(
+			'event'        => 'mutation_committed',
+			'ability'      => 'full-elementor-mcp/update-element',
+			'user_id'      => 1,
+			'resource_key' => "post:{$p6_post_id}",
+			'timestamp'    => gmdate( 'Y-m-d H:i:s' ),
+		)
+	);
+
+	// 5. Insert Phase 6 token row
+	$wpdb->insert(
+		$wpdb->prefix . 'elementor_mcp_tokens',
+		array(
+			'token_key'     => "lock:post:{$p6_post_id}",
+			'token_type'    => 'lock',
+			'fencing_token' => 42,
+			'expires_at'    => gmdate( 'Y-m-d H:i:s', time() + 300 ),
+			'created_at'    => gmdate( 'Y-m-d H:i:s' ),
+		)
+	);
+
+	// 6. Create real encrypted checkpoint using ACTUAL Phase 6 Checkpoint_Manager production code:
 	require_once WP_PLUGIN_DIR . '/full-elementor-mcp/includes/safety/class-checkpoint-crypto.php';
 	require_once WP_PLUGIN_DIR . '/full-elementor-mcp/includes/safety/class-checkpoint-strategies.php';
 	require_once WP_PLUGIN_DIR . '/full-elementor-mcp/includes/safety/class-checkpoint-manager.php';
@@ -342,10 +482,16 @@ if ( 'verify-upgrade' === $action ) {
 		exit( 1 );
 	}
 
-	// 1. Verify plugin activates / is active
+	// 1. Explicitly check activate_plugin() return value
 	$act_res = activate_plugin( 'full-elementor-mcp/full-elementor-mcp.php' );
+	if ( is_wp_error( $act_res ) ) {
+		fwrite( STDERR, "FATAL: activate_plugin returned error after upgrade: " . $act_res->get_error_message() . "\n" );
+		exit( 1 );
+	}
+
+	// Require no stale active_plugins state
 	if ( ! is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) ) {
-		fwrite( STDERR, "FATAL: Plugin failed to activate after upgrade\n" );
+		fwrite( STDERR, "FATAL: Plugin is not active in WordPress after upgrade\n" );
 		exit( 1 );
 	}
 
@@ -382,10 +528,16 @@ if ( 'verify-upgrade' === $action ) {
 		exit( 1 );
 	}
 
-	// 6. Verify journal preserved
-	$j_after = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_journal` WHERE resource_key = 'post:6601'" );
+	// 6. Verify journal preserved using actual post_id from seed data
+	$post_id = (int) ( $seed_data['post_id'] ?? 0 );
+	if ( $post_id <= 0 ) {
+		fwrite( STDERR, "FATAL: Missing or invalid post_id in seed data\n" );
+		exit( 1 );
+	}
+
+	$j_after = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_journal` WHERE resource_key = %s", "post:{$post_id}" ) );
 	if ( null === $j_after || 'committed' !== $j_after->status ) {
-		fwrite( STDERR, "FATAL: Journal row not preserved across upgrade\n" );
+		fwrite( STDERR, "FATAL: Journal row not preserved across upgrade for post:{$post_id}\n" );
 		exit( 1 );
 	}
 
@@ -409,32 +561,61 @@ if ( 'verify-upgrade' === $action ) {
 		exit( 1 );
 	}
 
-	// 8. Verify audit log preserved
-	$audit_after = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_audit_log` WHERE resource_key = 'post:6601'" );
+	// 8. Verify audit log preserved using actual post_id
+	$audit_after = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_audit_log` WHERE resource_key = %s", "post:{$post_id}" ) );
 	if ( null === $audit_after ) {
 		fwrite( STDERR, "FATAL: Audit log missing after upgrade\n" );
 		exit( 1 );
 	}
 
-	// 9. Verify token preserved
-	$token_after = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_tokens` WHERE token_key = 'lock:post:6601'" );
+	// 9. Verify token preserved using actual post_id
+	$token_after = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_tokens` WHERE token_key = %s", "lock:post:{$post_id}" ) );
 	if ( null === $token_after ) {
 		fwrite( STDERR, "FATAL: Token row missing after upgrade\n" );
 		exit( 1 );
 	}
 
-	// 10. Verify Elementor post data preserved
-	$elem_data_after = get_post_meta( 6601, '_elementor_data', true );
+	// 10. Verify Elementor post data preserved using actual post_id
+	$elem_data_after = get_post_meta( $post_id, '_elementor_data', true );
 	if ( ! str_contains( (string) $elem_data_after, 'sec_p6_baseline' ) ) {
 		fwrite( STDERR, "FATAL: Elementor post data missing or corrupted after upgrade\n" );
 		exit( 1 );
 	}
 
+	// 11. Initialize Abilities API and verify representative ability registration
+	do_action( 'wp_abilities_api_categories_init' );
+	do_action( 'wp_abilities_api_init' );
+
+	$sample_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'full-elementor-mcp/list-widgets' ) : null;
+	if ( null === $sample_ability ) {
+		fwrite( STDERR, "FATAL: Abilities API did not register full-elementor-mcp/list-widgets after upgrade\n" );
+		exit( 1 );
+	}
+
+	// 12. Initialize MCP Adapter and verify MCP server registration after upgrade
+	$adapter_instance = null;
+	if ( class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
+		$adapter_instance = method_exists( '\WP\MCP\Core\McpAdapter', 'instance' )
+			? \WP\MCP\Core\McpAdapter::instance()
+			: new \WP\MCP\Core\McpAdapter();
+	} elseif ( class_exists( 'WP_MCP_Adapter' ) ) {
+		$adapter_instance = new WP_MCP_Adapter();
+	}
+
+	if ( ! is_object( $adapter_instance ) ) {
+		fwrite( STDERR, "FATAL: McpAdapter class not found after upgrade\n" );
+		exit( 1 );
+	}
+
+	do_action( 'mcp_adapter_init', $adapter_instance );
+
 	echo json_encode( array(
-		'success'       => true,
-		'version'       => $data['Version'],
-		'safety_tables' => count( $tables_after ),
-		'decrypted'     => true,
+		'success'                => true,
+		'version'                => $data['Version'],
+		'safety_tables'          => count( $tables_after ),
+		'decrypted'              => true,
+		'abilities_registered'   => true,
+		'mcp_server_registered'  => true,
 	) );
 	exit( 0 );
 }

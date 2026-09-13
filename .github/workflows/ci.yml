@@ -270,7 +270,11 @@ jobs:
           wp core download --version=6.9 --path=/tmp/wordpress --force
           wp config create --path=/tmp/wordpress --dbname=safe_elementor_test --dbuser=root --dbpass=root --dbhost=127.0.0.1 --skip-check
           wp core install --path=/tmp/wordpress --url=http://localhost --title="Safe Elementor Test" --admin_user=admin --admin_password=adminpass123 --admin_email=admin@example.com
+          curl -fLo /tmp/mcp-adapter.zip https://github.com/WordPress/mcp-adapter/releases/download/v0.6.1/mcp-adapter.zip
+          wp plugin install /tmp/mcp-adapter.zip --activate --path=/tmp/wordpress
+          wp plugin is-active mcp-adapter --path=/tmp/wordpress || { echo "FATAL: MCP Adapter failed to activate"; exit 1; }
           wp plugin install elementor --activate --path=/tmp/wordpress
+          wp plugin is-active elementor --path=/tmp/wordpress || { echo "FATAL: Elementor failed to activate"; exit 1; }
 
       - name: Execute Release Build Script
         run: php scripts/build-release.php
