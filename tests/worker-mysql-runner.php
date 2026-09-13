@@ -23,32 +23,10 @@ if ( php_sapi_name() !== 'cli' ) {
 	exit( 1 );
 }
 
-// Ensure safety test harness and real MySQL $wpdb wrapper are initialized
-require_once __DIR__ . '/test-mysql-safety.php';
-
-$inc_dir = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR;
-require_once $inc_dir . 'class-compatibility-checker.php';
-require_once $inc_dir . 'safety/class-database-installer.php';
-require_once $inc_dir . 'safety/class-safety-settings.php';
-require_once $inc_dir . 'safety/class-lock-manager.php';
-require_once $inc_dir . 'safety/class-security-guard.php';
-require_once $inc_dir . 'safety/class-elementor-features.php';
-require_once $inc_dir . 'safety/class-tree-validator.php';
-require_once $inc_dir . 'safety/class-security-strategies.php';
-require_once $inc_dir . 'safety/class-mutation-registry.php';
-require_once $inc_dir . 'safety/class-journal.php';
-require_once $inc_dir . 'safety/class-mutation-context.php';
-require_once $inc_dir . 'safety/class-safe-writes.php';
-require_once $inc_dir . 'safety/class-confirmation-manager.php';
-require_once $inc_dir . 'safety/class-idempotency-manager.php';
-require_once $inc_dir . 'safety/class-checkpoint-crypto.php';
-require_once $inc_dir . 'safety/class-checkpoint-strategies.php';
-require_once $inc_dir . 'safety/class-checkpoint-manager.php';
-require_once $inc_dir . 'safety/class-audit-logger.php';
-require_once $inc_dir . 'safety/class-undo-manager.php';
-require_once $inc_dir . 'safety/class-mutation-middleware.php';
-
-Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+// Ensure real WordPress and safety subsystem runtime are initialized
+require_once __DIR__ . '/bootstrap-real-wordpress.php';
+bootstrap_real_wordpress();
+bootstrap_safety_subsystem();
 
 // Parse CLI options
 $options = getopt( '', array(
@@ -250,10 +228,23 @@ try {
 		case 'undo':
 			$journal_id = (int) ( $options['journal_id'] ?? 0 );
 
-			$undo_res = Full_Elementor_MCP_Undo_Manager::undo_change(
-				$journal_id,
-				array( 'user_id' => 1 )
-			);
+			if ( $hold_ms > 0 ) {
+				Full_Elementor_MCP_Undo_Manager::set_test_fault_hook( static function ( string $point, array $ctx ) use ( $hold_ms ) {
+					if ( 'after_undo_lock' === $point ) {
+						usleep( $hold_ms * 1000 );
+					}
+				} );
+			}
+
+			try {
+				$undo_res = Full_Elementor_MCP_Undo_Manager::undo_change(
+					$journal_id,
+					$worker,
+					array( 'user_id' => 1 )
+				);
+			} finally {
+				Full_Elementor_MCP_Undo_Manager::set_test_fault_hook( null );
+			}
 
 			if ( is_wp_error( $undo_res ) ) {
 				$result['success'] = false;
@@ -267,30 +258,52 @@ try {
 			break;
 
 		case 'restore':
-			$resource = $options['resource'] ?? 'post:1';
+			$checkpoint_id = isset( $options['checkpoint_id'] ) ? (int) $options['checkpoint_id'] : 0;
+			$resource      = $options['resource'] ?? '';
 
-			// Production restore engine acquires canonical restore lock
-			$res = Full_Elementor_MCP_Lock_Manager::acquire_lock(
-				'restore:' . $resource,
-				$worker,
-				15
-			);
-
-			if ( ! is_wp_error( $res ) && ! empty( $res['acquired'] ) ) {
-				if ( $hold_ms > 0 ) {
-					usleep( $hold_ms * 1000 );
+			if ( $checkpoint_id <= 0 && ! empty( $resource ) ) {
+				$chk_list = Full_Elementor_MCP_Checkpoint_Manager::list_checkpoints( array(
+					'resource_key' => $resource,
+					'limit'        => 1,
+				) );
+				if ( ! empty( $chk_list[0]['id'] ) ) {
+					$checkpoint_id = (int) $chk_list[0]['id'];
 				}
-				Full_Elementor_MCP_Lock_Manager::release_lock(
-					'restore:' . $resource,
-					$worker,
-					(int) $res['fencing_token']
+			}
+
+			if ( $hold_ms > 0 ) {
+				Full_Elementor_MCP_Checkpoint_Manager::set_test_fault_hook( static function ( string $point, array $ctx ) use ( $hold_ms ) {
+					if ( 'after_restore_wal_begin' === $point ) {
+						usleep( $hold_ms * 1000 );
+					}
+				} );
+			}
+
+			try {
+				$restore_res = Full_Elementor_MCP_Checkpoint_Manager::restore(
+					$checkpoint_id,
+					array(
+						'user_id' => 1,
+					)
 				);
+			} finally {
+				Full_Elementor_MCP_Checkpoint_Manager::set_test_fault_hook( null );
+			}
+
+			if ( is_wp_error( $restore_res ) ) {
+				$err_code          = $restore_res->get_error_code();
+				$result['success'] = false;
+				if ( 'lock_conflict' === $err_code || 'lock_acquisition_timeout' === $err_code || 'resource_locked' === $err_code ) {
+					$result['status'] = 'restore_locked_by_other';
+				} else {
+					$result['status'] = 'error';
+				}
+				$result['error'] = $err_code;
+				$result['error_data'] = $restore_res->get_error_data();
+			} else {
 				$result['success'] = true;
 				$result['status']  = 'restored';
-			} else {
-				$result['success'] = false;
-				$result['status']  = 'restore_locked_by_other';
-				$result['error']   = is_wp_error( $res ) ? $res->get_error_code() : 'locked';
+				$result['data']    = $restore_res;
 			}
 			break;
 

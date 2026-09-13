@@ -506,8 +506,8 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			'post_excerpt'   => (string) ( $post->post_excerpt ?? '' ),
 			'post_parent'    => (int) ( $post->post_parent ?? 0 ),
 			'menu_order'     => (int) ( $post->menu_order ?? 0 ),
-			'comment_status' => (string) ( $post->comment_status ?? 'closed' ),
-			'ping_status'    => (string) ( $post->ping_status ?? 'closed' ),
+			'comment_status' => ! empty( $post->comment_status ) ? (string) $post->comment_status : 'closed',
+			'ping_status'    => ! empty( $post->ping_status ) ? (string) $post->ping_status : 'closed',
 			'post_password'  => (string) ( $post->post_password ?? '' ),
 		);
 
@@ -663,8 +663,8 @@ final class Full_Elementor_MCP_Checkpoint_Strategies {
 			'post_excerpt'   => (string) ( $post->post_excerpt ?? '' ),
 			'post_parent'    => (int) ( $post->post_parent ?? 0 ),
 			'menu_order'     => (int) ( $post->menu_order ?? 0 ),
-			'comment_status' => (string) ( $post->comment_status ?? 'closed' ),
-			'ping_status'    => (string) ( $post->ping_status ?? 'closed' ),
+			'comment_status' => ! empty( $post->comment_status ) ? (string) $post->comment_status : 'closed',
+			'ping_status'    => ! empty( $post->ping_status ) ? (string) $post->ping_status : 'closed',
 			'post_password'  => (string) ( $post->post_password ?? '' ),
 		);
 

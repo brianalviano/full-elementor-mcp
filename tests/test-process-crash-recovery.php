@@ -77,33 +77,16 @@ function get_crash_mysql_pdo(): PDO {
 $pdo = get_crash_mysql_pdo();
 echo "Connected to MySQL " . $pdo->getAttribute( PDO::ATTR_SERVER_VERSION ) . "\n\n";
 
-// Ensure safety database tables exist before executing crash recovery tests
-require_once __DIR__ . '/test-mysql-safety.php';
-Full_Elementor_MCP_Database_Installer::install();
+putenv( "DB_HOST={$active_mysql_conn['host']}" );
+putenv( "DB_PORT={$active_mysql_conn['port']}" );
+putenv( "DB_USER={$active_mysql_conn['user']}" );
+putenv( "DB_PASSWORD={$active_mysql_conn['pass']}" );
+putenv( "DB_NAME={$active_mysql_dbname}" );
 
-$inc_dir = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR;
-require_once $inc_dir . 'class-compatibility-checker.php';
-require_once $inc_dir . 'safety/class-database-installer.php';
-require_once $inc_dir . 'safety/class-safety-settings.php';
-require_once $inc_dir . 'safety/class-lock-manager.php';
-require_once $inc_dir . 'safety/class-security-guard.php';
-require_once $inc_dir . 'safety/class-elementor-features.php';
-require_once $inc_dir . 'safety/class-tree-validator.php';
-require_once $inc_dir . 'safety/class-security-strategies.php';
-require_once $inc_dir . 'safety/class-mutation-registry.php';
-require_once $inc_dir . 'safety/class-journal.php';
-require_once $inc_dir . 'safety/class-mutation-context.php';
-require_once $inc_dir . 'safety/class-safe-writes.php';
-require_once $inc_dir . 'safety/class-confirmation-manager.php';
-require_once $inc_dir . 'safety/class-idempotency-manager.php';
-require_once $inc_dir . 'safety/class-checkpoint-crypto.php';
-require_once $inc_dir . 'safety/class-checkpoint-strategies.php';
-require_once $inc_dir . 'safety/class-checkpoint-manager.php';
-require_once $inc_dir . 'safety/class-audit-logger.php';
-require_once $inc_dir . 'safety/class-undo-manager.php';
-require_once $inc_dir . 'safety/class-mutation-middleware.php';
-
-Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+// Ensure real WordPress and safety subsystem runtime are initialized
+require_once __DIR__ . '/bootstrap-real-wordpress.php';
+bootstrap_real_wordpress();
+bootstrap_safety_subsystem();
 
 $crash_script    = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-crash-runner.php';
 $recovery_script = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-recovery-runner.php';
@@ -167,6 +150,7 @@ function spawn_worker( string $php_bin, string $worker_script, array $args ): ar
 	$env['DB_USER']     = (string) ( $active_mysql_conn['user'] ?? 'root' );
 	$env['DB_PASSWORD'] = (string) ( $active_mysql_conn['pass'] ?? 'root' );
 	$env['DB_NAME']     = (string) ( $active_mysql_dbname ?? 'safe_elementor_test' );
+	$env['WP_PATH']     = (string) ( getenv( 'WP_PATH' ) ?: 'D:/Vino/Work/Software/Website/Laravel/wordpress-ai' );
 
 	$proc = proc_open( $cmd, $descriptors, $pipes, null, $env );
 	if ( ! is_resource( $proc ) ) {
@@ -220,8 +204,22 @@ function run_fresh_recovery( string $php_bin, string $recovery_script, int $grac
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 1: WAL crash before target write recovered truthfully by fresh process', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$object_id = 7711;
-	$res       = "post:{$object_id}";
+	// Create real post in MySQL
+	$object_id = wp_insert_post( array(
+		'post_title'     => 'Crash Scenario 1 Post',
+		'post_type'      => 'post',
+		'post_status'    => 'publish',
+		'comment_status' => 'closed',
+		'ping_status'    => 'closed',
+	) );
+	assert_true( $object_id > 0, 'Must create real post in MySQL' );
+	$res = "post:{$object_id}";
+
+	$initial_data = array( array( 'id' => 'sec_orig_1', 'elType' => 'section', 'settings' => array( 'layout' => 'boxed' ), 'elements' => array() ) );
+	update_post_meta( $object_id, '_elementor_data', json_encode( $initial_data ) );
+	update_post_meta( $object_id, '_elementor_edit_mode', 'builder' );
+	clean_post_cache( $object_id );
+	$orig_meta = get_post_meta( $object_id, '_elementor_data', true );
 
 	// 1. Crash worker in WAL phase:
 	run_crash_worker( $php_bin, $crash_script, array(
@@ -230,10 +228,14 @@ run_test( 'Crash Scenario 1: WAL crash before target write recovered truthfully 
 		'object_id' => $object_id,
 	) );
 
-	// Verify pending WAL and active lock exist in MySQL:
+	// Verify pending WAL exists in MySQL:
 	$j_row = $pdo->query( "SELECT id, status, fencing_token FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}' ORDER BY id DESC LIMIT 1" )->fetch();
 	assert_true( ! empty( $j_row ), 'Pending journal row must exist' );
 	assert_equals( 'pending', $j_row['status'] );
+
+	// Physical state in MySQL must remain strictly unchanged prior to recovery:
+	clean_post_cache( $object_id );
+	assert_equals( $orig_meta, get_post_meta( $object_id, '_elementor_data', true ), 'Physical state in MySQL must be unchanged before recovery' );
 
 	// 2. Simulate expiration of the abandoned lock (beyond grace period):
 	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res );
@@ -246,6 +248,8 @@ run_test( 'Crash Scenario 1: WAL crash before target write recovered truthfully 
 	// 4. Verify truthful result:
 	$updated = $pdo->query( "SELECT status, error_message FROM `wp_elementor_mcp_journal` WHERE id = {$j_row['id']}" )->fetch();
 	assert_true( in_array( $updated['status'], array( 'failed', 'undone', 'reconciled' ), true ), 'Status must not remain pending (was: ' . $updated['status'] . ')' );
+	clean_post_cache( $object_id );
+	assert_equals( $orig_meta, get_post_meta( $object_id, '_elementor_data', true ), 'Physical state in MySQL must remain unchanged after recovery' );
 } );
 
 // ---------------------------------------------------------------------
@@ -253,8 +257,21 @@ run_test( 'Crash Scenario 1: WAL crash before target write recovered truthfully 
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 2: Crash after write before commit reconciles conservatively without blind overwrite', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$object_id = 7712;
-	$res       = "post:{$object_id}";
+	// Create real post in MySQL
+	$object_id = wp_insert_post( array(
+		'post_title'     => 'Crash Scenario 2 Post',
+		'post_type'      => 'post',
+		'post_status'    => 'publish',
+		'comment_status' => 'closed',
+		'ping_status'    => 'closed',
+	) );
+	assert_true( $object_id > 0, 'Must create real post in MySQL' );
+	$res = "post:{$object_id}";
+
+	$initial_data = array( array( 'id' => 'sec_orig_2', 'elType' => 'section', 'settings' => array( 'layout' => 'boxed' ), 'elements' => array() ) );
+	update_post_meta( $object_id, '_elementor_data', json_encode( $initial_data ) );
+	update_post_meta( $object_id, '_elementor_edit_mode', 'builder' );
+	clean_post_cache( $object_id );
 
 	// 1. Worker writes target state, then abruptly dies:
 	run_crash_worker( $php_bin, $crash_script, array(
@@ -265,6 +282,11 @@ run_test( 'Crash Scenario 2: Crash after write before commit reconciles conserva
 
 	$j_row = $pdo->query( "SELECT id, status FROM `wp_elementor_mcp_journal` WHERE resource_key = '{$res}' ORDER BY id DESC LIMIT 1" )->fetch();
 	assert_true( ! empty( $j_row ) );
+
+	// Verify mutated state was persisted to MySQL before recovery:
+	clean_post_cache( $object_id );
+	$mutated_data = get_post_meta( $object_id, '_elementor_data', true );
+	assert_true( str_contains( (string) $mutated_data, 'elem1' ), 'Mutated state must exist in MySQL before recovery' );
 
 	// 2. Expire lease:
 	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $res );
@@ -284,17 +306,20 @@ run_test( 'Crash Scenario 2: Crash after write before commit reconciles conserva
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 3: CREATE crash preserves durable created_object_id binding without destructive overwrite', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$created_id = 9912;
-
 	// 1. Worker creates object, binds created_object_id, then dies before commit:
 	run_crash_worker( $php_bin, $crash_script, array(
 		'scenario'  => 'create_crash',
-		'object_id' => $created_id,
 	) );
 
 	$j_row = $pdo->query( "SELECT id, created_object_id, status, resource_key FROM `wp_elementor_mcp_journal` WHERE ability = 'full-elementor-mcp/create-page' ORDER BY id DESC LIMIT 1" )->fetch();
-	assert_true( ! empty( $j_row ) );
-	assert_equals( $created_id, (int) $j_row['created_object_id'] );
+	assert_true( ! empty( $j_row ), 'Journal row for create must exist' );
+	$created_id = (int) $j_row['created_object_id'];
+	assert_true( $created_id > 0, 'created_object_id must be bound to durable row' );
+
+	// Independently verify that the post row exists in MySQL wp_posts before recovery:
+	clean_post_cache( $created_id );
+	$created_post = get_post( $created_id );
+	assert_true( null !== $created_post, 'Created post row must exist in MySQL before recovery' );
 
 	// 2. Expire lease:
 	$lock_key = Full_Elementor_MCP_Lock_Manager::get_lock_token_key( $j_row['resource_key'] );
@@ -309,6 +334,10 @@ run_test( 'Crash Scenario 3: CREATE crash preserves durable created_object_id bi
 	assert_equals( 'failed', $updated['status'] );
 	assert_equals( $created_id, (int) $updated['created_object_id'], 'created_object_id must remain bound for manual reconciliation' );
 	assert_true( str_contains( (string) $updated['error_message'], 'abandoned_create' ), 'Must report abandoned create: ' . $updated['error_message'] );
+
+	// Post must still exist in MySQL without destructive delete:
+	clean_post_cache( $created_id );
+	assert_true( null !== get_post( $created_id ), 'Created post must NOT be destructively deleted during crash recovery' );
 } );
 
 // ---------------------------------------------------------------------
@@ -316,8 +345,21 @@ run_test( 'Crash Scenario 3: CREATE crash preserves durable created_object_id bi
 // ---------------------------------------------------------------------
 
 run_test( 'Crash Scenario 4: Checkpoint restore crash preserves restore recovery evidence', function () use ( $pdo, $php_bin, $crash_script, $recovery_script ) {
-	$object_id = 7714;
-	$res       = "post:{$object_id}";
+	// Create real post in MySQL
+	$object_id = wp_insert_post( array(
+		'post_title'     => 'Crash Scenario 4 Post',
+		'post_type'      => 'post',
+		'post_status'    => 'publish',
+		'comment_status' => 'closed',
+		'ping_status'    => 'closed',
+	) );
+	assert_true( $object_id > 0, 'Must create real post in MySQL' );
+	$res = "post:{$object_id}";
+
+	$initial_data = array( array( 'id' => 'sec_orig_4', 'elType' => 'section', 'settings' => array( 'layout' => 'boxed' ), 'elements' => array() ) );
+	update_post_meta( $object_id, '_elementor_data', json_encode( $initial_data ) );
+	update_post_meta( $object_id, '_elementor_edit_mode', 'builder' );
+	clean_post_cache( $object_id );
 
 	// 1. Worker dies during checkpoint restore:
 	run_crash_worker( $php_bin, $crash_script, array(

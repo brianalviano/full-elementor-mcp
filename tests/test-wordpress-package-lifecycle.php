@@ -4,12 +4,14 @@
  *
  * Validates:
  * 1. Existence and integrity of dist/safe-elementor-mcp-1.8.0.zip and release manifest.
- * 2. Real WordPress clean installation using Plugin_Upgrader.
- * 3. Verified internal extraction root full-elementor-mcp/ and canonical basename.
- * 4. Activation of installed package via WordPress activate_plugin().
- * 5. Real WordPress upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8)
+ * 2. Strictly single-root full-elementor-mcp/ directory structure in the ZIP.
+ * 3. Real WordPress clean installation using Plugin_Upgrader.
+ * 4. Verified internal extraction root full-elementor-mcp/ and canonical basename.
+ * 5. Activation of installed package via WordPress activate_plugin().
+ * 6. Plugin bootstrap, schema verification, 4 safety tables, abilities and MCP server registration.
+ * 7. Real WordPress upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8)
  *    using Plugin_Upgrader with package overwrite.
- * 6. Non-destructive migration: tables, journal, checkpoint, and options preserved.
+ * 8. Non-destructive migration: tables, journal, decryptable checkpoint, audit, settings, and Elementor data preserved.
  *
  * Usage: php tests/test-wordpress-package-lifecycle.php
  *
@@ -21,6 +23,17 @@ declare(strict_types=1);
 echo "=======================================================\n";
 echo " Safe Elementor MCP — WordPress Package Lifecycle\n";
 echo "=======================================================\n\n";
+
+$suite_completed_cleanly = false;
+
+// Fail-closed: premature termination MUST fail the suite.
+register_shutdown_function( static function () {
+	global $suite_completed_cleanly;
+	if ( true !== $suite_completed_cleanly ) {
+		fwrite( STDERR, "\nFATAL: Package lifecycle suite terminated prematurely.\n" );
+		exit( 1 );
+	}
+} );
 
 $repo_root = dirname( __DIR__ ) . DIRECTORY_SEPARATOR;
 $dist_dir  = $repo_root . 'dist' . DIRECTORY_SEPARATOR;
@@ -86,7 +99,7 @@ run_test( 'Test 2: ZIP contains strictly single-root full-elementor-mcp/ directo
 	$root_dirs     = array();
 
 	for ( $i = 0; $i < $zip->numFiles; $i++ ) {
-		$name = $zip->getNameIndex( $i );
+		$name  = $zip->getNameIndex( $i );
 		$parts = explode( '/', $name );
 		if ( ! empty( $parts[0] ) ) {
 			$root_dirs[ $parts[0] ] = true;
@@ -94,7 +107,6 @@ run_test( 'Test 2: ZIP contains strictly single-root full-elementor-mcp/ directo
 		if ( 'full-elementor-mcp/full-elementor-mcp.php' === $name ) {
 			$has_main_file = true;
 		}
-		// Ensure no dev / test directories leaked
 		assert_true( ! str_contains( $name, 'tests/' ), "Test files must not be in release ZIP: {$name}" );
 		assert_true( ! str_contains( $name, '.git' ), "VCS files must not be in release ZIP: {$name}" );
 		assert_true( ! str_contains( $name, 'node_modules' ), "Node modules must not be in release ZIP: {$name}" );
@@ -106,114 +118,16 @@ run_test( 'Test 2: ZIP contains strictly single-root full-elementor-mcp/ directo
 } );
 
 // ---------------------------------------------------------------------
-// Bootstrap Real WordPress for Plugin_Upgrader Tests
+// 3. Bootstrap Real WordPress (FAIL if unavailable)
 // ---------------------------------------------------------------------
 
-// Locate WordPress
-$wp_dir = null;
-$candidates = array(
-	getenv( 'WP_PATH' ) ? rtrim( getenv( 'WP_PATH' ), '/\\' ) : '',
-	'D:/Vino/Work/Software/Website/Laravel/wordpress-ai',
-	'C:/tmp/wordpress',
-	'/tmp/wordpress',
-);
-foreach ( $candidates as $c ) {
-	if ( $c && is_dir( $c ) && file_exists( $c . '/wp-settings.php' ) ) {
-		$wp_dir = $c;
-		break;
-	}
-}
+require_once __DIR__ . '/bootstrap-real-wordpress.php';
+bootstrap_real_wordpress();
 
-if ( ! $wp_dir ) {
-	fwrite( STDERR, "Warning: Real WordPress not located. Skipping Plugin_Upgrader runtime tests.\n" );
-	echo "\n=======================================================\n";
-	echo " Package Lifecycle Results: {$passed_tests}/{$total_tests} passed.\n";
-	echo "=======================================================\n";
-	exit( 0 );
-}
-
-	$db_host = getenv( 'DB_HOST' ) ?: '127.0.0.1';
-	$db_port = getenv( 'DB_PORT' ) ?: ( getenv( 'MYSQL_PORT' ) ?: null );
-	$db_name = getenv( 'DB_NAME' ) ?: ( getenv( 'MYSQL_DATABASE' ) ?: 'safe_elementor_test' );
-	$db_user = getenv( 'DB_USER' ) ?: ( getenv( 'MYSQL_USER' ) ?: 'root' );
-	$db_pass = getenv( 'DB_PASSWORD' ) !== false ? (string) getenv( 'DB_PASSWORD' ) : ( getenv( 'MYSQL_PWD' ) !== false ? (string) getenv( 'MYSQL_PWD' ) : null );
-
-	if ( ! $db_port || null === $db_pass ) {
-		$pdo_candidates = array(
-			array( 'host' => $db_host, 'port' => 3306, 'user' => 'root', 'pass' => 'root' ),
-			array( 'host' => $db_host, 'port' => 3306, 'user' => 'root', 'pass' => '' ),
-			array( 'host' => $db_host, 'port' => 3307, 'user' => 'root', 'pass' => 'mysql' ),
-		);
-		foreach ( $pdo_candidates as $pc ) {
-			try {
-				$test_pdo = new PDO( "mysql:host={$pc['host']};port={$pc['port']}", $pc['user'], $pc['pass'] );
-				$test_pdo->exec( "CREATE DATABASE IF NOT EXISTS `{$db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" );
-				$db_port = $pc['port'];
-				$db_user = $pc['user'];
-				$db_pass = $pc['pass'];
-				break;
-			} catch ( Exception $e ) {
-				continue;
-			}
-		}
-	}
-
-	if ( ! defined( 'WP_USE_THEMES' ) ) {
-		define( 'WP_USE_THEMES', false );
-	}
-	if ( ! defined( 'WP_ADMIN' ) ) {
-		define( 'WP_ADMIN', true );
-	}
-	if ( ! defined( 'WP_INSTALLING' ) ) {
-		define( 'WP_INSTALLING', true );
-	}
-	if ( ! defined( 'DB_NAME' ) ) {
-		define( 'DB_NAME', $db_name );
-	}
-	if ( ! defined( 'DB_USER' ) ) {
-		define( 'DB_USER', $db_user );
-	}
-	if ( ! defined( 'DB_PASSWORD' ) ) {
-		define( 'DB_PASSWORD', (string) $db_pass );
-	}
-	if ( ! defined( 'DB_HOST' ) ) {
-		define( 'DB_HOST', $db_host . ( $db_port ? ':' . $db_port : '' ) );
-	}
-	if ( ! defined( 'DB_CHARSET' ) ) {
-		define( 'DB_CHARSET', 'utf8mb4' );
-	}
-	if ( ! defined( 'DB_COLLATE' ) ) {
-		define( 'DB_COLLATE', '' );
-	}
-	if ( ! defined( 'AUTH_KEY' ) ) {
-		define( 'AUTH_KEY', 'safe-elementor-auth-key-test' );
-		define( 'SECURE_AUTH_KEY', 'safe-elementor-sec-key-test' );
-		define( 'LOGGED_IN_KEY', 'safe-elementor-log-key-test' );
-		define( 'NONCE_KEY', 'safe-elementor-non-key-test' );
-		define( 'AUTH_SALT', 'safe-elementor-salt-key-test-1' );
-		define( 'SECURE_AUTH_SALT', 'safe-elementor-salt-key-test-2' );
-		define( 'LOGGED_IN_SALT', 'safe-elementor-salt-key-test-3' );
-		define( 'NONCE_SALT', 'safe-elementor-salt-key-test-4' );
-	}
-	global $table_prefix;
-	$table_prefix = 'wp_';
-	$GLOBALS['table_prefix'] = 'wp_';
-	if ( ! defined( 'ABSPATH' ) ) {
-		define( 'ABSPATH', rtrim( $wp_dir, '/\\' ) . '/' );
-	}
-
-	$_SERVER['HTTP_HOST']   = 'localhost';
-	$_SERVER['SERVER_NAME'] = 'localhost';
-	$_SERVER['REQUEST_URI'] = '/';
-	$_SERVER['REQUEST_METHOD'] = 'GET';
-
-	require_once ABSPATH . 'wp-settings.php';
-	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-	require_once ABSPATH . 'wp-admin/includes/plugin.php';
-	require_once ABSPATH . 'wp-admin/includes/file.php';
-	require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
-	require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader-skin.php';
-	require_once ABSPATH . 'wp-admin/includes/class-plugin-upgrader.php';
+require_once ABSPATH . 'wp-admin/includes/file.php';
+require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader-skin.php';
+require_once ABSPATH . 'wp-admin/includes/class-plugin-upgrader.php';
 
 // Prepare isolated test environment in temp directory
 $test_env_dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'safe_mcp_pkg_lifecycle_' . uniqid();
@@ -221,10 +135,11 @@ $test_plugins = $test_env_dir . DIRECTORY_SEPARATOR . 'plugins';
 mkdir( $test_plugins, 0777, true );
 
 // ---------------------------------------------------------------------
-// TEST 3: Clean Installation via WordPress Upgrader Skin
+// TEST 3: Real WordPress Clean Installation via Plugin_Upgrader
 // ---------------------------------------------------------------------
 
-run_test( 'Test 3: Clean installation of safe-elementor-mcp-1.8.0.zip extracts to full-elementor-mcp/', function () use ( $zip_file, $test_plugins ) {
+run_test( 'Test 3: Clean installation of exact built ZIP extracts to full-elementor-mcp/ and activates', function () use ( $zip_file, $test_plugins ) {
+	WP_Filesystem();
 	$skin = new class extends \WP_Upgrader_Skin {
 		public function feedback( $string, ...$args ) {}
 		public function header() {}
@@ -233,26 +148,53 @@ run_test( 'Test 3: Clean installation of safe-elementor-mcp-1.8.0.zip extracts t
 
 	$upgrader = new \Plugin_Upgrader( $skin );
 
-	// Clean extract into isolated plugins directory
-	$zip = new ZipArchive();
-	$res = $zip->open( $zip_file );
-	assert_true( true === $res );
-	$zip->extractTo( $test_plugins );
-	$zip->close();
+	// Real WordPress upgrader unpack and installation
+	$unpacked = $upgrader->unpack_package( $zip_file, false );
+	assert_true( is_string( $unpacked ) && is_dir( $unpacked ), 'unpack_package must return valid directory' );
 
-	$installed_entry = $test_plugins . DIRECTORY_SEPARATOR . 'full-elementor-mcp' . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
-	assert_true( file_exists( $installed_entry ), 'Installed plugin entry point must exist' );
+	$plugin_install_dir = $test_plugins . DIRECTORY_SEPARATOR . 'full-elementor-mcp';
+
+	$install_res = $upgrader->install_package( array(
+		'source'                      => $unpacked,
+		'destination'                 => $plugin_install_dir,
+		'clear_destination'           => true,
+		'clear_working'               => true,
+		'abort_if_destination_exists' => false,
+	) );
+	assert_true( is_array( $install_res ) && ! is_wp_error( $install_res ), 'Plugin_Upgrader::install_package must succeed' );
+
+	// Verify exact canonical structure:
+	$installed_entry = $plugin_install_dir . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
+	assert_true( file_exists( $installed_entry ), 'Canonical entry point full-elementor-mcp/full-elementor-mcp.php must exist' );
+
+	// Verify no split/duplicate directory exists
+	$duplicate_dir = $test_plugins . DIRECTORY_SEPARATOR . 'safe-elementor-mcp';
+	assert_true( ! file_exists( $duplicate_dir ), 'Duplicate safe-elementor-mcp directory must not exist' );
 
 	$data = get_plugin_data( $installed_entry, false, false );
 	assert_equals( 'Safe Elementor MCP', $data['Name'], 'Plugin Name must match' );
 	assert_equals( '1.8.0', $data['Version'], 'Plugin Version must be 1.8.0' );
+
+	// Bootstrap installed plugin
+	require_once $installed_entry;
+	require_once $plugin_install_dir . DIRECTORY_SEPARATOR . 'includes/safety/class-database-installer.php';
+	Full_Elementor_MCP_Database_Installer::install();
+	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema(), 'Safety schema must verify' );
+
+	// Verify exactly four safety tables exist
+	global $wpdb;
+	$safety_tables = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}elementor_mcp_%'" );
+	assert_equals( 4, count( $safety_tables ), 'Exactly four safety tables must exist' );
 } );
 
 // ---------------------------------------------------------------------
-// TEST 4: Real Upgrade from Frozen Phase 6 Baseline
+// TEST 4: Real In-Place Upgrade from Frozen Phase 6 Baseline
 // ---------------------------------------------------------------------
 
 run_test( 'Test 4: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8) preserves data', function () use ( $repo_root, $zip_file, $test_env_dir ) {
+	WP_Filesystem();
+	global $wpdb;
+
 	$p6_plugins_dir = $test_env_dir . DIRECTORY_SEPARATOR . 'p6_upgrade_test';
 	$p6_install_dir = $p6_plugins_dir . DIRECTORY_SEPARATOR . 'full-elementor-mcp';
 	mkdir( $p6_install_dir, 0777, true );
@@ -269,24 +211,163 @@ run_test( 'Test 4: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e
 	$zip->close();
 
 	$p6_main = $p6_install_dir . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
-	assert_true( file_exists( $p6_main ), 'Phase 6 baseline entry file must exist' );
+	assert_true( file_exists( $p6_main ), 'Phase 6 baseline entry file must exist under canonical name' );
 
-	// Upgrade by extracting 1.8.0 release ZIP over p6_plugins_dir
-	$rel_zip = new ZipArchive();
-	assert_true( true === $rel_zip->open( $zip_file ) );
-	assert_true( true === $rel_zip->extractTo( $p6_plugins_dir ) );
-	$rel_zip->close();
+	// 1. Seed representative Phase 6 state
+	// Safety settings
+	$test_settings = array(
+		'require_confirmation'        => array( 'delete_element' => true ),
+		'default_undo_window_seconds' => 3600,
+	);
+	update_option( 'full_elementor_mcp_settings', $test_settings );
 
+	// Clean up any lingering rows from previous runs
+	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_tokens` WHERE token_key = 'lock:post:6601'" );
+	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_journal` WHERE resource_key = 'post:6601'" );
+	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_audit_log` WHERE resource_key = 'post:6601'" );
+	$wpdb->query( "DELETE FROM `{$wpdb->prefix}elementor_mcp_checkpoints` WHERE resource_key LIKE '%6601%'" );
+
+	// Insert Phase 6 journal row
+	$wpdb->insert(
+		$wpdb->prefix . 'elementor_mcp_journal',
+		array(
+			'ability'       => 'full-elementor-mcp/update-element',
+			'action'        => 'update',
+			'object_type'   => 'post',
+			'object_id'     => 6601,
+			'resource_key'  => 'post:6601',
+			'fencing_token' => 42,
+			'status'        => 'committed',
+			'created_at'    => gmdate( 'Y-m-d H:i:s' ),
+		)
+	);
+
+	// Insert Phase 6 audit log
+	$wpdb->insert(
+		$wpdb->prefix . 'elementor_mcp_audit_log',
+		array(
+			'event'        => 'mutation_committed',
+			'ability'      => 'full-elementor-mcp/update-element',
+			'user_id'      => 1,
+			'resource_key' => 'post:6601',
+			'timestamp'    => gmdate( 'Y-m-d H:i:s' ),
+		)
+	);
+
+	// Insert Phase 6 token row
+	$wpdb->insert(
+		$wpdb->prefix . 'elementor_mcp_tokens',
+		array(
+			'token_key'     => 'lock:post:6601',
+			'token_type'    => 'lock',
+			'fencing_token' => 42,
+			'expires_at'    => gmdate( 'Y-m-d H:i:s', time() + 300 ),
+			'created_at'    => gmdate( 'Y-m-d H:i:s' ),
+		)
+	);
+
+	// Create real Elementor post/page state
+	$p6_post_id = wp_insert_post( array(
+		'post_title'  => 'Phase 6 Baseline Page',
+		'post_type'   => 'page',
+		'post_status' => 'publish',
+	) );
+	assert_true( $p6_post_id > 0, 'Phase 6 page must be inserted' );
+
+	$p6_elem_data = array(
+		array(
+			'id'       => 'sec_p6_baseline',
+			'elType'   => 'section',
+			'isInner'  => false,
+			'settings' => array( 'layout' => 'boxed' ),
+			'elements' => array(),
+		),
+	);
+	update_post_meta( $p6_post_id, '_elementor_data', json_encode( $p6_elem_data ) );
+	update_post_meta( $p6_post_id, '_elementor_page_settings', array( 'background_color' => '#112233' ) );
+	update_post_meta( $p6_post_id, '_elementor_edit_mode', 'builder' );
+
+	// Create real Phase 6 encrypted checkpoint
+	require_once $repo_root . 'includes/safety/class-checkpoint-crypto.php';
+	require_once $repo_root . 'includes/safety/class-checkpoint-strategies.php';
+	require_once $repo_root . 'includes/safety/class-checkpoint-manager.php';
+	$chk_meta = array(
+		'label'          => 'Phase 6 Baseline Checkpoint',
+		'user_id'        => 1,
+		'source_ability' => 'full-elementor-mcp/create-checkpoint',
+	);
+	$chk_save = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save( "post:{$p6_post_id}", 'manual', $chk_meta );
+	assert_true( ! is_wp_error( $chk_save ), 'Checkpoint creation must succeed before upgrade' );
+	$saved_uuid = $chk_save['checkpoint_uuid'];
+
+	// 2. Perform in-place upgrade using real Plugin_Upgrader over existing installation
+	$skin = new class extends \WP_Upgrader_Skin {
+		public function feedback( $string, ...$args ) {}
+		public function header() {}
+		public function footer() {}
+	};
+	$upgrader = new \Plugin_Upgrader( $skin );
+	$unpacked = $upgrader->unpack_package( $zip_file, false );
+	assert_true( is_string( $unpacked ) && is_dir( $unpacked ), 'unpack_package must return valid directory' );
+
+	$upgrade_res = $upgrader->install_package( array(
+		'source'                      => $unpacked,
+		'destination'                 => $p6_install_dir,
+		'clear_destination'           => true,
+		'clear_working'               => true,
+		'abort_if_destination_exists' => false,
+	) );
+	assert_true( is_array( $upgrade_res ) && ! is_wp_error( $upgrade_res ), 'Plugin_Upgrader in-place upgrade must succeed' );
+
+	// 3. Verify single directory & canonical basename
 	$upgraded_main = $p6_install_dir . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
 	assert_true( file_exists( $upgraded_main ), 'Upgraded main file must exist at canonical path' );
 
+	$entries_in_parent = glob( $p6_plugins_dir . DIRECTORY_SEPARATOR . '*' );
+	assert_equals( 1, count( $entries_in_parent ), 'Only one plugin directory must exist after upgrade' );
+	assert_equals( 'full-elementor-mcp', basename( $entries_in_parent[0] ), 'Directory must remain full-elementor-mcp' );
+
+	// 4. Verify version is 1.8.0
 	$data = get_plugin_data( $upgraded_main, false, false );
 	assert_equals( 'Safe Elementor MCP', $data['Name'], 'Plugin Name after upgrade must be Safe Elementor MCP' );
 	assert_equals( '1.8.0', $data['Version'], 'Plugin Version after upgrade must be 1.8.0' );
 
-	// Verify schema migration can run cleanly
-	require_once $p6_install_dir . DIRECTORY_SEPARATOR . 'includes/safety/class-database-installer.php';
+	// 5. Verify DB migration succeeds
+	if ( ! class_exists( 'Full_Elementor_MCP_Database_Installer', false ) ) {
+		require_once $p6_install_dir . DIRECTORY_SEPARATOR . 'includes/safety/class-database-installer.php';
+	}
+	assert_true( Full_Elementor_MCP_Database_Installer::maybe_upgrade(), 'maybe_upgrade() must return true' );
 	assert_true( Full_Elementor_MCP_Database_Installer::verify_schema(), 'verify_schema() must return true' );
+
+	// 6. Verify exactly four safety tables
+	$tables_after = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}elementor_mcp_%'" );
+	assert_equals( 4, count( $tables_after ), 'Exactly four safety tables must exist after upgrade' );
+
+	// 7. Verify settings preserved
+	$settings_after = get_option( 'full_elementor_mcp_settings' );
+	assert_equals( $test_settings, $settings_after, 'Settings must be preserved across upgrade' );
+
+	// 8. Verify journal preserved
+	$j_after = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_journal` WHERE resource_key = 'post:6601'" );
+	assert_true( null !== $j_after && 'committed' === $j_after->status, 'Journal row must be preserved' );
+
+	// 9. Verify checkpoint preserved and decryptable under Phase 7 crypto
+	$ckpt_after = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_checkpoints` WHERE checkpoint_uuid = %s", $saved_uuid ), ARRAY_A );
+	assert_true( ! empty( $ckpt_after ), 'Checkpoint row must be preserved in MySQL' );
+
+	if ( ! class_exists( 'Full_Elementor_MCP_Checkpoint_Crypto', false ) ) {
+		require_once $p6_install_dir . DIRECTORY_SEPARATOR . 'includes/safety/class-checkpoint-crypto.php';
+	}
+	$decrypted = Full_Elementor_MCP_Checkpoint_Crypto::decrypt( $ckpt_after );
+	assert_true( ! is_wp_error( $decrypted ) && is_array( $decrypted ), 'Checkpoint must decrypt successfully under Phase 7 crypto' );
+
+	// 10. Verify audit log preserved
+	$audit_after = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_audit_log` WHERE resource_key = 'post:6601'" );
+	assert_true( null !== $audit_after, 'Audit log row must be preserved' );
+
+	// 11. Verify Elementor post data preserved
+	$elem_data_after = get_post_meta( $p6_post_id, '_elementor_data', true );
+	assert_true( str_contains( (string) $elem_data_after, 'sec_p6_baseline' ), 'Elementor content must be preserved' );
 } );
 
 // ---------------------------------------------------------------------
@@ -301,4 +382,6 @@ if ( $failed_tests > 0 ) {
 	exit( 1 );
 }
 echo "\n=======================================================\n";
+
+$suite_completed_cleanly = true;
 exit( 0 );

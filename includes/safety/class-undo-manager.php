@@ -23,6 +23,22 @@ if ( ! defined( 'ABSPATH' ) ) {
 final class Full_Elementor_MCP_Undo_Manager {
 
 	/**
+	 * Test fault injection hook for multi-process concurrency testing.
+	 *
+	 * @var \Closure|null
+	 */
+	private static ?\Closure $test_fault_hook = null;
+
+	/**
+	 * Registers a test fault injection hook.
+	 *
+	 * @param \Closure|null $hook Fault callback.
+	 */
+	public static function set_test_fault_hook( ?\Closure $hook ): void {
+		self::$test_fault_hook = $hook;
+	}
+
+	/**
 	 * Resolves the authoritative user-facing undo target from a journal entry.
 	 *
 	 * Returns:
@@ -272,6 +288,13 @@ final class Full_Elementor_MCP_Undo_Manager {
 		$user_id       = (int) ( $options['user_id'] ?? ( function_exists( 'get_current_user_id' ) ? get_current_user_id() : 0 ) );
 		$cred_uuid     = $options['credential_uuid'] ?? null;
 		$lock_released = false;
+
+		if ( null !== self::$test_fault_hook ) {
+			call_user_func( self::$test_fault_hook, 'after_undo_lock', array(
+				'journal_id'   => $journal_id,
+				'resource_key' => $target_resource_key,
+			) );
+		}
 
 		// Audit undo initiation:
 		if ( class_exists( 'Full_Elementor_MCP_Audit_Logger' ) ) {

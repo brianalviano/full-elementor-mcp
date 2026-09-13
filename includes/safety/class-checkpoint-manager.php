@@ -112,6 +112,18 @@ final class Full_Elementor_MCP_Checkpoint_Manager {
 	}
 
 	/**
+	 * Public alias for capture_and_save.
+	 *
+	 * @param string               $resource_key    Canonical resource key.
+	 * @param string               $checkpoint_type Checkpoint type.
+	 * @param array<string, mixed> $meta            Metadata.
+	 * @return array{id: int, checkpoint_uuid: string, resource_key: string, state_hash: string, restore_capability: string}|\WP_Error
+	 */
+	public static function save_checkpoint( string $resource_key, string $checkpoint_type = 'automatic', array $meta = array() ) {
+		return self::capture_and_save( $resource_key, $checkpoint_type, $meta );
+	}
+
+	/**
 	 * Captures current resource state, encrypts with AEAD, and persists an immutable checkpoint row.
 	 *
 	 * @param string               $resource_key    Canonical resource key (e.g. 'post:123' or 'global:elementor-kit-state').

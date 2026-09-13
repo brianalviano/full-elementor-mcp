@@ -29,6 +29,17 @@ class Full_Elementor_MCP_Data {
 	 * @return \Elementor\Core\Base\Document|\WP_Error The document instance or WP_Error.
 	 */
 	public function get_document( int $post_id ) {
+		if ( ! class_exists( '\Elementor\Plugin' ) || ! isset( \Elementor\Plugin::$instance->documents ) ) {
+			return new \WP_Error(
+				'elementor_not_loaded',
+				sprintf(
+					/* translators: %d: post ID */
+					__( 'Elementor plugin is not active for post ID %d.', 'full-elementor-mcp' ),
+					$post_id
+				)
+			);
+		}
+
 		$document = \Elementor\Plugin::$instance->documents->get( $post_id );
 
 		if ( ! $document ) {
@@ -54,21 +65,9 @@ class Full_Elementor_MCP_Data {
 	 * @since 1.0.0
 	 *
 	 * @param int $post_id The post ID.
-	 * @return array|\WP_Error The elements data array or WP_Error.
+	 * @return array The elements data array.
 	 */
-	public function get_page_data( int $post_id ) {
-		$document = $this->get_document( $post_id );
-
-		if ( is_wp_error( $document ) ) {
-			return $document;
-		}
-
-		$data = $document->get_elements_data();
-
-		if ( is_array( $data ) && ! empty( $data ) ) {
-			return $data;
-		}
-
+	public function get_page_data( int $post_id ): array {
 		// Fallback: read from raw post meta (handles CLI/proxy contexts).
 		$raw = get_post_meta( $post_id, '_elementor_data', true );
 
@@ -77,6 +76,18 @@ class Full_Elementor_MCP_Data {
 			if ( is_array( $decoded ) ) {
 				return $decoded;
 			}
+		}
+
+		$document = $this->get_document( $post_id );
+
+		if ( is_wp_error( $document ) ) {
+			return array();
+		}
+
+		$data = $document->get_elements_data();
+
+		if ( is_array( $data ) && ! empty( $data ) ) {
+			return $data;
 		}
 
 		return array();
@@ -126,6 +137,9 @@ class Full_Elementor_MCP_Data {
 	 * @return \Elementor\Widget_Base[] Array of widget instances keyed by widget name.
 	 */
 	public function get_registered_widgets(): array {
+		if ( ! class_exists( '\Elementor\Plugin' ) || ! isset( \Elementor\Plugin::$instance->widgets_manager ) ) {
+			return array();
+		}
 		return \Elementor\Plugin::$instance->widgets_manager->get_widget_types();
 	}
 
@@ -138,6 +152,12 @@ class Full_Elementor_MCP_Data {
 	 * @return array|\WP_Error The controls array or WP_Error if widget not found.
 	 */
 	public function get_widget_controls( string $widget_type ) {
+		if ( ! class_exists( '\Elementor\Plugin' ) || ! isset( \Elementor\Plugin::$instance->widgets_manager ) ) {
+			return new \WP_Error(
+				'widgets_manager_not_initialized',
+				__( 'Elementor widgets manager is not initialized.', 'full-elementor-mcp' )
+			);
+		}
 		$widget = \Elementor\Plugin::$instance->widgets_manager->get_widget_types( $widget_type );
 
 		if ( ! $widget ) {
@@ -210,10 +230,6 @@ class Full_Elementor_MCP_Data {
 
 		$document = $this->get_document( $post_id );
 
-		if ( is_wp_error( $document ) ) {
-			return $document;
-		}
-
 		// Low-level write guard: assert active mutation context & fencing immediately before physical write:
 		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
 			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
@@ -224,8 +240,11 @@ class Full_Elementor_MCP_Data {
 			Full_Elementor_MCP_Mutation_Context::increment_write_count();
 		}
 
-		// Attempt native Elementor save (handles CSS regen, cache busting).
-		$result = $document->save( array( 'elements' => $data ) );
+		$result = false;
+		if ( ! is_wp_error( $document ) && is_object( $document ) && method_exists( $document, 'save' ) ) {
+			// Attempt native Elementor save (handles CSS regen, cache busting).
+			$result = $document->save( array( 'elements' => $data ) );
+		}
 
 		if ( false === $result ) {
 			// Fallback: direct meta write for non-browser contexts (CLI, REST proxy).
@@ -299,10 +318,6 @@ class Full_Elementor_MCP_Data {
 	public function save_page_settings( int $post_id, array $settings ) {
 		$document = $this->get_document( $post_id );
 
-		if ( is_wp_error( $document ) ) {
-			return $document;
-		}
-
 		// Low-level write guard: assert active mutation context & fencing immediately before physical write:
 		if ( class_exists( 'Full_Elementor_MCP_Mutation_Context' ) ) {
 			$context_guard = Full_Elementor_MCP_Mutation_Context::assert_active_write_context( "post:{$post_id}" );
@@ -313,7 +328,10 @@ class Full_Elementor_MCP_Data {
 			Full_Elementor_MCP_Mutation_Context::increment_write_count();
 		}
 
-		$result = $document->save( array( 'settings' => $settings ) );
+		$result = false;
+		if ( ! is_wp_error( $document ) && is_object( $document ) && method_exists( $document, 'save' ) ) {
+			$result = $document->save( array( 'settings' => $settings ) );
+		}
 
 		if ( false === $result ) {
 			// Fallback: merge settings into existing page settings meta.

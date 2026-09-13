@@ -27,9 +27,6 @@ echo "=======================================================\n";
 echo " Safe Elementor MCP — Real MySQL Concurrency Suite\n";
 echo "=======================================================\n\n";
 
-if ( ! defined( 'ABSPATH' ) ) {
-	define( 'ABSPATH', dirname( __DIR__ ) . DIRECTORY_SEPARATOR );
-}
 if ( ! defined( 'FULL_ELEMENTOR_MCP_DIR' ) ) {
 	define( 'FULL_ELEMENTOR_MCP_DIR', dirname( __DIR__ ) . DIRECTORY_SEPARATOR );
 }
@@ -83,33 +80,16 @@ function get_concurrency_mysql_pdo(): PDO {
 $pdo = get_concurrency_mysql_pdo();
 echo "Executing multi-process races against MySQL " . $pdo->getAttribute( PDO::ATTR_SERVER_VERSION ) . "...\n\n";
 
-// Ensure safety database tables exist before executing concurrency races
-require_once __DIR__ . '/test-mysql-safety.php';
-Full_Elementor_MCP_Database_Installer::install();
+putenv( "DB_HOST={$active_mysql_conn['host']}" );
+putenv( "DB_PORT={$active_mysql_conn['port']}" );
+putenv( "DB_USER={$active_mysql_conn['user']}" );
+putenv( "DB_PASSWORD={$active_mysql_conn['pass']}" );
+putenv( "DB_NAME={$active_mysql_dbname}" );
 
-$inc_dir = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'includes' . DIRECTORY_SEPARATOR;
-require_once $inc_dir . 'class-compatibility-checker.php';
-require_once $inc_dir . 'safety/class-database-installer.php';
-require_once $inc_dir . 'safety/class-safety-settings.php';
-require_once $inc_dir . 'safety/class-lock-manager.php';
-require_once $inc_dir . 'safety/class-security-guard.php';
-require_once $inc_dir . 'safety/class-elementor-features.php';
-require_once $inc_dir . 'safety/class-tree-validator.php';
-require_once $inc_dir . 'safety/class-security-strategies.php';
-require_once $inc_dir . 'safety/class-mutation-registry.php';
-require_once $inc_dir . 'safety/class-journal.php';
-require_once $inc_dir . 'safety/class-mutation-context.php';
-require_once $inc_dir . 'safety/class-safe-writes.php';
-require_once $inc_dir . 'safety/class-confirmation-manager.php';
-require_once $inc_dir . 'safety/class-idempotency-manager.php';
-require_once $inc_dir . 'safety/class-checkpoint-crypto.php';
-require_once $inc_dir . 'safety/class-checkpoint-strategies.php';
-require_once $inc_dir . 'safety/class-checkpoint-manager.php';
-require_once $inc_dir . 'safety/class-audit-logger.php';
-require_once $inc_dir . 'safety/class-undo-manager.php';
-require_once $inc_dir . 'safety/class-mutation-middleware.php';
-
-Full_Elementor_MCP_Mutation_Registry::init_core_strategies();
+// Ensure real WordPress and safety subsystem runtime are initialized
+require_once __DIR__ . '/bootstrap-real-wordpress.php';
+bootstrap_real_wordpress();
+bootstrap_safety_subsystem();
 
 $worker_script = FULL_ELEMENTOR_MCP_DIR . 'tests/worker-mysql-runner.php';
 $php_bin       = PHP_BINARY;
@@ -187,6 +167,7 @@ function spawn_worker( string $php_bin, string $worker_script, array $args ): ar
 	$env['DB_USER']     = (string) ( $active_mysql_conn['user'] ?? 'root' );
 	$env['DB_PASSWORD'] = (string) ( $active_mysql_conn['pass'] ?? 'root' );
 	$env['DB_NAME']     = (string) ( $active_mysql_dbname ?? 'safe_elementor_test' );
+	$env['WP_PATH']     = (string) ( getenv( 'WP_PATH' ) ?: 'D:/Vino/Work/Software/Website/Laravel/wordpress-ai' );
 
 	$proc = proc_open( $cmd, $descriptors, $pipes, null, $env );
 	if ( ! is_resource( $proc ) ) {
@@ -436,25 +417,70 @@ run_test( 'Race 6: Checkpoint UUID uniqueness race rejects collision without cre
 // ---------------------------------------------------------------------
 
 run_test( 'Race 7: Concurrent undo race allows exactly one worker to perform persistent rollback', function () use ( $pdo, $php_bin, $worker_script ) {
-	$empty_hash = Full_Elementor_MCP_Journal::hash_state( array() );
-	$stmt = $pdo->prepare(
-		"INSERT INTO `wp_elementor_mcp_journal` (ability, action, object_type, object_id, resource_key, status, rollback_supported, before_hash, after_hash, fencing_token)
-		 VALUES ('full-elementor-mcp/update-element', 'update_element', 'post', 99, 'post:99', 'committed', 1, ?, ?, 1)"
+	// 1. Create a real WordPress post in MySQL
+	$post_id = wp_insert_post( array(
+		'post_title'     => 'Race 7 Post Title',
+		'post_type'      => 'post',
+		'post_status'    => 'publish',
+		'comment_status' => 'closed',
+		'ping_status'    => 'closed',
+	) );
+	assert_true( $post_id > 0, 'Must create real post in MySQL for undo race' );
+	$resource = 'post:' . $post_id;
+
+	$elem_before = array(
+		array(
+			'id'       => 'sec_r7_before',
+			'elType'   => 'section',
+			'isInner'  => false,
+			'settings' => array( 'layout' => 'boxed' ),
+			'elements' => array(),
+		),
 	);
-	$stmt->execute( array( $empty_hash, $empty_hash ) );
+	update_post_meta( $post_id, '_elementor_data', json_encode( $elem_before ) );
+	update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+
+	$reg = Full_Elementor_MCP_Mutation_Registry::get( 'full-elementor-mcp/update-element' );
+	$before_state = call_user_func( $reg['capture_before'], $post_id );
+	$before_hash  = Full_Elementor_MCP_Journal::hash_state( $before_state );
+
+	// Mutate post to after-state
+	$elem_after = array(
+		array(
+			'id'       => 'sec_r7_mutated',
+			'elType'   => 'section',
+			'isInner'  => false,
+			'settings' => array( 'layout' => 'full_width' ),
+			'elements' => array(),
+		),
+	);
+	update_post_meta( $post_id, '_elementor_data', json_encode( $elem_after ) );
+	clean_post_cache( $post_id );
+
+	$after_state = call_user_func( $reg['capture_after'], $post_id );
+	$after_hash  = Full_Elementor_MCP_Journal::hash_state( $after_state );
+
+	// Insert committed journal entry with valid before_state, before_hash, after_hash
+	$stmt = $pdo->prepare(
+		"INSERT INTO `wp_elementor_mcp_journal` (ability, action, object_type, object_id, resource_key, status, rollback_supported, before_state, before_hash, after_hash, fencing_token)
+		 VALUES ('full-elementor-mcp/update-element', 'update_element', 'post', ?, ?, 'committed', 1, ?, ?, ?, 1)"
+	);
+	$stmt->execute( array( $post_id, $resource, json_encode( $before_state ), $before_hash, $after_hash ) );
 	$journal_id = (int) $pdo->lastInsertId();
 
+	// Worker 1 holds lock for 250ms; Worker 2 is spawned 50ms later and encounters lock
 	$w1 = spawn_worker( $php_bin, $worker_script, array(
 		'action'     => 'undo',
 		'worker'     => 'worker-undo-1',
 		'journal_id' => $journal_id,
-		'hold_ms'    => 100,
+		'hold_ms'    => 250,
 	) );
+	usleep( 50000 ); // 50ms pause to ensure Worker 1 claims lock and enters hook
 	$w2 = spawn_worker( $php_bin, $worker_script, array(
 		'action'     => 'undo',
 		'worker'     => 'worker-undo-2',
 		'journal_id' => $journal_id,
-		'hold_ms'    => 100,
+		'hold_ms'    => 0,
 	) );
 
 	$r1 = wait_worker( $w1 );
@@ -473,20 +499,76 @@ run_test( 'Race 7: Concurrent undo race allows exactly one worker to perform per
 // TEST 8: Concurrent Resource Restore Race
 // ---------------------------------------------------------------------
 
-run_test( 'Race 8: Concurrent restore serialize and reject overlapping restores via lock', function () use ( $pdo, $php_bin, $worker_script ) {
-	$resource = 'restore:res:' . bin2hex( random_bytes( 4 ) );
-
-	$w1 = spawn_worker( $php_bin, $worker_script, array(
-		'action'   => 'restore',
-		'worker'   => 'worker-restore-1',
-		'resource' => $resource,
-		'hold_ms'  => 150,
+run_test( 'Race 8: Concurrent restore serialize and reject overlapping restores via Checkpoint Manager', function () use ( $pdo, $php_bin, $worker_script ) {
+	// 1. Create a real WordPress post with authentic Elementor data in MySQL
+	$post_id = wp_insert_post( array(
+		'post_title'   => 'Race 8 Initial Title',
+		'post_type'    => 'post',
+		'post_status'  => 'publish',
+		'post_content' => 'Initial content for concurrency restore test',
 	) );
+	assert_true( $post_id > 0, 'Must create real post in MySQL' );
+	$resource = 'post:' . $post_id;
+
+	$initial_elem_data = array(
+		array(
+			'id'       => 'sec_' . bin2hex( random_bytes( 4 ) ),
+			'elType'   => 'section',
+			'isInner'  => false,
+			'settings' => array( 'layout' => 'boxed' ),
+			'elements' => array(),
+		),
+	);
+	update_post_meta( $post_id, '_elementor_data', json_encode( $initial_elem_data ) );
+	update_post_meta( $post_id, '_elementor_page_settings', array( 'background_color' => '#123456' ) );
+	update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+
+	// 2. Capture a real restorable checkpoint using production Checkpoint_Manager
+	$save_res = Full_Elementor_MCP_Checkpoint_Manager::capture_and_save(
+		$resource,
+		'manual',
+		array(
+			'label'          => 'Baseline for Concurrency Race 8',
+			'user_id'        => 1,
+			'source_ability' => 'create-checkpoint',
+		)
+	);
+
+	assert_true( ! is_wp_error( $save_res ), 'Must arrange valid restorable checkpoint via capture_and_save' );
+	$checkpoint_id = (int) $save_res['id'];
+
+	// 3. Mutate the post in MySQL so live state differs from the checkpoint
+	wp_update_post( array(
+		'ID'         => $post_id,
+		'post_title' => 'Mutated Race 8 Title',
+	) );
+	$mutated_elem_data = array(
+		array(
+			'id'       => 'sec_mutated',
+			'elType'   => 'section',
+			'isInner'  => false,
+			'settings' => array( 'layout' => 'full_width' ),
+			'elements' => array(),
+		),
+	);
+	update_post_meta( $post_id, '_elementor_data', json_encode( $mutated_elem_data ) );
+
+	// 4. Spawn two concurrent worker processes calling Full_Elementor_MCP_Checkpoint_Manager::restore:
+	// Worker 1 holds at after_restore_wal_begin for 250ms to guarantee Worker 2 hits lock contention
+	$w1 = spawn_worker( $php_bin, $worker_script, array(
+		'action'        => 'restore',
+		'worker'        => 'worker-restore-1',
+		'checkpoint_id' => $checkpoint_id,
+		'resource'      => $resource,
+		'hold_ms'       => 250,
+	) );
+	usleep( 50000 ); // 50ms pause to ensure Worker 1 claims lock and enters hook
 	$w2 = spawn_worker( $php_bin, $worker_script, array(
-		'action'   => 'restore',
-		'worker'   => 'worker-restore-2',
-		'resource' => $resource,
-		'hold_ms'  => 150,
+		'action'        => 'restore',
+		'worker'        => 'worker-restore-2',
+		'checkpoint_id' => $checkpoint_id,
+		'resource'      => $resource,
+		'hold_ms'       => 0,
 	) );
 
 	$r1 = wait_worker( $w1 );
@@ -497,8 +579,31 @@ run_test( 'Race 8: Concurrent restore serialize and reject overlapping restores 
 	$locked_count   = ( 'restore_locked_by_other' === ( $r1['data']['status'] ?? '' ) ? 1 : 0 ) +
 	                  ( 'restore_locked_by_other' === ( $r2['data']['status'] ?? '' ) ? 1 : 0 );
 
-	assert_equals( 1, $restored_count, 'Exactly one restore acquires canonical restore lock' );
-	assert_equals( 1, $locked_count, 'Concurrent second restore is safely blocked/rejected' );
+	assert_equals( 1, $restored_count, 'Exactly one worker obtains execution authority and restores' );
+	assert_equals( 1, $locked_count, 'Concurrent second restore is safely rejected with lock conflict' );
+
+	// 5. Verify persistent outcomes in real MySQL:
+	// Pre-restore checkpoint was created
+	$stmt_pre = $pdo->prepare( "SELECT COUNT(*) FROM `wp_elementor_mcp_checkpoints` WHERE resource_key = ? AND checkpoint_type = 'pre_restore'" );
+	$stmt_pre->execute( array( $resource ) );
+	assert_equals( 1, (int) $stmt_pre->fetchColumn(), 'Exactly one pre_restore checkpoint must be created' );
+
+	// No pending abandoned journal entries
+	$stmt_j = $pdo->prepare( "SELECT COUNT(*) FROM `wp_elementor_mcp_journal` WHERE resource_key = ? AND status = 'pending'" );
+	$stmt_j->execute( array( $resource ) );
+	assert_equals( 0, (int) $stmt_j->fetchColumn(), 'No pending abandoned journal entry may remain after restore' );
+
+	// Exactly one committed restore journal entry
+	$stmt_jc = $pdo->prepare( "SELECT COUNT(*) FROM `wp_elementor_mcp_journal` WHERE resource_key = ? AND action = 'restore' AND status = 'committed'" );
+	$stmt_jc->execute( array( $resource ) );
+	assert_equals( 1, (int) $stmt_jc->fetchColumn(), 'Exactly one committed restore journal row exists' );
+
+	// 6. Verify live state restored in MySQL matches initial checkpoint
+	clean_post_cache( $post_id );
+	$live_post = get_post( $post_id );
+	assert_equals( 'Race 8 Initial Title', $live_post->post_title, 'Live post title must be restored' );
+	$live_data = get_post_meta( $post_id, '_elementor_data', true );
+	assert_true( str_contains( (string) $live_data, $initial_elem_data[0]['id'] ), 'Live elementor data must be restored' );
 } );
 
 // ---------------------------------------------------------------------

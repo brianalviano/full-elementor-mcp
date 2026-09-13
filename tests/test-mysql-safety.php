@@ -409,6 +409,11 @@ if ( ! function_exists( 'apply_filters' ) ) {
 		return $value;
 	}
 }
+if ( ! function_exists( 'add_filter' ) ) {
+	function add_filter( string $hook_name, callable $callback, int $priority = 10, int $accepted_args = 1 ): bool {
+		return true;
+	}
+}
 if ( ! function_exists( 'add_action' ) ) {
 	function add_action( string $hook_name, callable $callback, int $priority = 10, int $accepted_args = 1 ): bool {
 		return true;
@@ -446,7 +451,7 @@ if ( ! function_exists( 'update_post_meta' ) ) {
 		if ( ! isset( $_wp_mock_post_meta[ $post_id ] ) ) {
 			$_wp_mock_post_meta[ $post_id ] = array();
 		}
-		$_wp_mock_post_meta[ $post_id ][ $key ] = $value;
+		$_wp_mock_post_meta[ $post_id ][ $key ] = wp_unslash( $value );
 		return true;
 	}
 }
@@ -466,35 +471,134 @@ if ( ! function_exists( 'get_post_status' ) ) {
 }
 if ( ! function_exists( 'get_post' ) ) {
 	function get_post( int $post_id ): ?stdClass {
-		$post              = new stdClass();
-		$post->ID          = $post_id;
-		$post->post_type   = 'post';
-		$post->post_status = 'publish';
+		global $_wp_mock_posts;
+		if ( isset( $_wp_mock_posts[ $post_id ] ) ) {
+			return (object) $_wp_mock_posts[ $post_id ];
+		}
+		$post                 = new stdClass();
+		$post->ID             = $post_id;
+		$post->post_type      = 'post';
+		$post->post_status    = 'publish';
+		$post->post_title     = '';
+		$post->post_name      = '';
+		$post->post_content   = '';
+		$post->post_excerpt   = '';
+		$post->post_parent    = 0;
+		$post->menu_order     = 0;
+		$post->comment_status = 'closed';
+		$post->ping_status    = 'closed';
+		$post->post_password  = '';
 		return $post;
 	}
 }
 if ( ! function_exists( 'wp_insert_post' ) ) {
 	function wp_insert_post( array $postarr, bool $wp_error = false, bool $fire_after_hooks = true ): int|\WP_Error {
+		global $_wp_mock_posts;
 		static $next_id = 9912;
-		if ( ! empty( $postarr['import_id'] ) ) {
-			return (int) $postarr['import_id'];
+		$id = ! empty( $postarr['import_id'] ) ? (int) $postarr['import_id'] : ( ! empty( $postarr['ID'] ) ? (int) $postarr['ID'] : $next_id++ );
+		if ( ! is_array( $_wp_mock_posts ) ) {
+			$_wp_mock_posts = array();
 		}
-		if ( ! empty( $postarr['ID'] ) ) {
-			return (int) $postarr['ID'];
-		}
-		return $next_id++;
+		$_wp_mock_posts[ $id ] = array_merge( (array) ( get_post( $id ) ?? array() ), $postarr );
+		return $id;
 	}
 }
 if ( ! function_exists( 'wp_delete_post' ) ) {
 	function wp_delete_post( int $post_id, bool $force = false ): ?stdClass {
+		global $_wp_mock_posts;
+		if ( isset( $_wp_mock_posts[ $post_id ] ) ) {
+			$post = (object) $_wp_mock_posts[ $post_id ];
+			unset( $_wp_mock_posts[ $post_id ] );
+			return $post;
+		}
 		$post     = new stdClass();
 		$post->ID = $post_id;
 		return $post;
 	}
 }
+if ( ! function_exists( 'wp_update_post' ) ) {
+	function wp_update_post( array $postarr, bool $wp_error = false ): int|\WP_Error {
+		global $_wp_mock_posts;
+		$id = (int) ( $postarr['ID'] ?? 1 );
+		if ( ! is_array( $_wp_mock_posts ) ) {
+			$_wp_mock_posts = array();
+		}
+		$_wp_mock_posts[ $id ] = array_merge( (array) ( get_post( $id ) ?? array() ), $postarr );
+		return $id;
+	}
+}
+if ( ! function_exists( 'metadata_exists' ) ) {
+	function metadata_exists( string $meta_type, int $object_id, string $meta_key ): bool {
+		global $_wp_mock_post_meta;
+		return isset( $_wp_mock_post_meta[ $object_id ][ $meta_key ] );
+	}
+}
+if ( ! function_exists( 'set_post_thumbnail' ) ) {
+	function set_post_thumbnail( int|stdClass $post, int $thumbnail_id ): int|bool {
+		return true;
+	}
+}
+if ( ! function_exists( 'delete_post_thumbnail' ) ) {
+	function delete_post_thumbnail( int|stdClass $post ): bool {
+		return true;
+	}
+}
+if ( ! function_exists( 'wp_set_object_terms' ) ) {
+	function wp_set_object_terms( int $object_id, array|int|string $terms, string $taxonomy, bool $append = false ): array|\WP_Error {
+		return array();
+	}
+}
 
 require_once FULL_ELEMENTOR_MCP_DIR . 'includes/safety/class-database-installer.php';
 require_once FULL_ELEMENTOR_MCP_DIR . 'includes/class-compatibility-checker.php';
+
+if ( ! function_exists( 'wp_slash' ) ) {
+	function wp_slash( mixed $value ): mixed {
+		if ( is_string( $value ) ) {
+			return addslashes( $value );
+		}
+		if ( is_array( $value ) ) {
+			foreach ( $value as $k => $v ) {
+				$value[ $k ] = wp_slash( $v );
+			}
+		}
+		return $value;
+	}
+}
+
+if ( ! function_exists( 'wp_unslash' ) ) {
+	function wp_unslash( mixed $value ): mixed {
+		if ( is_string( $value ) ) {
+			return stripslashes( $value );
+		}
+		if ( is_array( $value ) ) {
+			foreach ( $value as $k => $v ) {
+				$value[ $k ] = wp_unslash( $v );
+			}
+		}
+		return $value;
+	}
+}
+
+if ( ! function_exists( 'wp_get_upload_dir' ) ) {
+	function wp_get_upload_dir(): array {
+		$tmp = sys_get_temp_dir();
+		return array(
+			'path'    => $tmp,
+			'url'     => 'http://localhost/uploads',
+			'subdir'  => '',
+			'basedir' => $tmp,
+			'baseurl' => 'http://localhost/uploads',
+			'error'   => false,
+		);
+	}
+}
+
+if ( ! function_exists( 'wp_upload_dir' ) ) {
+	function wp_upload_dir(): array {
+		return wp_get_upload_dir();
+	}
+}
 
 // ---------------------------------------------------------------------
 // 3. Test Harness Framework

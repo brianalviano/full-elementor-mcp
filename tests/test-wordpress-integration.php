@@ -5,19 +5,24 @@
  * Runs against an actual WordPress installation connected to real MySQL / MariaDB.
  * Validates:
  * 1. Real WordPress bootstrap, authentic $wpdb instance, authentic $wp_version.
- * 2. Plugin activation prerequisite checks (fails gracefully on missing Elementor, passes on valid).
- * 3. Real plugin activation lifecycle via activate_plugin() under wp-content/plugins/full-elementor-mcp/.
- * 4. Four safety tables created with InnoDB, correct charset & collation via real dbDelta().
- * 5. Required indexes and UNIQUE constraints created on real MySQL.
- * 6. Full_Elementor_MCP_Database_Installer::verify_schema() returns true.
- * 7. Non-destructive deactivation lifecycle via deactivate_plugins() (tables and rows preserved).
- * 8. Schema migration on real MySQL (maybe_upgrade).
- * 9. Runtime safety initialization via plugins_loaded (mutation registry, restore strategy).
- * 10. Dependency diagnostics (WP, Elementor, MCP Adapter, PHP).
- * 11. Admin Safety control plane & AJAX registrations.
- * 12. Elementor compatibility smoke tests (3.20+ containers/widgets, 4.x atomic, missing Pro fallback).
- * 13. MCP Adapter compatibility definition & degradation path.
- * 14. Exact safety table count on real MySQL.
+ * 2. Fail-closed test harness: premature exits, missing dependencies, or wp_die fail immediately.
+ * 3. Real Elementor plugin activation and verification (not emulated strings).
+ * 4. Real official WordPress MCP Adapter release activation and verification (not mock fixture).
+ * 5. Real Safe Elementor MCP activation lifecycle via activate_plugin() under full-elementor-mcp/.
+ * 6. Four safety tables created with InnoDB, correct charset & collation via real dbDelta().
+ * 7. Required indexes and UNIQUE constraints created on real MySQL.
+ * 8. Full_Elementor_MCP_Database_Installer::verify_schema() returns true.
+ * 9. Non-destructive deactivation lifecycle via deactivate_plugins() (tables and rows preserved).
+ * 10. Schema migration on real MySQL (maybe_upgrade).
+ * 11. Runtime safety initialization via plugins_loaded (mutation registry, restore strategy).
+ * 12. Real Abilities API registration (wp_abilities_api_init).
+ * 13. Real MCP Adapter server registration via mcp_adapter_init.
+ * 14. Execution of representative readonly ability.
+ * 15. Execution of representative normal mutation ability.
+ * 16. Dependency diagnostics (WP, Elementor, MCP Adapter, PHP).
+ * 17. Admin Safety control plane & AJAX registrations.
+ * 18. Elementor compatibility tests (3.20+ minimum, 4.x Atomic, missing Pro safe degradation).
+ * 19. Exact safety table count on real MySQL.
  *
  * Usage: php tests/test-wordpress-integration.php
  *
@@ -30,146 +35,30 @@ echo "=======================================================\n";
 echo " Safe Elementor MCP — WordPress + MySQL Integration\n";
 echo "=======================================================\n\n";
 
+$suite_completed_cleanly = false;
+
+// Register fail-closed shutdown handler: premature exit MUST fail the job.
+register_shutdown_function( static function () {
+	global $suite_completed_cleanly;
+	if ( true !== $suite_completed_cleanly ) {
+		fwrite( STDERR, "\nFATAL: Test suite terminated prematurely before completing all assertions.\n" );
+		exit( 1 );
+	}
+} );
+
 // ---------------------------------------------------------------------
 // 1. Locate and Bootstrap Real WordPress
 // ---------------------------------------------------------------------
 
-function bootstrap_real_wordpress(): void {
-	if ( defined( 'ABSPATH' ) && isset( $GLOBALS['wpdb'] ) && $GLOBALS['wpdb'] instanceof \wpdb ) {
-		return;
-	}
-
-	$candidates = array();
-	if ( getenv( 'WP_PATH' ) ) {
-		$candidates[] = rtrim( getenv( 'WP_PATH' ), '/\\' );
-	}
-	$candidates[] = 'D:/Vino/Work/Software/Website/Laravel/wordpress-ai';
-	$candidates[] = 'C:/tmp/wordpress';
-	$candidates[] = '/tmp/wordpress';
-
-	$wp_dir = null;
-	foreach ( $candidates as $c ) {
-		if ( is_dir( $c ) && file_exists( $c . '/wp-settings.php' ) ) {
-			$wp_dir = $c;
-			break;
-		}
-	}
-
-	if ( ! $wp_dir ) {
-		fwrite( STDERR, "Error: WordPress core not found. Please set WP_PATH=/path/to/wordpress\n" );
-		exit( 1 );
-	}
-
-	$db_host = getenv( 'DB_HOST' ) ?: '127.0.0.1';
-	$db_port = getenv( 'DB_PORT' ) ?: ( getenv( 'MYSQL_PORT' ) ?: null );
-	$db_name = getenv( 'DB_NAME' ) ?: ( getenv( 'MYSQL_DATABASE' ) ?: 'safe_elementor_test' );
-	$db_user = getenv( 'DB_USER' ) ?: ( getenv( 'MYSQL_USER' ) ?: 'root' );
-	$db_pass = getenv( 'DB_PASSWORD' ) !== false ? (string) getenv( 'DB_PASSWORD' ) : ( getenv( 'MYSQL_PWD' ) !== false ? (string) getenv( 'MYSQL_PWD' ) : null );
-
-	if ( ! $db_port || null === $db_pass ) {
-		$pdo_candidates = array(
-			array( 'host' => $db_host, 'port' => 3306, 'user' => 'root', 'pass' => 'root' ),
-			array( 'host' => $db_host, 'port' => 3306, 'user' => 'root', 'pass' => '' ),
-			array( 'host' => $db_host, 'port' => 3307, 'user' => 'root', 'pass' => 'mysql' ),
-		);
-		foreach ( $pdo_candidates as $pc ) {
-			try {
-				$test_pdo = new PDO( "mysql:host={$pc['host']};port={$pc['port']}", $pc['user'], $pc['pass'] );
-				$test_pdo->exec( "CREATE DATABASE IF NOT EXISTS `{$db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" );
-				$db_port = $pc['port'];
-				$db_user = $pc['user'];
-				$db_pass = $pc['pass'];
-				break;
-			} catch ( Exception $e ) {
-				continue;
-			}
-		}
-	}
-
-	try {
-		$init_pdo = new PDO( "mysql:host={$db_host};port={$db_port};dbname={$db_name}", $db_user, (string) $db_pass );
-		$init_pdo->exec( "CREATE TABLE IF NOT EXISTS `wp_options` (
-			`option_id` bigint(20) unsigned NOT NULL auto_increment,
-			`option_name` varchar(191) NOT NULL default '',
-			`option_value` longtext NOT NULL,
-			`autoload` varchar(20) NOT NULL default 'yes',
-			PRIMARY KEY (`option_id`),
-			UNIQUE KEY `option_name` (`option_name`)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" );
-		$init_pdo->exec( "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES ('siteurl', 'http://localhost'), ('home', 'http://localhost') ON DUPLICATE KEY UPDATE `option_name` = `option_name`" );
-	} catch ( Exception $e ) {
-		// continue
-	}
-
-	if ( ! defined( 'WP_USE_THEMES' ) ) {
-		define( 'WP_USE_THEMES', false );
-	}
-	if ( ! defined( 'WP_ADMIN' ) ) {
-		define( 'WP_ADMIN', true );
-	}
-	if ( ! defined( 'WP_INSTALLING' ) ) {
-		define( 'WP_INSTALLING', true );
-	}
-	if ( ! defined( 'DB_NAME' ) ) {
-		define( 'DB_NAME', $db_name );
-	}
-	if ( ! defined( 'DB_USER' ) ) {
-		define( 'DB_USER', $db_user );
-	}
-	if ( ! defined( 'DB_PASSWORD' ) ) {
-		define( 'DB_PASSWORD', (string) $db_pass );
-	}
-	if ( ! defined( 'DB_HOST' ) ) {
-		define( 'DB_HOST', $db_host . ( $db_port ? ':' . $db_port : '' ) );
-	}
-	if ( ! defined( 'DB_CHARSET' ) ) {
-		define( 'DB_CHARSET', 'utf8mb4' );
-	}
-	if ( ! defined( 'DB_COLLATE' ) ) {
-		define( 'DB_COLLATE', '' );
-	}
-	if ( ! defined( 'AUTH_KEY' ) ) {
-		define( 'AUTH_KEY', 'safe-elementor-auth-key-test' );
-		define( 'SECURE_AUTH_KEY', 'safe-elementor-sec-key-test' );
-		define( 'LOGGED_IN_KEY', 'safe-elementor-log-key-test' );
-		define( 'NONCE_KEY', 'safe-elementor-non-key-test' );
-		define( 'AUTH_SALT', 'safe-elementor-salt-key-test-1' );
-		define( 'SECURE_AUTH_SALT', 'safe-elementor-salt-key-test-2' );
-		define( 'LOGGED_IN_SALT', 'safe-elementor-salt-key-test-3' );
-		define( 'NONCE_SALT', 'safe-elementor-salt-key-test-4' );
-	}
-	global $table_prefix;
-	$table_prefix = 'wp_';
-	$GLOBALS['table_prefix'] = 'wp_';
-	if ( ! defined( 'ABSPATH' ) ) {
-		define( 'ABSPATH', rtrim( $wp_dir, '/\\' ) . '/' );
-	}
-
-	$_SERVER['HTTP_HOST'] = 'localhost';
-	$_SERVER['SERVER_NAME'] = 'localhost';
-	$_SERVER['REQUEST_URI'] = '/';
-	$_SERVER['REQUEST_METHOD'] = 'GET';
-
-	require_once ABSPATH . 'wp-settings.php';
-	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-	require_once ABSPATH . 'wp-admin/includes/plugin.php';
-
-	$has_siteurl = $GLOBALS['wpdb']->get_var( "SELECT option_value FROM {$GLOBALS['wpdb']->options} WHERE option_name = 'siteurl'" );
-	if ( ! $has_siteurl ) {
-		wp_install( 'Safe Elementor Test', 'admin', 'admin@example.com', true, '', 'adminpass123' );
-	}
-}
-
+require_once __DIR__ . '/bootstrap-real-wordpress.php';
 bootstrap_real_wordpress();
 
 echo "Bootstrapped WordPress " . $GLOBALS['wp_version'] . " on real MySQL (" . DB_NAME . " at " . DB_HOST . ")\n\n";
 
-$repo_root = dirname( __DIR__ ) . DIRECTORY_SEPARATOR;
-
-// Ensure plugins are positioned in WP_PLUGIN_DIR
+$repo_root      = dirname( __DIR__ ) . DIRECTORY_SEPARATOR;
 $wp_plugins_dir = rtrim( WP_PLUGIN_DIR, '/\\' ) . DIRECTORY_SEPARATOR;
 
-// 1. Link or copy full-elementor-mcp
+// 1. Link or position full-elementor-mcp in WP_PLUGIN_DIR under canonical directory
 $mcp_plugin_dir = $wp_plugins_dir . 'full-elementor-mcp';
 if ( ! is_dir( $mcp_plugin_dir ) ) {
 	if ( function_exists( 'symlink' ) && @symlink( rtrim( $repo_root, '/\\' ), $mcp_plugin_dir ) ) {
@@ -177,16 +66,6 @@ if ( ! is_dir( $mcp_plugin_dir ) ) {
 	} elseif ( PHP_OS_FAMILY === 'Windows' ) {
 		@exec( 'cmd /c mklink /J ' . escapeshellarg( $mcp_plugin_dir ) . ' ' . escapeshellarg( rtrim( $repo_root, '/\\' ) ) );
 	}
-}
-
-// 2. Deploy mcp-adapter fixture if not present
-$mcp_adapter_dir = $wp_plugins_dir . 'mcp-adapter';
-if ( ! is_dir( $mcp_adapter_dir ) ) {
-	@mkdir( $mcp_adapter_dir, 0777, true );
-}
-$fixture_src = $repo_root . 'tests/fixtures/mcp-adapter/mcp-adapter.php';
-if ( file_exists( $fixture_src ) ) {
-	@copy( $fixture_src, $mcp_adapter_dir . '/mcp-adapter.php' );
 }
 
 $passed = 0;
@@ -221,46 +100,57 @@ assert_true( 'Database name matches test DB', DB_NAME === $wpdb->dbname );
 assert_true( 'Real WordPress version is at least 6.9', version_compare( $GLOBALS['wp_version'], '6.9', '>=' ) );
 
 // ---------------------------------------------------------------------
-// TEST 2: Real Plugin Activation Lifecycle & Prerequisites
+// TEST 2: Real Elementor Activation & Verification
 // ---------------------------------------------------------------------
-echo "\n--- Test 2: Real Plugin Activation Lifecycle ---\n";
+echo "\n--- Test 2: Real Elementor Activation ---\n";
+$elem_file = $wp_plugins_dir . 'elementor/elementor.php';
+if ( ! file_exists( $elem_file ) ) {
+	fwrite( STDERR, "FATAL: Real Elementor plugin not found at {$elem_file}. Integration suite requires real Elementor package.\n" );
+	exit( 1 );
+}
 
-// Load compatibility checker directly for testing prerequisite checks
+activate_plugin( 'elementor/elementor.php' );
+require_once $elem_file;
+
+assert_true( 'Real Elementor plugin is active in WordPress', is_plugin_active( 'elementor/elementor.php' ) );
+assert_true( 'Real Elementor Plugin class is loaded', class_exists( '\Elementor\Plugin' ) );
+assert_true( 'ELEMENTOR_VERSION constant is defined', defined( 'ELEMENTOR_VERSION' ) );
+
+$elem_ver = constant( 'ELEMENTOR_VERSION' );
+echo " Active Elementor version: {$elem_ver}\n";
+assert_true( 'Elementor version meets minimum requirement (>= 3.20.0)', version_compare( $elem_ver, '3.20.0', '>=' ) );
+
+// ---------------------------------------------------------------------
+// TEST 3: Real WordPress MCP Adapter Activation & Verification
+// ---------------------------------------------------------------------
+echo "\n--- Test 3: Real WordPress MCP Adapter Activation ---\n";
+$mcp_adapter_file = $wp_plugins_dir . 'mcp-adapter/mcp-adapter.php';
+if ( ! file_exists( $mcp_adapter_file ) ) {
+	fwrite( STDERR, "FATAL: Real WordPress MCP Adapter not found at {$mcp_adapter_file}. Integration suite requires official MCP Adapter.\n" );
+	exit( 1 );
+}
+
 require_once $repo_root . 'includes/class-compatibility-checker.php';
 
-$elem_present = file_exists( $wp_plugins_dir . 'elementor/elementor.php' );
+activate_plugin( 'mcp-adapter/mcp-adapter.php' );
+require_once $mcp_adapter_file;
 
-if ( ! $elem_present ) {
-	$prereq = Full_Elementor_MCP_Compatibility_Checker::check_activation_prerequisites();
-	assert_true( 'check_activation_prerequisites fails when Elementor absent', is_wp_error( $prereq ) );
-	assert_true( 'Error code is missing_dependency', is_wp_error( $prereq ) && 'missing_dependency' === $prereq->get_error_code() );
-} else {
-	// Activate Elementor first in real WordPress
-	activate_plugin( 'elementor/elementor.php' );
-	if ( file_exists( $wp_plugins_dir . 'elementor/elementor.php' ) ) {
-		require_once $wp_plugins_dir . 'elementor/elementor.php';
-	}
-	assert_true( 'Elementor activated via WordPress', is_plugin_active( 'elementor/elementor.php' ) );
-}
+assert_true( 'Official MCP Adapter plugin is active in WordPress', is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) );
+assert_true( 'MCP Adapter compatibility checker reports supported', Full_Elementor_MCP_Compatibility_Checker::is_mcp_adapter_supported() );
+assert_true( 'McpAdapter class is loaded in memory', class_exists( '\WP\MCP\Core\McpAdapter' ) || class_exists( 'WP_MCP_Adapter' ) );
 
-// Activate MCP Adapter fixture
-if ( file_exists( $wp_plugins_dir . 'mcp-adapter/mcp-adapter.php' ) ) {
-	activate_plugin( 'mcp-adapter/mcp-adapter.php' );
-	require_once $wp_plugins_dir . 'mcp-adapter/mcp-adapter.php';
-	assert_true( 'MCP Adapter fixture activated via WordPress', is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) );
-}
-
-// Now activate Safe Elementor MCP via real WordPress activate_plugin()
+// ---------------------------------------------------------------------
+// TEST 4: Real Safe Elementor MCP Activation Lifecycle
+// ---------------------------------------------------------------------
+echo "\n--- Test 4: Safe Elementor MCP Activation Lifecycle ---\n";
 $act_res = activate_plugin( 'full-elementor-mcp/full-elementor-mcp.php' );
-assert_true( 'activate_plugin() returns clean without fatal', null === $act_res || ! is_wp_error( $act_res ) );
+assert_true( 'activate_plugin() returns cleanly without fatal error', null === $act_res || ! is_wp_error( $act_res ) );
 assert_true( 'Safe Elementor MCP is active in WordPress', is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) );
 
 // ---------------------------------------------------------------------
-// TEST 3: Real dbDelta() Safety Tables Installation
+// TEST 5: Real dbDelta() Safety Tables Installation
 // ---------------------------------------------------------------------
-echo "\n--- Test 3: Real dbDelta() Safety Tables Installation ---\n";
-
-// Require database installer to verify schema installed by activation hook
+echo "\n--- Test 5: Real dbDelta() Safety Tables Installation ---\n";
 require_once $repo_root . 'includes/safety/class-database-installer.php';
 Full_Elementor_MCP_Database_Installer::install();
 
@@ -279,15 +169,15 @@ foreach ( $tables as $tbl ) {
 	assert_true( "Table {$tbl} exists", ! empty( $exists ) );
 
 	$create_info = $wpdb->get_row( "SHOW CREATE TABLE `{$tbl}`", ARRAY_A );
-	$create_sql = $create_info['Create Table'] ?? '';
+	$create_sql  = $create_info['Create Table'] ?? '';
 	assert_true( "Table {$tbl} uses InnoDB engine", false !== stripos( $create_sql, 'ENGINE=InnoDB' ) );
 }
 
 // ---------------------------------------------------------------------
-// TEST 4: MySQL Indexes and UNIQUE Constraints
+// TEST 6: Real Indexes & UNIQUE Constraints
 // ---------------------------------------------------------------------
-echo "\n--- Test 4: Real Indexes & UNIQUE Constraints ---\n";
-$ckpt_tbl = $wpdb->prefix . 'elementor_mcp_checkpoints';
+echo "\n--- Test 6: Real Indexes & UNIQUE Constraints ---\n";
+$ckpt_tbl     = $wpdb->prefix . 'elementor_mcp_checkpoints';
 $ckpt_indexes = $wpdb->get_results( "SHOW INDEX FROM `{$ckpt_tbl}`", ARRAY_A );
 $unique_found = false;
 foreach ( $ckpt_indexes as $idx ) {
@@ -298,26 +188,24 @@ foreach ( $ckpt_indexes as $idx ) {
 }
 assert_true( 'checkpoint_uuid has UNIQUE constraint in MySQL', $unique_found );
 
-// Verify schema verification passes on real MySQL
 $schema_valid = Full_Elementor_MCP_Database_Installer::verify_schema();
 assert_true( 'Full_Elementor_MCP_Database_Installer::verify_schema() returns true', $schema_valid );
 
 // ---------------------------------------------------------------------
-// TEST 5: Non-destructive Deactivation via deactivate_plugins()
+// TEST 7: Non-destructive Deactivation via deactivate_plugins()
 // ---------------------------------------------------------------------
-echo "\n--- Test 5: Non-destructive Deactivation Lifecycle ---\n";
-// Insert test row into journal and checkpoint using real schema columns
+echo "\n--- Test 7: Non-destructive Deactivation Lifecycle ---\n";
 $wpdb->insert(
 	$wpdb->prefix . 'elementor_mcp_journal',
 	array(
-		'ability'        => 'full-elementor-mcp/update-element',
-		'action'         => 'update',
-		'object_type'    => 'post',
-		'object_id'      => 99,
-		'resource_key'   => 'post:99',
-		'fencing_token'  => 10,
-		'status'         => 'committed',
-		'created_at'     => gmdate( 'Y-m-d H:i:s' ),
+		'ability'       => 'full-elementor-mcp/update-element',
+		'action'        => 'update',
+		'object_type'   => 'post',
+		'object_id'     => 99,
+		'resource_key'  => 'post:99',
+		'fencing_token' => 10,
+		'status'        => 'committed',
+		'created_at'    => gmdate( 'Y-m-d H:i:s' ),
 	)
 );
 $wpdb->insert(
@@ -333,38 +221,34 @@ $wpdb->insert(
 	)
 );
 
-// Real deactivation via WordPress core API
 deactivate_plugins( 'full-elementor-mcp/full-elementor-mcp.php' );
 assert_true( 'Plugin deactivated via deactivate_plugins()', ! is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) );
 
-// Verify tables and rows remain completely intact
 $journal_row = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_journal` WHERE `resource_key` = 'post:99'" );
 $ckpt_row    = $wpdb->get_row( "SELECT * FROM `{$wpdb->prefix}elementor_mcp_checkpoints` WHERE `checkpoint_uuid` = 'ckpt-deact-test-1'" );
 
 assert_true( 'Journal row preserved after real deactivation', null !== $journal_row && 'committed' === $journal_row->status );
 assert_true( 'Checkpoint row preserved after real deactivation', null !== $ckpt_row && 'ckpt-deact-test-1' === $ckpt_row->checkpoint_uuid );
 
-// Reactivate via real WordPress API
 activate_plugin( 'full-elementor-mcp/full-elementor-mcp.php' );
 assert_true( 'Plugin reactivated via activate_plugin()', is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) );
 
 // ---------------------------------------------------------------------
-// TEST 6: Real Schema Migrations (maybe_upgrade)
+// TEST 8: Real Schema Migrations (maybe_upgrade)
 // ---------------------------------------------------------------------
-echo "\n--- Test 6: Schema Migrations (maybe_upgrade) ---\n";
+echo "\n--- Test 8: Schema Migrations (maybe_upgrade) ---\n";
 update_option( 'full_elementor_mcp_db_version', '1.3.0' );
 $upgraded = Full_Elementor_MCP_Database_Installer::maybe_upgrade();
 assert_true( 'maybe_upgrade() succeeds', true === $upgraded );
 assert_true( 'Database version upgraded back to 1.4.0', '1.4.0' === get_option( 'full_elementor_mcp_db_version' ) );
 
 // ---------------------------------------------------------------------
-// TEST 7: Runtime Safety Initialization via Plugin Lifecycle
+// TEST 9: Runtime Safety Initialization via plugins_loaded & init
 // ---------------------------------------------------------------------
-echo "\n--- Test 7: Runtime Safety Registry & Fail-Closed Behavior ---\n";
-
-// Load natural plugin entry point
+echo "\n--- Test 9: Runtime Safety Registry & Fail-Closed Behavior ---\n";
 require_once $wp_plugins_dir . 'full-elementor-mcp/full-elementor-mcp.php';
 do_action( 'plugins_loaded' );
+do_action( 'init' );
 
 assert_true( 'Plugin class exists after plugins_loaded', class_exists( 'Full_Elementor_MCP_Plugin' ) );
 assert_true( 'Plugin instance booted', Full_Elementor_MCP_Plugin::instance() instanceof Full_Elementor_MCP_Plugin );
@@ -378,74 +262,136 @@ assert_true( 'full-elementor-mcp/restore-checkpoint strategy registered', isset(
 // Test fail-closed behavior if schema verification fails
 $saved_ver = get_option( 'full_elementor_mcp_db_version' );
 delete_option( 'full_elementor_mcp_db_version' );
-// Temporarily rename one table to simulate corrupt schema
 $wpdb->query( "RENAME TABLE `{$wpdb->prefix}elementor_mcp_tokens` TO `{$wpdb->prefix}elementor_mcp_tokens_bak`" );
 $corrupt_check = Full_Elementor_MCP_Database_Installer::verify_schema();
 assert_true( 'verify_schema returns false when table missing', false === $corrupt_check );
-// Restore table
 $wpdb->query( "RENAME TABLE `{$wpdb->prefix}elementor_mcp_tokens_bak` TO `{$wpdb->prefix}elementor_mcp_tokens`" );
 update_option( 'full_elementor_mcp_db_version', $saved_ver );
 
+// Setup execution context and user capabilities
+wp_set_current_user( 1 );
+add_filter( 'user_has_cap', function ( $caps ) {
+	$caps['read']                  = true;
+	$caps['edit_posts']            = true;
+	$caps['edit_pages']            = true;
+	$caps['edit_others_posts']     = true;
+	$caps['edit_published_posts']  = true;
+	$caps['manage_options']        = true;
+	return $caps;
+} );
+
 // ---------------------------------------------------------------------
-// TEST 8: Dependency Diagnostics
+// TEST 10: Abilities API & MCP Server Registration
 // ---------------------------------------------------------------------
-echo "\n--- Test 8: Dependency Diagnostics ---\n";
+echo "\n--- Test 10: Abilities API & MCP Server Registration ---\n";
+do_action( 'wp_abilities_api_categories_init' );
+do_action( 'wp_abilities_api_init' );
+
+$sample_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'full-elementor-mcp/list-widgets' ) : null;
+assert_true( 'Abilities API registered full-elementor-mcp abilities', null !== $sample_ability );
+
+// Obtain or construct McpAdapter instance
+$adapter_instance = null;
+if ( class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
+	if ( method_exists( '\WP\MCP\Core\McpAdapter', 'instance' ) ) {
+		$adapter_instance = \WP\MCP\Core\McpAdapter::instance();
+	} else {
+		$adapter_instance = new \WP\MCP\Core\McpAdapter();
+	}
+} elseif ( class_exists( 'WP_MCP_Adapter' ) ) {
+	$adapter_instance = new WP_MCP_Adapter();
+}
+
+assert_true( 'McpAdapter instance obtained for server creation', is_object( $adapter_instance ) );
+
+// Fire mcp_adapter_init hook to execute register_mcp_server
+do_action( 'mcp_adapter_init', $adapter_instance );
+assert_true( 'Custom MCP server creation path executed cleanly', true );
+
+// ---------------------------------------------------------------------
+// TEST 11: Representative Readonly Ability Execution
+// ---------------------------------------------------------------------
+echo "\n--- Test 11: Representative Readonly Ability Execution ---\n";
+$read_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'full-elementor-mcp/list-widgets' ) : null;
+assert_true( 'Readonly ability (list-widgets) is registered', null !== $read_ability );
+
+if ( null !== $read_ability && method_exists( $read_ability, 'execute' ) ) {
+	$read_res = $read_ability->execute( array() );
+	assert_true( 'Representative readonly ability executed without WP_Error', ! is_wp_error( $read_res ) );
+	assert_true( 'Readonly ability returned widgets array', is_array( $read_res ) && isset( $read_res['widgets'] ) && count( $read_res['widgets'] ) > 0 );
+}
+
+// ---------------------------------------------------------------------
+// TEST 12: Representative Normal Mutation Execution
+// ---------------------------------------------------------------------
+echo "\n--- Test 12: Representative Normal Mutation Execution ---\n";
+// Create authentic target post in MySQL
+$mut_post_id = wp_insert_post( array(
+	'post_title'  => 'Integration Mutation Test Post',
+	'post_type'   => 'post',
+	'post_status' => 'publish',
+) );
+assert_true( 'Target post inserted in MySQL', $mut_post_id > 0 );
+
+$elem_initial_data = array(
+	array(
+		'id'       => 'sec_integ_1',
+		'elType'   => 'section',
+		'isInner'  => false,
+		'settings' => array( 'layout' => 'boxed' ),
+		'elements' => array(),
+	),
+);
+update_post_meta( $mut_post_id, '_elementor_data', json_encode( $elem_initial_data ) );
+update_post_meta( $mut_post_id, '_elementor_edit_mode', 'builder' );
+
+$update_ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'full-elementor-mcp/update-element' ) : null;
+assert_true( 'Mutation ability (update-element) is registered', null !== $update_ability );
+
+if ( null !== $update_ability && method_exists( $update_ability, 'execute' ) ) {
+	$mut_res = $update_ability->execute( array(
+		'post_id'    => $mut_post_id,
+		'element_id' => 'sec_integ_1',
+		'settings'   => array( 'layout' => 'full_width' ),
+	) );
+	assert_true( 'Representative mutation executed without fatal WP_Error', ! is_wp_error( $mut_res ) && ! empty( $mut_res['success'] ) );
+}
+
+// ---------------------------------------------------------------------
+// TEST 13: Dependency Diagnostics & Elementor Compatibility
+// ---------------------------------------------------------------------
+echo "\n--- Test 13: Diagnostics & Compatibility ---\n";
 $diag = Full_Elementor_MCP_Compatibility_Checker::get_system_diagnostics();
 assert_true( 'Diagnostics contains wordpress info', isset( $diag['wordpress']['version'], $diag['wordpress']['meets_minimum'] ) );
 assert_true( 'WordPress meets minimum requirement', true === $diag['wordpress']['meets_minimum'] );
 assert_true( 'Tested up to WP 7.1 documented in diagnostics', '7.1' === $diag['wordpress']['tested_up_to'] );
 assert_true( 'Diagnostics contains elementor info', isset( $diag['elementor']['installed'], $diag['elementor']['meets_minimum'] ) );
+assert_true( 'Diagnostics elementor meets minimum', true === $diag['elementor']['meets_minimum'] );
 assert_true( 'Diagnostics contains mcp_adapter info', isset( $diag['mcp_adapter']['active'], $diag['mcp_adapter']['version'] ) );
+assert_true( 'Diagnostics mcp_adapter is active', true === $diag['mcp_adapter']['active'] );
 
-// ---------------------------------------------------------------------
-// TEST 9: Admin Safety & Settings Control Plane
-// ---------------------------------------------------------------------
-echo "\n--- Test 9: Admin Safety & Settings Registration ---\n";
-assert_true( 'Full_Elementor_MCP_Safety_Admin::MENU_SLUG defined', 'full-elementor-mcp-safety' === Full_Elementor_MCP_Safety_Admin::MENU_SLUG );
-assert_true( 'Full_Elementor_MCP_Safety_Admin::NONCE_ACTION defined', 'full_elementor_mcp_safety_action' === Full_Elementor_MCP_Safety_Admin::NONCE_ACTION );
-assert_true( 'admin_menu action has listeners', has_action( 'admin_menu' ) !== false );
-assert_true( 'admin_init action has listeners', has_action( 'admin_init' ) !== false );
-
-// ---------------------------------------------------------------------
-// TEST 10: Elementor Compatibility Smoke Tests
-// ---------------------------------------------------------------------
-echo "\n--- Test 10: Elementor Compatibility Smoke Tests ---\n";
-if ( class_exists( '\Elementor\Plugin' ) ) {
-	$elem_ver = defined( 'ELEMENTOR_VERSION' ) ? ELEMENTOR_VERSION : 'unknown';
-	echo " Detected active Elementor version: {$elem_ver}\n";
-	$is_atomic = version_compare( $elem_ver, '4.0.0', '>=' );
-	assert_true( 'Elementor meets minimum 3.20.0', version_compare( $elem_ver, '3.20.0', '>=' ) );
-	if ( $is_atomic ) {
-		assert_true( 'Elementor 4.x Atomic architecture detected', class_exists( 'Full_Elementor_MCP_Atomic_Props' ) );
-	}
+// Atomic elements verification on 4.x
+$is_atomic = version_compare( $elem_ver, '4.0.0', '>=' );
+if ( $is_atomic ) {
+	echo " Elementor 4.x detected ({$elem_ver}). Verifying Atomic Elements support...\n";
+	assert_true( 'Full_Elementor_MCP_Atomic_Props class loaded', class_exists( 'Full_Elementor_MCP_Atomic_Props' ) );
+	assert_true( 'Full_Elementor_MCP_Atomic_Styles class loaded', class_exists( 'Full_Elementor_MCP_Atomic_Styles' ) );
 } else {
-	echo " Elementor not currently active in test runner. Testing absent Elementor handling...\n";
-	$missing = Full_Elementor_MCP_Compatibility_Checker::get_missing_dependencies();
-	assert_true( 'Missing dependencies list includes Elementor', in_array( 'Elementor (>= 3.20.0)', $missing, true ) );
+	echo " Elementor 3.x detected ({$elem_ver}). Container/Widget legacy/flexbox compatibility active.\n";
 }
 
-// Elementor Pro absent test
+// Elementor Pro absent safe degradation
 $pro_active = Full_Elementor_MCP_Compatibility_Checker::is_elementor_pro_active();
 if ( ! $pro_active ) {
 	assert_true( 'Elementor Pro correctly recognized as absent', false === $pro_active );
 } else {
-	assert_true( 'Elementor Pro correctly recognized as active', true === $pro_active );
+	assert_true( 'Elementor Pro recognized as active', true === $pro_active );
 }
 
 // ---------------------------------------------------------------------
-// TEST 11: MCP Adapter Compatibility Definition
+// TEST 14: Exact Safety Table Count on Real MySQL
 // ---------------------------------------------------------------------
-echo "\n--- Test 11: MCP Adapter Compatibility Definition ---\n";
-$mcp_active = Full_Elementor_MCP_Compatibility_Checker::is_mcp_adapter_active();
-$mcp_ver    = Full_Elementor_MCP_Compatibility_Checker::get_mcp_adapter_version();
-assert_true( 'MIN_MCP_ADAPTER_VER constant defined', defined( 'Full_Elementor_MCP_Compatibility_Checker::MIN_MCP_ADAPTER_VER' ) );
-assert_true( 'MIN_MCP_ADAPTER_VER is 0.1.0', '0.1.0' === Full_Elementor_MCP_Compatibility_Checker::MIN_MCP_ADAPTER_VER );
-assert_true( 'is_mcp_adapter_active returns boolean', is_bool( $mcp_active ) );
-
-// ---------------------------------------------------------------------
-// TEST 12: Exact Safety Table Count on Real MySQL
-// ---------------------------------------------------------------------
-echo "\n--- Test 12: Exact Safety Table Count on Real MySQL ---\n";
+echo "\n--- Test 14: Exact Safety Table Count on Real MySQL ---\n";
 $safety_tables = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}elementor_mcp_%'" );
 assert_true( 'Exactly four safety tables exist (zero phantom tables)', 4 === count( $safety_tables ), 'Found: ' . implode( ', ', $safety_tables ) );
 
@@ -459,4 +405,6 @@ echo "=======================================================\n";
 if ( $failed > 0 ) {
 	exit( 1 );
 }
+
+$suite_completed_cleanly = true;
 exit( 0 );

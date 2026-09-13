@@ -113,6 +113,8 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		$version = 'unknown';
 		if ( defined( '\WP\MCP\Core\McpAdapter::VERSION' ) ) {
 			$version = constant( '\WP\MCP\Core\McpAdapter::VERSION' );
+		} elseif ( defined( 'WP_MCP_VERSION' ) ) {
+			$version = constant( 'WP_MCP_VERSION' );
 		} elseif ( defined( 'WP_MCP_ADAPTER_VERSION' ) ) {
 			$version = constant( 'WP_MCP_ADAPTER_VERSION' );
 		}
@@ -258,6 +260,16 @@ class Full_Elementor_MCP_Compatibility_Checker {
 	public static function is_mcp_adapter_active(): bool {
 		$mcp = self::check_mcp_adapter();
 		return $mcp['loaded'] && $mcp['supported'];
+	}
+
+	/**
+	 * Returns true if WordPress MCP Adapter is supported and meets minimum requirements.
+	 *
+	 * @return bool
+	 */
+	public static function is_mcp_adapter_supported(): bool {
+		$mcp = self::check_mcp_adapter();
+		return ! empty( $mcp['supported'] );
 	}
 
 	/**
