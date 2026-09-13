@@ -1,5 +1,5 @@
 /**
- * Full Elementor MCP — Admin Settings Scripts
+ * Safe Elementor MCP — Admin Settings Scripts
  *
  * @package Full_Elementor_MCP
  * @since   1.0.0

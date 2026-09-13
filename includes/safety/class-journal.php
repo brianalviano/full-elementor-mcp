@@ -1,6 +1,6 @@
 <?php
 /**
- * Write-Ahead Journal (WAL) for Full Elementor MCP.
+ * Write-Ahead Journal (WAL) for Safe Elementor MCP.
  *
  * Implements a durable, crash-resilient Write-Ahead Logging system that persists
  * pre-mutation state before any persistent changes occur. Enforces an explicit

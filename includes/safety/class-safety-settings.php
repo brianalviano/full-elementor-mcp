@@ -1,6 +1,6 @@
 <?php
 /**
- * Configuration and policy settings for the Full Elementor MCP safety subsystem.
+ * Configuration and policy settings for the Safe Elementor MCP safety subsystem.
  *
  * Single source of truth for Safe Mode, Break-Glass policies, undo retention,
  * checkpoint storage quotas, and protected page IDs.

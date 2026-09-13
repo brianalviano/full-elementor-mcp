@@ -785,7 +785,7 @@ function assert_is_wp_error( mixed $val, string $msg = 'Expected WP_Error' ): vo
 }
 
 echo "=======================================================\n";
-echo " Full Elementor MCP — Phase 6 Audit & Safety Test Suite\n";
+echo " Safe Elementor MCP — Phase 6 Audit & Safety Test Suite\n";
 echo "=======================================================\n\n";
 
 // =============================================================================

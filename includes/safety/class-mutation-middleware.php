@@ -1,6 +1,6 @@
 <?php
 /**
- * Central Mutation Middleware & Safety Execution Layer for Full Elementor MCP.
+ * Central Mutation Middleware & Safety Execution Layer for Safe Elementor MCP.
  *
  * @package Full_Elementor_MCP
  * @since   1.8.0
@@ -175,7 +175,7 @@ final class Full_Elementor_MCP_Mutation_Middleware {
 	}
 
 	/**
-	 * Authoritative execution dispatch for Full Elementor MCP abilities.
+	 * Authoritative execution dispatch for Safe Elementor MCP abilities.
 	 *
 	 * @param string               $ability Ability name (e.g. 'full-elementor-mcp/update-element').
 	 * @param array<string, mixed> $input   Incoming arguments.

@@ -566,7 +566,7 @@ function run_test( string $name, callable $test ): void {
 }
 
 echo "\n=======================================================\n";
-echo " Full Elementor MCP — Phase 3 Test Suite\n";
+echo " Safe Elementor MCP — Phase 3 Test Suite\n";
 echo "=======================================================\n\n";
 
 // =========================================================================

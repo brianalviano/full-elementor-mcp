@@ -1,6 +1,6 @@
 <?php
 /**
- * Append-Only Forensic Audit Logger for Full Elementor MCP.
+ * Append-Only Forensic Audit Logger for Safe Elementor MCP.
  *
  * Provides immutable, centralized forensic audit logging for safety events,
  * mutations, checkpoint operations, and operator actions.

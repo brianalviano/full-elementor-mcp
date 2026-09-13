@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name:       Safe Elementor MCP
- * Plugin URI:        https://github.com/brianalviano/full-elementor-mcp
+ * Plugin URI:        https://github.com/brianalviano/safe-elementor-mcp
  * Description:       A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
  * Version:           1.8.0
  * Requires at least: 6.9
@@ -226,7 +226,7 @@ function full_elementor_mcp_init(): void {
 		add_action( 'admin_notices', function () {
 			printf(
 				'<div class="notice notice-error"><p>%s</p></div>',
-				esc_html__( 'Full Elementor MCP: Safety database tables failed verification or are incompatible with this version. MCP server initialization has been blocked to protect site integrity.', 'full-elementor-mcp' )
+				esc_html__( 'Safe Elementor MCP: Safety database tables failed verification or are incompatible with this version. MCP server initialization has been blocked to protect site integrity.', 'full-elementor-mcp' )
 			);
 		} );
 		return;

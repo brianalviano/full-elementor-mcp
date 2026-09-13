@@ -1,6 +1,6 @@
 <?php
 /**
- * Registers all Full Elementor MCP abilities with the WordPress Abilities API.
+ * Registers all Safe Elementor MCP abilities with the WordPress Abilities API.
  *
  * @package Full_Elementor_MCP
  * @since   1.0.0

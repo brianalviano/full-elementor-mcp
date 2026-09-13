@@ -1,6 +1,6 @@
 <?php
 /**
- * Request-Local Mutation Execution Context for Full Elementor MCP.
+ * Request-Local Mutation Execution Context for Safe Elementor MCP.
  *
  * @package Full_Elementor_MCP
  * @since   1.8.0
@@ -214,7 +214,7 @@ final class Full_Elementor_MCP_Mutation_Context {
 		if ( null === $ctx ) {
 			return new \WP_Error(
 				'mutation_context_missing',
-				__( 'Persistent write rejected: no active Full Elementor MCP mutation context exists.', 'full-elementor-mcp' )
+				__( 'Persistent write rejected: no active Safe Elementor MCP mutation context exists.', 'full-elementor-mcp' )
 			);
 		}
 
@@ -296,7 +296,7 @@ final class Full_Elementor_MCP_Mutation_Context {
 		if ( null === $ctx ) {
 			return new \WP_Error(
 				'mutation_context_missing',
-				__( 'Persistent write rejected: no active Full Elementor MCP mutation context exists.', 'full-elementor-mcp' )
+				__( 'Persistent write rejected: no active Safe Elementor MCP mutation context exists.', 'full-elementor-mcp' )
 			);
 		}
 

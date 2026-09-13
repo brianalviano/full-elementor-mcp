@@ -15,10 +15,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-/**
- * Central compatibility checker and diagnostics provider.
- */
-class Full_Elementor_MCP_Compatibility_Checker {
+if ( ! class_exists( 'Full_Elementor_MCP_Compatibility_Checker' ) ) {
+	/**
+	 * Central compatibility checker and diagnostics provider.
+	 */
+	class Full_Elementor_MCP_Compatibility_Checker {
 
 	public const MIN_PHP_VERSION       = '8.0';
 	public const MIN_WP_VERSION        = '6.9';
@@ -367,3 +368,5 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		return self::get_system_diagnostics();
 	}
 }
+}
+

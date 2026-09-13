@@ -26,7 +26,7 @@ Generic content tools talk to WordPress core. They cannot:
 * Maintain unique 7-char element IDs across edits without collisions.
 * Apply page-level / element-level custom CSS, popup triggers, theme-builder conditions, dynamic tags or a Pro template-library import.
 
-Full Elementor MCP does all of that and exposes it as MCP tools any agent can call.
+Safe Elementor MCP does all of that and exposes it as MCP tools any agent can call.
 
 = Highlights =
 
@@ -34,7 +34,7 @@ Full Elementor MCP does all of that and exposes it as MCP tools any agent can ca
 * **Elementor 4.0 atomic support** out of the box — typed prop wrapping, `styles` map generation, class-ID issuance.
 * **Elementor 3.x legacy support** — sections, columns, containers, full-fat widgets with auto-generated JSON schemas from the live control registry.
 * **Two transports** — HTTP (REST) for any client, plus an optional **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop clients that only speak stdio (Claude Desktop, VS Code MCP, etc.).
-* **VS Code-ready** — bundled `.vscode/mcp.json` registers the stdio proxy as a workspace MCP server with masked credential prompts.
+* **VS Code-ready** — `.vscode/mcp.json` in the git repository registers the stdio proxy as a workspace MCP server with masked credential prompts (excluded from production release archives).
 * **Schema sanitiser** for Gemini / Antigravity compatibility (strips empty enum strings, normalises empty `properties` objects).
 * **Permission-aware** — every write tool defers to `current_user_can( 'edit_post', $post_id )`. Application Passwords and capability rules are respected.
 * **Per-tool admin toggle** — disable any of the 131 tools individually from the WP Admin UI.
@@ -55,7 +55,7 @@ Full Elementor MCP does all of that and exposes it as MCP tools any agent can ca
 * **Atomic widgets / E4.0 (10)** — `e-heading`, `e-paragraph`, `e-button`, `e-image`, `e-svg`, `e-youtube`, `e-video`, `e-divider` plus universal add/update.
 * **Atomic layout / E4.0 (3)** — `e-flexbox`, `e-div-block`, `detect-elementor-version`.
 
-The full list is browseable from **WP Admin → Settings → Full Elementor MCP → Tools** with descriptions and per-tool on/off toggles.
+The full list is browseable from **WP Admin → Settings → Safe Elementor MCP → Tools** with descriptions and per-tool on/off toggles.
 
 = Sample agent prompts =
 
@@ -72,9 +72,9 @@ Drop one into your client of choice and let the agent build the page through the
 == Installation ==
 
 1. Upload the `full-elementor-mcp/` folder to `/wp-content/plugins/`, or install via the WP Admin Plugin uploader.
-2. Activate **Full Elementor MCP** through the **Plugins** menu.
+2. Activate **Safe Elementor MCP** through the **Plugins** menu.
 3. Confirm **Elementor**, the **WordPress MCP Adapter** and (optionally) **Elementor Pro** are active.
-4. Visit **Settings → Full Elementor MCP → Connection** for the MCP endpoint URL and a copy-paste config for your MCP client.
+4. Visit **Settings → Safe Elementor MCP → Connection** for the MCP endpoint URL and a copy-paste config for your MCP client.
 
 == MCP endpoint ==
 
@@ -112,7 +112,7 @@ Every write tool checks WordPress capabilities. Custom-CSS / custom-JS / code-sn
 
 = Can I disable individual tools? =
 
-Yes. **Settings → Full Elementor MCP → Tools** has a per-tool toggle. Disabled tools are filtered out before the MCP server registers them.
+Yes. **Settings → Safe Elementor MCP → Tools** has a per-tool toggle. Disabled tools are filtered out before the MCP server registers them.
 
 = Does it require a build step? =
 

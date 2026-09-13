@@ -1,6 +1,6 @@
 <?php
 /**
- * Safe User-Facing Undo Manager for Full Elementor MCP.
+ * Safe User-Facing Undo Manager for Safe Elementor MCP.
  *
  * Orchestrates user-facing rollbacks with strict conflict detection,
  * durable pre-undo encrypted checkpoints, and frozen Phase 2 WAL rollback guarantees.

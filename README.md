@@ -95,7 +95,7 @@ Safe Elementor MCP solves all of these challenges with **131+ specialized tools*
 ## Installation & Setup
 
 1. **Install Plugin**:
-   Download `safe-elementor-mcp-1.8.0.zip` from [Releases](https://github.com/brianalviano/full-elementor-mcp/releases) and install via **Plugins → Add New → Upload Plugin**, or extract into `wp-content/plugins/full-elementor-mcp/`.
+   Download `safe-elementor-mcp-1.8.0.zip` from [Releases](https://github.com/brianalviano/safe-elementor-mcp/releases) and install via **Plugins → Add New → Upload Plugin**, or extract into `wp-content/plugins/full-elementor-mcp/`.
 2. **Activate Plugin**:
    The plugin verifies system prerequisites automatically during activation. All safety database tables are provisioned via `dbDelta()`.
 3. **Configure MCP Credentials**:
@@ -121,7 +121,7 @@ Add to `claude_desktop_config.json`:
 ```
 
 ### VS Code Configuration
-The plugin includes a pre-configured `.vscode/mcp.json` that registers the stdio proxy as a workspace server with secure input prompts for credentials.
+A pre-configured `.vscode/mcp.json` is available in the git source repository for workspace setup convenience (excluded from production release archives). It registers the stdio proxy as a workspace server with secure masked input prompts for credentials.
 
 ---
 
@@ -190,7 +190,17 @@ Safe Elementor MCP is licensed under the **GNU General Public License v3.0 or la
 
 ---
 
-## Credits
+## Origins & Credits
+
+Safe Elementor MCP is independently maintained by Brian Alviano.
+
+Safe Elementor MCP was originally based on [Full Elementor MCP by Zainulabidin90](https://github.com/Zainulabidin90/full-elementor-mcp). The project has since substantially diverged and is now independently maintained, with an enterprise production-safety architecture including write-ahead logging (WAL), AEAD-encrypted checkpoints, distributed lease fencing, atomic idempotency, scoped credential access, append-only audit logging, conflict-safe undo, operator recovery tooling, and production release hardening.
+
+### Foundations & Dependencies
 
 - Built on top of the [WordPress Abilities API](https://github.com/WordPress/abilities-api) and the [WordPress MCP Adapter](https://github.com/WordPress/mcp-adapter).
+- Deep integration with [Elementor](https://elementor.com/) and Elementor Pro.
 - Stock image search powered by the [Openverse API](https://api.openverse.org).
+
+*Safe Elementor MCP is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Elementor, WordPress, or upstream project authors.*
+

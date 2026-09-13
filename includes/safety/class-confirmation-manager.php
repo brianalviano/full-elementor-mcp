@@ -1,6 +1,6 @@
 <?php
 /**
- * Server-Issued Confirmation Token Manager for Full Elementor MCP.
+ * Server-Issued Confirmation Token Manager for Safe Elementor MCP.
  *
  * @package Full_Elementor_MCP
  * @since   1.8.0

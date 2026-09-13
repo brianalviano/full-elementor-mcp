@@ -1,6 +1,6 @@
 <?php
 /**
- * Atomic Idempotency Lifecycle Manager for Full Elementor MCP.
+ * Atomic Idempotency Lifecycle Manager for Safe Elementor MCP.
  *
  * @package Full_Elementor_MCP
  * @since   1.8.0

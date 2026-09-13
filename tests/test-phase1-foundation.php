@@ -476,7 +476,7 @@ function assert_equals( mixed $expected, mixed $actual, string $msg = '' ): void
 }
 
 echo "\n=======================================================\n";
-echo " Full Elementor MCP — Phase 1 Test Suite\n";
+echo " Safe Elementor MCP — Phase 1 Test Suite\n";
 echo "=======================================================\n\n";
 
 // ---------------------------------------------------------------------

@@ -3,7 +3,7 @@
  * Custom code MCP abilities for Elementor.
  *
  * Registers tools for adding custom CSS, JavaScript, and site-wide
- * code snippets via the Full Elementor MCP server.
+ * code snippets via the Safe Elementor MCP server.
  *
  * @package Full_Elementor_MCP
  * @since   1.3.0

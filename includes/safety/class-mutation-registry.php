@@ -1,6 +1,6 @@
 <?php
 /**
- * Mutation Strategy Registry for Full Elementor MCP.
+ * Mutation Strategy Registry for Safe Elementor MCP.
  *
  * Provides a centralized registry describing how each mutating ability is
  * identified, locked, captured, validated, and rolled back.

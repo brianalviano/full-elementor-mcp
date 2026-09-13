@@ -138,7 +138,7 @@ class Full_Elementor_MCP_Plugin {
 		wp_register_ability_category(
 			'full-elementor-mcp',
 			array(
-				'label'       => __( 'Full Elementor MCP', 'full-elementor-mcp' ),
+				'label'       => __( 'Safe Elementor MCP', 'full-elementor-mcp' ),
 				'description' => __( 'Tools for reading and manipulating Elementor page designs via MCP.', 'full-elementor-mcp' ),
 			)
 		);
@@ -186,7 +186,7 @@ class Full_Elementor_MCP_Plugin {
 			'full-elementor-mcp-server',                                   // server_id
 			'mcp',                                                    // route_namespace
 			'full-elementor-mcp-server',                                   // route
-			__( 'Full Elementor MCP Server', 'full-elementor-mcp' ),            // server_name
+			__( 'Safe Elementor MCP Server', 'full-elementor-mcp' ),            // server_name
 			__( 'Exposes Elementor data and design tools as MCP tools for AI agents.', 'full-elementor-mcp' ), // description
 			'v' . FULL_ELEMENTOR_MCP_VERSION,                              // version
 			$transports,                                              // transports

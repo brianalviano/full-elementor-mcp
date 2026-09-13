@@ -702,7 +702,7 @@ function run_test( string $name, callable $test ): void {
 }
 
 echo "\n=======================================================\n";
-echo " Full Elementor MCP — Phase 4 Middleware Test Suite\n";
+echo " Safe Elementor MCP — Phase 4 Middleware Test Suite\n";
 echo "=======================================================\n\n";
 
 // Helper to register mock abilities:

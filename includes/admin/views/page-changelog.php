@@ -1,6 +1,6 @@
 <?php
 /**
- * Changelog tab view for the Full Elementor MCP admin settings page.
+ * Changelog tab view for the Safe Elementor MCP admin settings page.
  *
  * Reads CHANGELOG.md and displays version entries as styled cards.
  *
@@ -65,7 +65,7 @@ if ( null !== $full_elementor_mcp_current_ver ) {
 	<div class="full-elementor-mcp-changelog-intro">
 		<h2><?php esc_html_e( 'Changelog', 'full-elementor-mcp' ); ?></h2>
 		<p class="description">
-			<?php esc_html_e( 'Version history for Full Elementor MCP. See what changed in each release.', 'full-elementor-mcp' ); ?>
+			<?php esc_html_e( 'Version history for Safe Elementor MCP. See what changed in each release.', 'full-elementor-mcp' ); ?>
 		</p>
 	</div>
 

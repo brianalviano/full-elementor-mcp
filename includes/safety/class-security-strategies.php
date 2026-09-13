@@ -1,6 +1,6 @@
 <?php
 /**
- * Security strategies and validators for Full Elementor MCP.
+ * Security strategies and validators for Safe Elementor MCP.
  *
  * Provides centralized security strategies covering:
  * 1. SSRF defense, IPv4/IPv6 resolution, port policy, and safe redirect downloading.

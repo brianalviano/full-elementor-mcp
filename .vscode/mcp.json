@@ -19,7 +19,7 @@
 		}
 	],
 	"servers": {
-		"full-elementor-mcp": {
+		"safe-elementor-mcp": {
 			"type": "stdio",
 			"command": "node",
 			"args": [

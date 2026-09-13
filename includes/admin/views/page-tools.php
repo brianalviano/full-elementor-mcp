@@ -1,6 +1,6 @@
 <?php
 /**
- * Tools tab view for the Full Elementor MCP admin settings page.
+ * Tools tab view for the Safe Elementor MCP admin settings page.
  *
  * Displays all MCP tools grouped by category with toggle switches.
  *

@@ -1,6 +1,6 @@
 <?php
 /**
- * Safe Writes Layer for Full Elementor MCP.
+ * Safe Writes Layer for Safe Elementor MCP.
  *
  * Provides targeted, plugin-owned wrappers around WordPress core and Elementor
  * persistence sinks. Strictly asserts active mutation context, write permission,
@@ -481,7 +481,7 @@ class Full_Elementor_MCP_Safe_Writes {
 		}
 
 		if ( ! Full_Elementor_MCP_Mutation_Context::has_active_context() ) {
-			return new \WP_Error( 'mutation_context_missing', __( 'Persistent write rejected: no active Full Elementor MCP mutation context exists.', 'full-elementor-mcp' ) );
+			return new \WP_Error( 'mutation_context_missing', __( 'Persistent write rejected: no active Safe Elementor MCP mutation context exists.', 'full-elementor-mcp' ) );
 		}
 
 		// Enforce write context:

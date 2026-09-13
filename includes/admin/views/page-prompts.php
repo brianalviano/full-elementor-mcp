@@ -1,6 +1,6 @@
 <?php
 /**
- * Prompts tab view for the Full Elementor MCP admin settings page.
+ * Prompts tab view for the Safe Elementor MCP admin settings page.
  *
  * Displays sample landing page prompts with one-click copy.
  *

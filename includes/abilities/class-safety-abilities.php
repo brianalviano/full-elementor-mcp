@@ -1,6 +1,6 @@
 <?php
 /**
- * Safety, Audit, and Undo MCP abilities for Full Elementor MCP.
+ * Safety, Audit, and Undo MCP abilities for Safe Elementor MCP.
  *
  * Exposes the safety capabilities (WAL journal inspection, checkpoint inspection & restoration,
  * audit log viewing, undo tools, and safety status) through the WordPress Abilities API
@@ -91,7 +91,7 @@ class Full_Elementor_MCP_Safety_Abilities {
 			$name,
 			array(
 				'label'               => __( 'Safety Status', 'full-elementor-mcp' ),
-				'description'         => __( 'Returns the operational health and safety status of the Full Elementor MCP system, including database verification, active locks, unresolved recovery items, and keyring status.', 'full-elementor-mcp' ),
+				'description'         => __( 'Returns the operational health and safety status of the Safe Elementor MCP system, including database verification, active locks, unresolved recovery items, and keyring status.', 'full-elementor-mcp' ),
 				'category'            => 'full-elementor-mcp',
 				'meta'                => array(
 					'annotations' => array( 'readonly' => true ),
