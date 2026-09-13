@@ -169,7 +169,7 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 == Upgrade Notice ==
 
 = 1.8.0 =
-Enterprise safety engine upgrade. Introduces cryptographic checkpoints, lock fencing, WAL mutation logging, and compatibility checks. Full backward compatibility with prior tool abilities.
+Safety update adding encrypted checkpoints, lock fencing, WAL mutation logging, recovery tools, and compatibility checks. Full backward compatibility with prior tool abilities.
 
 = 1.7.1 =
 Adds a bundled VS Code MCP workspace config (`.vscode/mcp.json`). No code or data changes; safe drop-in upgrade from 1.7.0.
