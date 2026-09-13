@@ -2,14 +2,14 @@
 
 > A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
 
-[![Plugin Version](https://img.shields.io/badge/version-1.8.0-blue.svg)](full-elementor-mcp.php)
+[![Latest Release](https://img.shields.io/github/v/release/brianalviano/safe-elementor-mcp?label=release&color=blue)](https://github.com/brianalviano/safe-elementor-mcp/releases)
 [![PHP](https://img.shields.io/badge/php-%3E%3D8.0-777BB4.svg)](https://www.php.net/)
 [![WordPress](https://img.shields.io/badge/wordpress-%3E%3D6.9-21759B.svg)](https://wordpress.org/)
 [![Elementor](https://img.shields.io/badge/elementor-3.20%2B%20%7C%204.0%20atomic-D8358F.svg)](https://elementor.com/)
 [![CI Status](https://img.shields.io/badge/tests-100%25%20passing-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-GPL--3.0%2B-green.svg)](LICENSE)
 
-**Safe Elementor MCP** is a WordPress plugin that exposes Elementor and Elementor Pro to AI assistants over the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It builds on the WordPress Abilities API and WordPress MCP Adapter, adding safety controls for automated changes: write-ahead logging (WAL), distributed lease locking, encrypted recovery checkpoints, and append-only audit logging.
+**Safe Elementor MCP** is a WordPress plugin that exposes Elementor and Elementor Pro to AI assistants, coding agents, and development tools over the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It builds on the WordPress Abilities API and WordPress MCP Adapter, adding safety controls for automated changes: write-ahead logging (WAL), distributed lease locking, encrypted recovery checkpoints, and append-only audit logging.
 
 ---
 
@@ -30,8 +30,8 @@ Safe Elementor MCP solves these challenges with **131+ specialized tools** and a
 
 - **131+ MCP Tools**: Covers Query, Page, Layout, Widget, Template, Global, Composite, Stock Image, SVG, Custom Code, Atomic Layout, and Atomic Widget groups.
 - **Elementor 4.0 Atomic Support**: Generates `e-flexbox`, `e-div-block`, and atomic widgets with style maps and class issuance.
-- **Elementor 3.x Support**: Manages containers, sections, columns, and classic widgets with auto-generated JSON schemas.
-- **Dual Transport**: HTTP (REST API / SSE) for direct connections, plus a bundled **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop MCP clients.
+- **Elementor 3.x Support**: Manages containers, sections, columns, and classic Elementor widgets with auto-generated JSON schemas.
+- **Dual Transport**: HTTP (REST API / SSE) for direct network connections, plus a bundled **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop MCP clients.
 - **Scoped Credentials**: Fine-grained Application Password scoping (`read_only` or custom allowlists) and WordPress capability checks (`edit_post`, `unfiltered_html`, `manage_options`).
 - **Anti-SSRF Protection**: External asset requests block loopback, RFC 1918 private subnets, and cloud metadata endpoints (`169.254.169.254`).
 - **Per-Tool Admin Toggle**: Enable or disable any of the 131 tools from the WordPress Admin UI.
@@ -75,25 +75,42 @@ Safe Elementor MCP solves these challenges with **131+ specialized tools** and a
 
 ## 5. Installation
 
-1. **Install Plugin**:
-   Download `safe-elementor-mcp-1.8.0.zip` from [Releases](https://github.com/brianalviano/safe-elementor-mcp/releases) and upload via **Plugins → Add New → Upload Plugin**, or extract into `wp-content/plugins/full-elementor-mcp/`.
-2. **Activate Plugin**:
-   Activate through the **Plugins** screen. Database tables are provisioned automatically via `dbDelta()`.
-3. **Configure Credentials**:
-   Generate an **Application Password** in WordPress under **Users → Profile**.
+1. Download `safe-elementor-mcp.zip` from the latest [GitHub Release](https://github.com/brianalviano/safe-elementor-mcp/releases).
+2. Open **WordPress Admin → Plugins → Add New → Upload Plugin**.
+3. Upload the ZIP archive and activate **Safe Elementor MCP**.
+4. Configure WordPress Application Password credentials under **Users → Profile**.
+5. Connect your MCP client using HTTP or stdio.
 
 ---
 
 ## 6. Connecting an MCP Client
 
-### Claude Desktop Configuration
-Add to `claude_desktop_config.json`:
+Safe Elementor MCP can be used with MCP-compatible AI assistants and coding agents such as Codex, OpenCode, Claude Code/Desktop, Cursor, Antigravity, VS Code, and other compatible clients.
+
+### Transport Options
+
+#### HTTP / REST
+For clients that support the WordPress MCP Adapter HTTP transport, use the Safe Elementor MCP server endpoint:
+- With pretty permalinks: `https://example.com/wp-json/mcp/full-elementor-mcp-server`
+- Without pretty permalinks: `https://example.com/?rest_route=/mcp/full-elementor-mcp-server`
+
+#### stdio
+For MCP clients that require a local stdio process, use the bundled proxy:
+```
+bin/full-elementor-mcp-proxy.mjs
+```
+
+Compatibility depends on the MCP transport supported by your client.
+
+### Configuration Examples
+
+#### Generic stdio client
 ```json
 {
   "mcpServers": {
     "safe-elementor-mcp": {
       "command": "node",
-      "args": ["/path/to/safe-elementor-mcp/bin/full-elementor-mcp-proxy.mjs"],
+      "args": ["/path/to/full-elementor-mcp/bin/full-elementor-mcp-proxy.mjs"],
       "env": {
         "WP_URL": "https://example.com",
         "WP_USERNAME": "your_wp_username",
@@ -104,13 +121,26 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-### VS Code Configuration
-A pre-configured `.vscode/mcp.json` is included in the git repository for workspace setup convenience (excluded from release archives). It registers the stdio proxy with masked credential prompts.
+#### Claude Desktop example
+Add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "safe-elementor-mcp": {
+      "command": "node",
+      "args": ["/path/to/full-elementor-mcp/bin/full-elementor-mcp-proxy.mjs"],
+      "env": {
+        "WP_URL": "https://example.com",
+        "WP_USERNAME": "your_wp_username",
+        "WP_APP_PASSWORD": "xxxx xxxx xxxx xxxx"
+      }
+    }
+  }
+}
+```
 
-### Direct HTTP REST Endpoint
-For HTTP-based MCP clients:
-- With pretty permalinks: `https://example.com/wp-json/mcp/full-elementor-mcp-server`
-- Without pretty permalinks: `https://example.com/?rest_route=/mcp/full-elementor-mcp-server`
+#### VS Code example
+A pre-configured `.vscode/mcp.json` is included in the source repository for workspace setup convenience (excluded from release archives). It registers the stdio proxy with masked credential prompts.
 
 ---
 
@@ -136,7 +166,7 @@ For HTTP-based MCP clients:
 ## 8. Compatibility
 
 - **Elementor 3.x & 4.x**: Automatically detects whether the active Elementor install is running 3.x (containers, sections, columns) or 4.0+ (atomic elements with style maps and class IDs).
-- **Elementor Pro**: Pro features (popups, theme builder templates, custom code snippets) activate when Pro is present and degrade gracefully when absent.
+- **Elementor Pro**: Pro features (popups, theme builder templates, custom code snippets) activate when Pro is present and degrade cleanly when absent.
 - **Upgrades**: Upgrades from earlier Full Elementor MCP installations preserve all existing post data, journal rows, and options without manual migration steps.
 
 ---
@@ -155,36 +185,17 @@ For HTTP-based MCP clients:
 Safe Elementor MCP includes automated test coverage for:
 
 - Mutation safety and write-ahead logging
-- Element tree validation and security boundaries
+- Element-tree validation and security boundaries
 - Encrypted checkpoints and restore verification
 - Safe undo and conflict-checked rollback
-- Distributed lease locking, CAS operations, and fencing
+- Locking and lease fencing for concurrent writes
 - Multi-process concurrency and crash recovery
 - Real MySQL behavior, transactions, and schema constraints
 - WordPress and Elementor runtime compatibility
 - Clean installation, deactivation, and in-place upgrade paths
 - Release package structure and manifest integrity
 
-### Running Tests Locally
-
-```bash
-# Standalone test suites
-php tests/test-phase1-foundation.php
-php tests/test-phase2-journal.php
-php tests/test-phase3-validation.php
-php tests/test-phase4-middleware.php
-php tests/test-phase5-checkpoints.php
-php tests/test-phase6-audit-tools.php
-php tests/test-phase7-release-concurrency.php
-
-# Real MySQL & WordPress integration suites
-php tests/test-mysql-safety.php
-php tests/test-mysql-concurrency.php
-php tests/test-process-crash-recovery.php
-php tests/test-wordpress-integration.php
-php tests/test-phase6-upgrade-smoke.php
-php tests/test-wordpress-package-lifecycle.php
-```
+For test suite implementation and continuous integration details, see the [`tests/`](tests/) directory and [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 

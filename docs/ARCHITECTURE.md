@@ -7,7 +7,7 @@ Safe Elementor MCP is a WordPress plugin providing a Model Context Protocol (MCP
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        MCP Clients (AI Agents)                         │
-│             Claude Desktop / Claude Code / Cursor / Custom             │
+│           Codex / OpenCode / Claude / Cursor / Antigravity / Custom    │
 └───────────────────┬────────────────────────────────┬───────────────────┘
                     │ (HTTP / SSE Transport)         │ (Stdio Transport)
                     ▼                                ▼
@@ -93,7 +93,7 @@ The safety engine operates exclusively on 4 dedicated tables:
 
 ## 3. Backward Compatibility & System Requirements
 
-To ensure existing client configurations, automation scripts, and database integrations continue operating seamlessly:
+To ensure existing client configurations, automation scripts, and database integrations continue operating without disruption:
 - **Plugin Directory & Packaging**: The distribution ZIP is named `safe-elementor-mcp-X.Y.Z.zip`, while the internal root directory is strictly `full-elementor-mcp/` so in-place upgrades never break WordPress `active_plugins` options or require re-activation.
 - **Machine Identifiers**: Prefix `full_elementor_mcp_*`, constants (`FULL_ELEMENTOR_MCP_VERSION`, etc.), option names, and database table names remain unchanged.
 - **Ability Names**: Ability names remain prefixed with `full-elementor-mcp/` (e.g. `full-elementor-mcp/add-heading`).

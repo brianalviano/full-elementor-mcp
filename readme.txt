@@ -12,7 +12,7 @@ A production-safe MCP server for AI-powered Elementor development. Deep page-bui
 
 == Description ==
 
-**Safe Elementor MCP** turns any WordPress + Elementor site into a production-safe Model Context Protocol (MCP) server that AI agents (Claude Code, Claude Desktop, Cursor, Antigravity, custom MCP clients) can drive end-to-end.
+**Safe Elementor MCP** turns any WordPress + Elementor site into a production-safe Model Context Protocol (MCP) server that compatible AI assistants and coding agents (including Codex, OpenCode, Claude Code/Desktop, Cursor, Antigravity, VS Code, and custom MCP clients) can use.
 
 It builds on top of the WordPress Abilities API and the WordPress MCP Adapter and adds **131+ Elementor-specific MCP tools** covering the legacy Elementor 3.x model (sections / columns / widgets) **and** the new Elementor 4.0 atomic model (`e-flexbox`, `e-div-block`, `e-heading`, `e-button`, …).
 
@@ -32,13 +32,13 @@ Safe Elementor MCP does all of that and exposes it as MCP tools any agent can ca
 
 * **131+ MCP tools** across Query, Page, Layout, Widget, Template, Global, Composite, Stock Image, SVG, Custom Code, Atomic Layout and Atomic Widget groups.
 * **Elementor 4.0 atomic support** out of the box — typed prop wrapping, `styles` map generation, class-ID issuance.
-* **Elementor 3.x legacy support** — sections, columns, containers, full-fat widgets with auto-generated JSON schemas from the live control registry.
-* **Two transports** — HTTP (REST) for any client, plus an optional **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop clients that only speak stdio (Claude Desktop, VS Code MCP, etc.).
+* **Elementor 3.x legacy support** — sections, columns, containers, classic Elementor widgets with auto-generated JSON schemas from the live control registry.
+* **Two transports** — HTTP (REST) for direct network connections, plus a **stdio proxy** (`bin/full-elementor-mcp-proxy.mjs`) for desktop clients that require stdio.
 * **VS Code-ready** — `.vscode/mcp.json` in the git repository registers the stdio proxy as a workspace MCP server with masked credential prompts (excluded from production release archives).
 * **Schema sanitiser** for Gemini / Antigravity compatibility (strips empty enum strings, normalises empty `properties` objects).
 * **Permission-aware** — every write tool defers to `current_user_can( 'edit_post', $post_id )`. Application Passwords and capability rules are respected.
 * **Per-tool admin toggle** — disable any of the 131 tools individually from the WP Admin UI.
-* **Hardened** — `</script>` escaping in injected JS, multi-line SVG event-handler stripping, ID collision reservation across duplicates, and a defensive bool-handling pattern for every tree mutation.
+* **Security controls** — `</script>` escaping in injected JS, multi-line SVG event-handler stripping, ID collision reservation across duplicates, and defensive status checks for every tree mutation.
 
 = Tool categories =
 
@@ -104,7 +104,7 @@ Yes. The plugin auto-detects Elementor 4.0+ and registers an additional group of
 
 = Which AI clients are supported? =
 
-Anything that speaks MCP — Claude Code, Claude Desktop, Cursor, Antigravity, custom clients. HTTP-only clients use the REST endpoint directly. Desktop stdio-only clients use the bundled `bin/full-elementor-mcp-proxy.mjs`.
+Any MCP-compatible AI assistant or coding agent — including Codex, OpenCode, Claude Code/Desktop, Cursor, Antigravity, VS Code, and custom MCP clients. Clients supporting HTTP connect to the REST endpoint directly. Clients requiring stdio use the bundled proxy (`bin/full-elementor-mcp-proxy.mjs`).
 
 = Is it safe? =
 
