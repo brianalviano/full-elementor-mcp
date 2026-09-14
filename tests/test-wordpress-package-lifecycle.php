@@ -142,12 +142,18 @@ $db_port = defined( 'DB_PORT' ) ? DB_PORT : 3307;
 /**
  * Creates an isolated authentic real WordPress installation backed by its own unique MySQL database.
  *
- * @param string $site_name Identifier prefix.
- * @param bool   $include_mcp_adapter Whether to include the WordPress MCP Adapter plugin.
+ * @param string      $site_name    Identifier prefix.
+ * @param string|bool $adapter_mode Adapter mode: 'official', 'none', or 'incompatible' (or bool for backward compat).
  * @return array{site_path: string, db_name: string} Information about the isolated WordPress site.
  */
-function create_test_wordpress_site( string $site_name, bool $include_mcp_adapter = true ): array {
+function create_test_wordpress_site( string $site_name, $adapter_mode = 'official' ): array {
 	global $base_wp_dir, $worker_file, $db_port, $active_temp_sites;
+
+	if ( true === $adapter_mode ) {
+		$adapter_mode = 'official';
+	} elseif ( false === $adapter_mode ) {
+		$adapter_mode = 'none';
+	}
 
 	$db_name   = 'safelc_' . substr( md5( uniqid( (string) mt_rand(), true ) ), 0, 10 );
 	$temp_site = sys_get_temp_dir() . DIRECTORY_SEPARATOR . $site_name . '_' . uniqid();
@@ -183,7 +189,7 @@ function create_test_wordpress_site( string $site_name, bool $include_mcp_adapte
 		if ( is_dir( $base_wp_dir . '/wp-content/plugins/elementor' ) ) {
 			exec( 'cmd /c mklink /J ' . escapeshellarg( $temp_site . '/wp-content/plugins/elementor' ) . ' ' . escapeshellarg( $base_wp_dir . '/wp-content/plugins/elementor' ) );
 		}
-		if ( $include_mcp_adapter && is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
+		if ( 'official' === $adapter_mode && is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
 			exec( 'cmd /c mklink /J ' . escapeshellarg( $temp_site . '/wp-content/plugins/mcp-adapter' ) . ' ' . escapeshellarg( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) );
 		}
 	} else {
@@ -192,9 +198,51 @@ function create_test_wordpress_site( string $site_name, bool $include_mcp_adapte
 		if ( is_dir( $base_wp_dir . '/wp-content/plugins/elementor' ) ) {
 			@symlink( $base_wp_dir . '/wp-content/plugins/elementor', $temp_site . '/wp-content/plugins/elementor' );
 		}
-		if ( $include_mcp_adapter && is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
+		if ( 'official' === $adapter_mode && is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
 			@symlink( $base_wp_dir . '/wp-content/plugins/mcp-adapter', $temp_site . '/wp-content/plugins/mcp-adapter' );
 		}
+	}
+
+	// Controlled fake adapter fixture for Site C (intentionally lacks create_server):
+	if ( 'incompatible' === $adapter_mode ) {
+		$stub_dir = $temp_site . '/wp-content/plugins/mcp-adapter';
+		if ( ! is_dir( $stub_dir ) ) {
+			mkdir( $stub_dir, 0777, true );
+		}
+		$stub_code = "<?php\n" .
+			"/**\n" .
+			" * Plugin Name: WordPress MCP Adapter (Incompatible Contract Fixture)\n" .
+			" * Description: Test fixture defining \\WP\\MCP\\Core\\McpAdapter without create_server().\n" .
+			" * Version:     0.1.0\n" .
+			" * Author:      WordPress Test Suite\n" .
+			" */\n\n" .
+			"declare(strict_types=1);\n\n" .
+			"namespace WP\\MCP\\Core;\n\n" .
+			"if ( ! class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {\n" .
+			"	class McpAdapter {\n" .
+			"		public const VERSION = '0.1.0';\n" .
+			"		public static \$instance = null;\n" .
+			"		public static bool \$create_server_called = false;\n" .
+			"		public static array \$recorded_calls = array();\n\n" .
+			"		public static function instance(): self {\n" .
+			"			if ( null === self::\$instance ) {\n" .
+			"				self::\$instance = new self();\n" .
+			"			}\n" .
+			"			return self::\$instance;\n" .
+			"		}\n\n" .
+			"		/**\n" .
+			"		 * Note: create_server() is INTENTIONALLY NOT IMPLEMENTED to simulate an incompatible API contract.\n" .
+			"		 * Any dynamic invocation via __call will record the call rather than succeed silently.\n" .
+			"		 */\n" .
+			"		public function __call( string \$name, array \$arguments ) {\n" .
+			"			if ( 'create_server' === \$name ) {\n" .
+			"				self::\$create_server_called = true;\n" .
+			"				self::\$recorded_calls[]     = \$arguments;\n" .
+			"			}\n" .
+			"		}\n" .
+			"	}\n" .
+			"}\n";
+		file_put_contents( $stub_dir . '/mcp-adapter.php', $stub_code );
 	}
 
 	// 3. Copy root php bootstrap files
@@ -224,7 +272,7 @@ function create_test_wordpress_site( string $site_name, bool $include_mcp_adapte
 	// 5. Initialize fresh WordPress core schema
 	$init_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
 				' --action=init-site --wp-path=' . escapeshellarg( $temp_site ) .
-				( $include_mcp_adapter ? '' : ' --skip-mcp-adapter' );
+				( 'none' === $adapter_mode ? ' --skip-mcp-adapter' : '' );
 	exec( $init_cmd, $init_out, $init_code );
 	if ( 0 !== $init_code ) {
 		fwrite( STDERR, "FATAL: Failed to initialize isolated WordPress site schema: " . implode( "\n", $init_out ) . "\n" );
@@ -282,11 +330,12 @@ function destroy_test_wordpress_site( array $site_info ): void {
 	// Remove filesystem files
 	if ( $site_path && is_dir( $site_path ) ) {
 		if ( PHP_OS_FAMILY === 'Windows' ) {
-			@exec( 'cmd /c rmdir ' . escapeshellarg( $site_path . '/wp-includes' ) );
-			@exec( 'cmd /c rmdir ' . escapeshellarg( $site_path . '/wp-admin' ) );
-			@exec( 'cmd /c rmdir ' . escapeshellarg( $site_path . '/wp-content/plugins/elementor' ) );
-			@exec( 'cmd /c rmdir ' . escapeshellarg( $site_path . '/wp-content/plugins/mcp-adapter' ) );
-			@exec( 'cmd /c rmdir /s /q ' . escapeshellarg( $site_path ) );
+			$norm_site = str_replace( '/', DIRECTORY_SEPARATOR, $site_path );
+			@exec( 'cmd /c rmdir ' . escapeshellarg( $norm_site . '\wp-includes' ) . ' 2>nul' );
+			@exec( 'cmd /c rmdir ' . escapeshellarg( $norm_site . '\wp-admin' ) . ' 2>nul' );
+			@exec( 'cmd /c rmdir ' . escapeshellarg( $norm_site . '\wp-content\plugins\elementor' ) . ' 2>nul' );
+			@exec( 'cmd /c rmdir /s /q ' . escapeshellarg( $norm_site . '\wp-content\plugins\mcp-adapter' ) . ' 2>nul' );
+			@exec( 'cmd /c rmdir /s /q ' . escapeshellarg( $norm_site ) . ' 2>nul' );
 		} else {
 			@unlink( $site_path . '/wp-includes' );
 			@unlink( $site_path . '/wp-admin' );
@@ -394,8 +443,10 @@ run_test( 'Test 3: Authentic WordPress clean installation (Site A: with MCP Adap
 		assert_equals( $target_version, $verify_data['version'] ?? '' );
 		assert_equals( 4, $verify_data['safety_tables'] ?? 0 );
 		assert_true( true === ( $verify_data['abilities_registered'] ?? false ), 'Abilities API must be registered' );
+		assert_true( true === ( $verify_data['ability_executable'] ?? false ), 'Representative ability full-elementor-mcp/list-widgets must execute cleanly' );
 		assert_true( true === ( $verify_data['mcp_server_registered'] ?? false ), 'MCP Adapter server registration must succeed' );
 		assert_true( true === ( $verify_data['adapter_active'] ?? false ), 'MCP Adapter must be active' );
+		assert_true( true === ( $verify_data['adapter_has_api'] ?? false ), 'Official MCP Adapter must implement create_server' );
 		assert_equals( 'healthy', $verify_data['diag_status'] ?? '' );
 		assert_true( true === ( $verify_data['transport_available'] ?? false ) );
 	} finally {
@@ -408,7 +459,7 @@ run_test( 'Test 3: Authentic WordPress clean installation (Site A: with MCP Adap
 // ---------------------------------------------------------------------
 
 run_test( 'Test 4: Authentic WordPress clean installation (Site B: NO MCP Adapter) activates gracefully with Abilities', function () use ( $zip_file, $worker_file, $target_version ) {
-	$clean_site_info = create_test_wordpress_site( 'safe_mcp_clean_site_b', false );
+	$clean_site_info = create_test_wordpress_site( 'safe_mcp_clean_site_b', 'none' );
 	try {
 		$clean_site = $clean_site_info['site_path'];
 
@@ -449,8 +500,10 @@ run_test( 'Test 4: Authentic WordPress clean installation (Site B: NO MCP Adapte
 		assert_equals( $target_version, $verify_data['version'] ?? '' );
 		assert_equals( 4, $verify_data['safety_tables'] ?? 0, 'Safety tables must be created' );
 		assert_true( true === ( $verify_data['abilities_registered'] ?? false ), 'Abilities API must be registered even without MCP Adapter' );
+		assert_true( true === ( $verify_data['ability_executable'] ?? false ), 'Representative ability full-elementor-mcp/list-widgets must execute cleanly without MCP Adapter' );
 		assert_false( true === ( $verify_data['mcp_server_registered'] ?? false ), 'MCP server must NOT be registered when adapter is missing' );
 		assert_false( true === ( $verify_data['adapter_active'] ?? false ), 'MCP Adapter must be inactive' );
+		assert_false( true === ( $verify_data['adapter_has_api'] ?? false ) );
 		assert_equals( 'degraded', $verify_data['diag_status'] ?? '', 'Status should be degraded (transport unavailable)' );
 		assert_false( true === ( $verify_data['transport_available'] ?? false ) );
 		assert_true( ! empty( $verify_data['transport_warning'] ), 'Non-fatal transport warning must be produced' );
@@ -460,10 +513,91 @@ run_test( 'Test 4: Authentic WordPress clean installation (Site B: NO MCP Adapte
 } );
 
 // ---------------------------------------------------------------------
-// TEST 5: Authentic Frozen Phase 6 Runtime & Package Upgrade (Database-Isolated)
+// TEST 5: Authentic WordPress Clean Installation (Site C: ACTIVE but API-INCOMPATIBLE MCP Adapter)
 // ---------------------------------------------------------------------
 
-run_test( 'Test 5: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8) in isolated database', function () use ( $zip_file, $worker_file, $target_version ) {
+run_test( 'Test 5: Authentic WordPress clean installation (Site C: ACTIVE but API-INCOMPATIBLE MCP Adapter) activates gracefully with degraded transport diagnostics', function () use ( $zip_file, $worker_file, $target_version ) {
+	$clean_site_info = create_test_wordpress_site( 'safe_mcp_clean_site_c', 'incompatible' );
+	try {
+		$clean_site = $clean_site_info['site_path'];
+
+		// 1. Explicitly assert pre-installation clean state and that fake MCP adapter is active:
+		$pre_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
+				   ' --action=assert-pre-install --wp-path=' . escapeshellarg( $clean_site );
+		exec( $pre_cmd, $pre_out, $pre_code );
+		assert_equals( 0, $pre_code, 'Pre-install clean state assertion failed: ' . implode( "\n", $pre_out ) );
+
+		$pre_data = extract_last_json( $pre_out );
+		assert_true( is_array( $pre_data ) && true === ( $pre_data['success'] ?? false ), 'Pre-install data invalid: ' . implode( "\n", $pre_out ) );
+		assert_true( true === ( $pre_data['adapter_active'] ?? false ), 'Fake MCP Adapter fixture must be active before Safe Elementor MCP install' );
+
+		// 2. Install exact built ZIP through user-facing WordPress installation path:
+		$has_wp_cli = false;
+		exec( 'wp --version 2>' . ( PHP_OS_FAMILY === 'Windows' ? 'nul' : '/dev/null' ), $wp_out, $wp_exit );
+		if ( 0 === $wp_exit ) {
+			$has_wp_cli = true;
+		}
+
+		if ( $has_wp_cli ) {
+			$cmd = 'wp plugin install ' . escapeshellarg( $zip_file ) . ' --activate --path=' . escapeshellarg( $clean_site );
+			exec( $cmd, $install_out, $install_code );
+			assert_equals( 0, $install_code, 'WP-CLI plugin install --activate failed: ' . implode( "\n", $install_out ) );
+		} else {
+			$cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
+				   ' --action=clean-install --wp-path=' . escapeshellarg( $clean_site ) .
+				   ' --zip-file=' . escapeshellarg( $zip_file );
+			exec( $cmd, $install_out, $install_code );
+			assert_equals( 0, $install_code, 'Plugin_Upgrader::install failed: ' . implode( "\n", $install_out ) );
+		}
+
+		// 3. Verify in fresh child PHP process with incompatible MCP Adapter:
+		$verify_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
+					  ' --action=verify-clean-install --wp-path=' . escapeshellarg( $clean_site ) .
+					  ' --expected-version=' . escapeshellarg( $target_version );
+		exec( $verify_cmd, $verify_out, $verify_code );
+		assert_equals( 0, $verify_code, 'Clean install verification with incompatible MCP Adapter failed: ' . implode( "\n", $verify_out ) );
+
+		$verify_data = extract_last_json( $verify_out );
+		assert_true( is_array( $verify_data ) && true === ( $verify_data['success'] ?? false ), 'Verification payload invalid: ' . implode( "\n", $verify_out ) );
+		assert_equals( $target_version, $verify_data['version'] ?? '' );
+		assert_equals( 4, $verify_data['safety_tables'] ?? 0, 'Safety tables must be created' );
+		assert_true( true === ( $verify_data['abilities_registered'] ?? false ), 'Abilities API must be registered even with incompatible adapter' );
+		assert_true( true === ( $verify_data['ability_executable'] ?? false ), 'Representative ability full-elementor-mcp/list-widgets must execute cleanly' );
+
+		// 4. Verify MCP Server is NOT registered and no call to create_server was made
+		assert_false( true === ( $verify_data['mcp_server_registered'] ?? false ), 'MCP server must NOT be registered when adapter lacks create_server API' );
+		assert_true( true === ( $verify_data['adapter_active'] ?? false ), 'Incompatible MCP Adapter must be active' );
+		assert_false( true === ( $verify_data['adapter_has_api'] ?? false ), 'Incompatible MCP Adapter must NOT expose create_server API' );
+
+		// 5. Compatibility diagnostics assertions:
+		$adapter_check = $verify_data['adapter_check'] ?? array();
+		assert_true( true === ( $adapter_check['loaded'] ?? false ), 'check_mcp_adapter: loaded must be true' );
+		assert_true( true === ( $adapter_check['active'] ?? false ), 'check_mcp_adapter: active must be true' );
+		assert_false( true === ( $adapter_check['has_api'] ?? false ), 'check_mcp_adapter: has_api must be false' );
+		assert_false( true === ( $adapter_check['supported'] ?? false ), 'check_mcp_adapter: supported must be false' );
+
+		// 6. get_transport_status() assertions:
+		assert_false( true === ( $verify_data['transport_available'] ?? false ), 'transport_available must be false' );
+		assert_equals( 'incompatible_api', $verify_data['transport_status'] ?? '', 'transport_status must be incompatible_api' );
+		assert_true( ! empty( $verify_data['transport_warning'] ), 'transport_warning must not be empty' );
+		assert_true( false !== stripos( (string) $verify_data['transport_warning'], 'create_server' ), 'transport_warning must mention create_server API' );
+
+		// 7. get_system_diagnostics() status:
+		assert_equals( 'degraded', $verify_data['diag_status'] ?? '', 'Overall status must be degraded, not incompatible' );
+
+		// 8. full_elementor_mcp_check_dependencies() must return true (non-blocking):
+		assert_true( true === ( $verify_data['check_dependencies'] ?? false ), 'check_dependencies must return true' );
+		assert_true( empty( $verify_data['blocking_requirements'] ), 'blocking_requirements must be empty' );
+	} finally {
+		destroy_test_wordpress_site( $clean_site_info );
+	}
+} );
+
+// ---------------------------------------------------------------------
+// TEST 6: Authentic Frozen Phase 6 Runtime & Package Upgrade (Database-Isolated)
+// ---------------------------------------------------------------------
+
+run_test( 'Test 6: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8) in isolated database', function () use ( $zip_file, $worker_file, $target_version ) {
 	$upgrade_site_info = create_test_wordpress_site( 'safe_mcp_p6_upgrade' );
 	try {
 		$upgrade_site  = $upgrade_site_info['site_path'];

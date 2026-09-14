@@ -156,7 +156,10 @@ if ( 'assert-pre-install' === $action ) {
 		exit( 1 );
 	}
 
-	echo json_encode( array( 'success' => true ) );
+	echo json_encode( array(
+		'success'        => true,
+		'adapter_active' => is_plugin_active( 'mcp-adapter/mcp-adapter.php' ),
+	) );
 	exit( 0 );
 }
 
@@ -250,6 +253,9 @@ if ( 'verify-clean-install' === $action ) {
 		exit( 1 );
 	}
 
+	// Set current user to admin (ID 1) so ability permission callback current_user_can('edit_posts') passes
+	wp_set_current_user( 1 );
+
 	// Verify Abilities API initialization and registration of representative ability
 	do_action( 'wp_abilities_api_categories_init' );
 	do_action( 'wp_abilities_api_init' );
@@ -260,9 +266,18 @@ if ( 'verify-clean-install' === $action ) {
 		exit( 1 );
 	}
 
+	$ability_executable = false;
+	if ( null !== $sample_ability && method_exists( $sample_ability, 'execute' ) ) {
+		$exec_res = $sample_ability->execute( array() );
+		if ( ! is_wp_error( $exec_res ) && isset( $exec_res['widgets'] ) ) {
+			$ability_executable = true;
+		}
+	}
+
 	// Verify MCP Adapter initialization and server registration (if adapter is active)
 	$has_adapter = is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) && ( class_exists( '\WP\MCP\Core\McpAdapter' ) || class_exists( 'WP_MCP_Adapter' ) );
 	$server_registered = false;
+	$adapter_has_api   = false;
 
 	if ( $has_adapter ) {
 		$adapter_instance = null;
@@ -275,25 +290,40 @@ if ( 'verify-clean-install' === $action ) {
 		}
 
 		if ( is_object( $adapter_instance ) ) {
+			$adapter_has_api = method_exists( $adapter_instance, 'create_server' );
 			do_action( 'mcp_adapter_init', $adapter_instance );
-			$server_registered = true;
+
+			if ( $adapter_has_api ) {
+				$server_registered = true;
+			} elseif ( isset( \WP\MCP\Core\McpAdapter::$create_server_called ) ) {
+				$server_registered = (bool) \WP\MCP\Core\McpAdapter::$create_server_called;
+			}
 		}
 	}
 
 	require_once $installed_dir . DIRECTORY_SEPARATOR . 'includes/class-compatibility-checker.php';
-	$diag = \Full_Elementor_MCP_Compatibility_Checker::get_system_diagnostics();
+	$diag             = \Full_Elementor_MCP_Compatibility_Checker::get_system_diagnostics();
 	$transport_status = \Full_Elementor_MCP_Compatibility_Checker::get_transport_status();
+	$adapter_check    = \Full_Elementor_MCP_Compatibility_Checker::check_mcp_adapter();
+	$blocking_reqs    = \Full_Elementor_MCP_Compatibility_Checker::get_blocking_requirements();
+	$deps_ok          = function_exists( 'full_elementor_mcp_check_dependencies' ) ? full_elementor_mcp_check_dependencies() : true;
 
 	echo json_encode( array(
-		'success'                => true,
-		'version'                => $data['Version'],
-		'safety_tables'          => count( $safety_tables ),
-		'abilities_registered'   => true,
-		'mcp_server_registered'  => $server_registered,
-		'adapter_active'         => $has_adapter,
-		'diag_status'            => $diag['status'],
-		'transport_available'    => $transport_status['available'],
-		'transport_warning'      => $transport_status['warning'],
+		'success'               => true,
+		'version'               => $data['Version'],
+		'safety_tables'         => count( $safety_tables ),
+		'abilities_registered'  => true,
+		'ability_executable'    => $ability_executable,
+		'mcp_server_registered' => $server_registered,
+		'adapter_active'        => $has_adapter,
+		'adapter_has_api'       => $adapter_has_api,
+		'adapter_check'         => $adapter_check,
+		'blocking_requirements' => $blocking_reqs,
+		'check_dependencies'    => $deps_ok,
+		'diag_status'           => $diag['status'],
+		'transport_available'   => $transport_status['available'],
+		'transport_status'      => $transport_status['status'],
+		'transport_warning'     => $transport_status['warning'],
 	) );
 	exit( 0 );
 }
