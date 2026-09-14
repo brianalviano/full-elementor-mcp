@@ -109,7 +109,45 @@ class Full_Elementor_MCP_Compatibility_Checker {
 	 * @return array<string, mixed>
 	 */
 	public static function check_mcp_adapter(): array {
-		$loaded = class_exists( '\WP\MCP\Core\McpAdapter' ) || class_exists( 'WP_MCP_Adapter' );
+		$known_plugin_files = array(
+			'mcp-adapter/mcp-adapter.php',
+			'wordpress-mcp-adapter/mcp-adapter.php',
+			'wordpress-mcp/mcp-adapter.php',
+		);
+
+		$plugin_installed = false;
+		$plugin_active    = false;
+
+		if ( ! function_exists( 'is_plugin_active' ) && defined( 'ABSPATH' ) && file_exists( ABSPATH . 'wp-admin/includes/plugin.php' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		if ( function_exists( 'is_plugin_active' ) ) {
+			foreach ( $known_plugin_files as $file ) {
+				if ( defined( 'WP_PLUGIN_DIR' ) && file_exists( WP_PLUGIN_DIR . '/' . $file ) ) {
+					$plugin_installed = true;
+					if ( is_plugin_active( $file ) ) {
+						$plugin_active = true;
+						break;
+					}
+				}
+			}
+		} elseif ( function_exists( 'get_option' ) ) {
+			$active_plugins = (array) get_option( 'active_plugins', array() );
+			foreach ( $known_plugin_files as $file ) {
+				if ( defined( 'WP_PLUGIN_DIR' ) && file_exists( WP_PLUGIN_DIR . '/' . $file ) ) {
+					$plugin_installed = true;
+					if ( in_array( $file, $active_plugins, true ) ) {
+						$plugin_active = true;
+						break;
+					}
+				}
+			}
+		}
+
+		$class_loaded = class_exists( '\WP\MCP\Core\McpAdapter' ) || class_exists( 'WP_MCP_Adapter' );
+		$loaded       = $plugin_installed ? $plugin_active : $class_loaded;
+
 		$version = 'unknown';
 		if ( defined( '\WP\MCP\Core\McpAdapter::VERSION' ) ) {
 			$version = constant( '\WP\MCP\Core\McpAdapter::VERSION' );
@@ -121,7 +159,7 @@ class Full_Elementor_MCP_Compatibility_Checker {
 
 		$has_api = false;
 		if ( $loaded ) {
-			$cls = class_exists( '\WP\MCP\Core\McpAdapter' ) ? '\WP\MCP\Core\McpAdapter' : 'WP_MCP_Adapter';
+			$cls     = class_exists( '\WP\MCP\Core\McpAdapter' ) ? '\WP\MCP\Core\McpAdapter' : 'WP_MCP_Adapter';
 			$has_api = method_exists( $cls, 'create_server' );
 		}
 
@@ -130,7 +168,9 @@ class Full_Elementor_MCP_Compatibility_Checker {
 
 		$message = 'WordPress MCP Adapter detected and compatible.';
 		if ( ! $loaded ) {
-			$message = 'WordPress MCP Adapter plugin not loaded.';
+			$message = ( $plugin_installed && ! $plugin_active )
+				? 'WordPress MCP Adapter is installed but inactive.'
+				: 'WordPress MCP Adapter plugin not loaded.';
 		} elseif ( ! $has_api ) {
 			$message = 'WordPress MCP Adapter is loaded but does not implement required create_server() API.';
 		} elseif ( ! $version_ok ) {
@@ -139,7 +179,7 @@ class Full_Elementor_MCP_Compatibility_Checker {
 
 		return array(
 			'loaded'        => (bool) $loaded,
-			'installed'     => (bool) $loaded,
+			'installed'     => (bool) ( $plugin_installed || $class_loaded ),
 			'active'        => (bool) $loaded,
 			'version'       => (string) $version,
 			'supported'     => (bool) $supported,
@@ -283,6 +323,117 @@ class Full_Elementor_MCP_Compatibility_Checker {
 	}
 
 	/**
+	 * Returns list of unmet hard runtime requirements that block plugin initialization.
+	 *
+	 * Hard requirements:
+	 * - PHP >= 8.0
+	 * - WordPress >= 6.9
+	 * - Elementor loaded and >= 3.20.0
+	 * - WordPress Abilities API available
+	 * - Checkpoint AEAD crypto backend available
+	 *
+	 * Note: WordPress MCP Adapter is NOT a blocking requirement.
+	 *
+	 * @return string[]
+	 */
+	public static function get_blocking_requirements(): array {
+		$blocking = array();
+
+		$php = self::check_php();
+		if ( ! $php['supported'] ) {
+			$blocking[] = sprintf( 'PHP (>= %s, current: %s)', self::MIN_PHP_VERSION, $php['current'] );
+		}
+
+		$wp = self::check_wordpress();
+		if ( ! $wp['supported'] ) {
+			$blocking[] = sprintf( 'WordPress (>= %s, current: %s)', self::MIN_WP_VERSION, $wp['current'] );
+		}
+
+		$elem = self::check_elementor();
+		if ( ! $elem['loaded'] ) {
+			$blocking[] = sprintf( 'Elementor (>= %s)', self::MIN_ELEMENTOR_VERSION );
+		} elseif ( ! $elem['supported'] ) {
+			$blocking[] = sprintf( 'Elementor (>= %s) (current version %s is unsupported)', self::MIN_ELEMENTOR_VERSION, $elem['version'] );
+		}
+
+		$abi = self::check_abilities_api();
+		if ( ! $abi['available'] ) {
+			$blocking[] = 'WordPress Abilities API (WordPress 6.9+ or Abilities API feature plugin)';
+		}
+
+		$crypto = self::check_crypto();
+		if ( ! $crypto['supported'] ) {
+			$blocking[] = 'PHP sodium extension or openssl extension with AES-256-GCM (required for encrypted checkpoints)';
+		}
+
+		return $blocking;
+	}
+
+	/**
+	 * Returns true if all hard blocking runtime requirements are satisfied.
+	 *
+	 * @return bool
+	 */
+	public static function is_runtime_compatible(): bool {
+		return empty( self::get_blocking_requirements() );
+	}
+
+	/**
+	 * Returns structured status of the MCP transport layer (WordPress MCP Adapter).
+	 *
+	 * @return array<string, mixed>
+	 */
+	public static function get_transport_status(): array {
+		$adapter   = self::check_mcp_adapter();
+		$available = $adapter['loaded'] && $adapter['has_api'] && $adapter['supported'];
+		$status    = 'available';
+		$warning   = null;
+
+		if ( ! $adapter['loaded'] ) {
+			$status  = ( ! empty( $adapter['installed'] ) && empty( $adapter['active'] ) ) ? 'inactive' : 'missing';
+			$warning = __( 'Safe Elementor MCP is active, but WordPress MCP Adapter is not installed or active. Elementor abilities remain available through the WordPress Abilities API, but MCP transport is unavailable until WordPress MCP Adapter is installed and activated.', 'full-elementor-mcp' );
+		} elseif ( ! $adapter['has_api'] ) {
+			$status  = 'incompatible_api';
+			$warning = __( 'Safe Elementor MCP is active, but WordPress MCP Adapter is incompatible (missing required create_server API). Elementor abilities remain available through the WordPress Abilities API, but MCP transport is unavailable.', 'full-elementor-mcp' );
+		} elseif ( ! $adapter['supported'] ) {
+			$status  = 'unsupported_version';
+			$warning = sprintf(
+				/* translators: 1: required version, 2: current version */
+				__( 'Safe Elementor MCP is active, but WordPress MCP Adapter version %2$s is unsupported. Minimum required is %1$s. Elementor abilities remain available through the WordPress Abilities API, but MCP transport is unavailable.', 'full-elementor-mcp' ),
+				self::MIN_MCP_ADAPTER_VER,
+				$adapter['version']
+			);
+		}
+
+		return array(
+			'available' => (bool) $available,
+			'status'    => $status,
+			'adapter'   => $adapter,
+			'warning'   => $warning,
+		);
+	}
+
+	/**
+	 * Returns non-fatal admin warning text if MCP transport is unavailable, or null if transport is available.
+	 *
+	 * @return string|null
+	 */
+	public static function get_transport_warning(): ?string {
+		$transport = self::get_transport_status();
+		return $transport['warning'];
+	}
+
+	/**
+	 * Returns true if WordPress MCP Adapter is available and compatible for transport registration.
+	 *
+	 * @return bool
+	 */
+	public static function is_mcp_adapter_available(): bool {
+		$transport = self::get_transport_status();
+		return $transport['available'];
+	}
+
+	/**
 	 * Returns list of missing human-readable dependency labels for admin notices.
 	 *
 	 * @return string[]
@@ -332,29 +483,34 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		$abi       = self::check_abilities_api();
 		$crypto    = self::check_crypto();
 		$missing   = self::get_missing_dependencies();
+		$blocking  = self::get_blocking_requirements();
+		$transport = self::get_transport_status();
 
 		$status = 'healthy';
 		if ( ! $php['supported'] || ! $wp['supported'] || ! $crypto['supported'] ) {
 			$status = 'incompatible';
-		} elseif ( ! empty( $missing ) || ( $elem['loaded'] && ! $elem['supported'] ) ) {
+		} elseif ( ! empty( $blocking ) || ! $transport['available'] || ( $elem['loaded'] && ! $elem['supported'] ) ) {
 			$status = 'degraded';
 		}
 
 		return array(
-			'product'      => 'Safe Elementor MCP',
-			'version'      => defined( 'FULL_ELEMENTOR_MCP_VERSION' ) ? constant( 'FULL_ELEMENTOR_MCP_VERSION' ) : '1.8.0',
-			'status'       => $status,
+			'product'          => 'Safe Elementor MCP',
+			'version'          => defined( 'FULL_ELEMENTOR_MCP_VERSION' ) ? constant( 'FULL_ELEMENTOR_MCP_VERSION' ) : '1.8.1',
+			'status'           => $status,
 			'php_compatible'   => $php['supported'],
 			'wp_compatible'    => $wp['supported'],
 			'crypto_available' => $crypto['supported'],
-			'php'          => $php,
-			'wordpress'    => $wp,
-			'elementor'    => $elem,
-			'mcp_adapter'  => $mcp,
-			'abilities_api'=> $abi,
-			'crypto'       => $crypto,
-			'missing'      => $missing,
-			'multisite'    => function_exists( 'is_multisite' ) && is_multisite(),
+			'transport_ready'  => $transport['available'],
+			'php'              => $php,
+			'wordpress'        => $wp,
+			'elementor'        => $elem,
+			'mcp_adapter'      => $mcp,
+			'transport_status' => $transport,
+			'abilities_api'    => $abi,
+			'crypto'           => $crypto,
+			'missing'          => $missing,
+			'blocking'         => $blocking,
+			'multisite'        => function_exists( 'is_multisite' ) && is_multisite(),
 		);
 	}
 
@@ -367,3 +523,4 @@ class Full_Elementor_MCP_Compatibility_Checker {
 		return self::get_system_diagnostics();
 	}
 }
+

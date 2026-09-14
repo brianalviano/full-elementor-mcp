@@ -14,15 +14,13 @@
  * 8. Full_Elementor_MCP_Database_Installer::verify_schema() returns true.
  * 9. Non-destructive deactivation lifecycle via deactivate_plugins() (tables and rows preserved).
  * 10. Schema migration on real MySQL (maybe_upgrade).
- * 11. Runtime safety initialization via plugins_loaded (mutation registry, restore strategy).
- * 12. Real Abilities API registration (wp_abilities_api_init).
- * 13. Real MCP Adapter server registration via mcp_adapter_init.
- * 14. Execution of representative readonly ability.
- * 15. Execution of representative normal mutation ability.
- * 16. Dependency diagnostics (WP, Elementor, MCP Adapter, PHP).
- * 17. Admin Safety control plane & AJAX registrations.
- * 18. Elementor compatibility tests (3.20+ minimum, 4.x Atomic, missing Pro safe degradation).
- * 19. Exact safety table count on real MySQL.
+ * 11. Representative readonly ability execution.
+ * 12. Representative normal mutation ability execution.
+ * 13. Dependency diagnostics & Elementor compatibility.
+ * 14. Exact safety table count on real MySQL.
+ * 15. Optional MCP Adapter transport behavior (inactive adapter non-blocking, warning issued).
+ * 16. Incompatible MCP Adapter API contract handling (defensive no-op, no fatal error).
+ * 17. Dependency rejection matrix (fail-closed on missing hard requirements).
  *
  * Usage: php tests/test-wordpress-integration.php
  *
@@ -394,6 +392,89 @@ if ( ! $pro_active ) {
 echo "\n--- Test 14: Exact Safety Table Count on Real MySQL ---\n";
 $safety_tables = $wpdb->get_col( "SHOW TABLES LIKE '{$wpdb->prefix}elementor_mcp_%'" );
 assert_true( 'Exactly four safety tables exist (zero phantom tables)', 4 === count( $safety_tables ), 'Found: ' . implode( ', ', $safety_tables ) );
+
+// ---------------------------------------------------------------------
+// TEST 15: Optional MCP Adapter Transport Behavior (Inactive Adapter)
+// ---------------------------------------------------------------------
+echo "\n--- Test 15: Optional MCP Adapter Transport Behavior ---\n";
+// Deactivate the MCP Adapter to simulate a WordPress site without the transport plugin active
+deactivate_plugins( 'mcp-adapter/mcp-adapter.php' );
+assert_true( 'MCP Adapter deactivated for transport independence testing', ! is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) );
+
+// Safe Elementor MCP must remain active in WordPress
+assert_true( 'Safe Elementor MCP remains active when MCP Adapter is inactive', is_plugin_active( 'full-elementor-mcp/full-elementor-mcp.php' ) );
+
+// Runtime compatibility must return true because MCP Adapter is optional
+assert_true( 'is_runtime_compatible() returns true without MCP Adapter', Full_Elementor_MCP_Compatibility_Checker::is_runtime_compatible() );
+assert_true( 'get_blocking_requirements() is empty without MCP Adapter', empty( Full_Elementor_MCP_Compatibility_Checker::get_blocking_requirements() ) );
+
+// Transport status should reflect inactive state and provide warning
+$transport_status = Full_Elementor_MCP_Compatibility_Checker::get_transport_status();
+assert_true( 'Transport status reports inactive', 'inactive' === $transport_status['status'] );
+assert_true( 'Transport available is false', false === $transport_status['available'] );
+$transport_warning = Full_Elementor_MCP_Compatibility_Checker::get_transport_warning();
+assert_true( 'get_transport_warning() returns informative warning', ! empty( $transport_warning ) && false !== stripos( $transport_warning, 'WordPress MCP Adapter' ) );
+
+// full_elementor_mcp_check_dependencies() must return true (non-blocking)
+assert_true( 'full_elementor_mcp_check_dependencies() returns true without MCP Adapter', full_elementor_mcp_check_dependencies() );
+
+// Abilities API remains registered and operational
+$read_ability_without_adapter = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'full-elementor-mcp/list-widgets' ) : null;
+assert_true( 'Abilities remain registered when MCP Adapter is inactive', null !== $read_ability_without_adapter );
+if ( null !== $read_ability_without_adapter && method_exists( $read_ability_without_adapter, 'execute' ) ) {
+	$res_without_adapter = $read_ability_without_adapter->execute( array() );
+	assert_true( 'Ability executes cleanly when MCP Adapter is inactive', ! is_wp_error( $res_without_adapter ) && isset( $res_without_adapter['widgets'] ) );
+}
+
+// Reactivate MCP Adapter
+activate_plugin( 'mcp-adapter/mcp-adapter.php' );
+assert_true( 'MCP Adapter reactivated', is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) );
+
+// ---------------------------------------------------------------------
+// TEST 16: Incompatible MCP Adapter API Contract Handling
+// ---------------------------------------------------------------------
+echo "\n--- Test 16: Incompatible MCP Adapter API Contract Handling ---\n";
+// Pass incompatible mock/test-double without create_server method
+$incompatible_adapter = new \stdClass();
+$plugin               = Full_Elementor_MCP_Plugin::instance();
+
+// Must not trigger fatal error or exception
+$caught_exception = false;
+try {
+	$plugin->register_mcp_server( $incompatible_adapter );
+} catch ( \Throwable $e ) {
+	$caught_exception = true;
+}
+assert_true( 'register_mcp_server handles incompatible adapter object gracefully without error', ! $caught_exception );
+
+// Also test mcp_adapter_init action with incompatible payload
+$action_exception = false;
+try {
+	do_action( 'mcp_adapter_init', new \stdClass() );
+} catch ( \Throwable $e ) {
+	$action_exception = true;
+}
+assert_true( 'do_action(mcp_adapter_init) handles invalid argument without fatal error', ! $action_exception );
+
+// ---------------------------------------------------------------------
+// TEST 17: Dependency Rejection Matrix (Fail-Closed on Missing Hard Requirements)
+// ---------------------------------------------------------------------
+echo "\n--- Test 17: Dependency Rejection Matrix ---\n";
+
+// 17a: WordPress version < 6.9
+$orig_wp_version       = $GLOBALS['wp_version'];
+$GLOBALS['wp_version'] = '6.8.0';
+$wp_check              = Full_Elementor_MCP_Compatibility_Checker::check_wordpress();
+assert_true( 'check_wordpress rejects WP 6.8.0', false === $wp_check['supported'] );
+$wp_blocking = Full_Elementor_MCP_Compatibility_Checker::get_blocking_requirements();
+assert_true( 'get_blocking_requirements captures unsupported WordPress', ! empty( array_filter( $wp_blocking, fn( $b ) => false !== strpos( $b, 'WordPress' ) ) ) );
+$wp_prereq = Full_Elementor_MCP_Compatibility_Checker::check_activation_prerequisites();
+assert_true( 'check_activation_prerequisites returns unsupported_wordpress_version WP_Error', is_wp_error( $wp_prereq ) && 'unsupported_wordpress_version' === $wp_prereq->get_error_code() );
+$GLOBALS['wp_version'] = $orig_wp_version;
+
+// 17b: Current environment satisfies all hard requirements
+assert_true( 'Current environment has zero blocking requirements', empty( Full_Elementor_MCP_Compatibility_Checker::get_blocking_requirements() ) );
+assert_true( 'check_activation_prerequisites succeeds on current environment', true === Full_Elementor_MCP_Compatibility_Checker::check_activation_prerequisites() );
 
 // ---------------------------------------------------------------------
 // SUMMARY

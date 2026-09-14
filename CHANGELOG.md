@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.1] - 2026-09-14
+
+### Changed
+- **Optional MCP Adapter Dependency**: WordPress MCP Adapter is now classified as an optional transport dependency rather than a plugin-blocking hard requirement. Safe Elementor MCP boots, activates, initializes the safety database, renders the admin UI, and registers WordPress Abilities even if the adapter is absent.
+- **Graceful Transport Fallback**: When WordPress MCP Adapter is absent, inactive, or incompatible, Safe Elementor MCP displays an informative non-fatal warning notice rather than halting plugin execution. Elementor abilities remain accessible through the WordPress Abilities API.
+- **Streamlined Release Packaging**: `scripts/build-release.php` and CI/CD release workflows now generate and upload strictly the official versioned plugin package (`safe-elementor-mcp-X.Y.Z.zip`), eliminating duplicate unversioned archive aliases.
+
+### Added
+- **Dependency Diagnostics**: `Full_Elementor_MCP_Compatibility_Checker::get_blocking_requirements()` and `get_transport_status()` for structured evaluation of hard prerequisites versus optional transport availability.
+- **Dependency-Negative & Degraded Integration Tests**: Authentic database-isolated lifecycle and integration coverage verifying clean installation and runtime behavior without WordPress MCP Adapter, with inactive adapter, and with incompatible API contracts.
+
+---
+
 ## [1.8.0] - 2026-09-12
 
 ### Added

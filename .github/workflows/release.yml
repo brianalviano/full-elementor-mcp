@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 1.8.0 or 1.8.0-rc1)'
+        description: 'Release version (e.g. 1.8.1 or 1.8.1-rc1)'
         required: true
-        default: '1.8.0'
+        default: '1.8.1'
 
 jobs:
   verify-and-release:
@@ -133,9 +133,11 @@ jobs:
 
       - name: Verify Release Package & Single Root full-elementor-mcp/
         run: |
+          TARGET_VER="${{ steps.verify_ver.outputs.base_version }}"
           test -f dist/manifest.json || { echo "Missing manifest.json"; exit 1; }
-          test -f dist/safe-elementor-mcp-1.8.0.zip || { echo "Missing ZIP"; exit 1; }
-          test -f dist/safe-elementor-mcp-1.8.0.zip.sha256 || { echo "Missing SHA256"; exit 1; }
+          test -f "dist/safe-elementor-mcp-${TARGET_VER}.zip" || { echo "Missing ZIP for ${TARGET_VER}"; exit 1; }
+          test -f "dist/safe-elementor-mcp-${TARGET_VER}.zip.sha256" || { echo "Missing SHA256 for ${TARGET_VER}"; exit 1; }
+          test ! -f dist/safe-elementor-mcp.zip || { echo "Forbidden unversioned alias found"; exit 1; }
 
       - name: Execute Pre-Phase 7 Upgrade Smoke Test from Phase 6 Baseline
         env:
@@ -155,7 +157,7 @@ jobs:
           draft: true
           prerelease: ${{ steps.verify_ver.outputs.is_prerelease == 'true' }}
           files: |
-            dist/*.zip
-            dist/*.sha256
+            dist/safe-elementor-mcp-*.zip
+            dist/safe-elementor-mcp-*.zip.sha256
             dist/manifest.json
           generate_release_notes: true

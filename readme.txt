@@ -4,7 +4,7 @@ Tags: elementor, mcp, ai, model-context-protocol, page-builder, claude, ai-agent
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.0
-Stable tag: 1.8.0
+Stable tag: 1.8.1
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -73,7 +73,7 @@ Drop one into your client of choice and let the agent build the page through the
 
 1. Upload the `full-elementor-mcp/` folder to `/wp-content/plugins/`, or install via the WP Admin Plugin uploader.
 2. Activate **Safe Elementor MCP** through the **Plugins** menu.
-3. Confirm **Elementor**, the **WordPress MCP Adapter** and (optionally) **Elementor Pro** are active.
+3. Confirm **Elementor** is active. Optionally activate the **WordPress MCP Adapter** (for MCP transport) and **Elementor Pro**.
 4. Visit **Settings → Safe Elementor MCP → Connection** for the MCP endpoint URL and a copy-paste config for your MCP client.
 
 == MCP endpoint ==
@@ -127,6 +127,13 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 
 == Changelog ==
 
+= 1.8.1 =
+* WordPress MCP Adapter is now an optional transport dependency rather than a plugin-blocking requirement.
+* Safe Elementor MCP and its WordPress Abilities boot, activate, and function when WordPress MCP Adapter is absent, displaying a non-fatal warning.
+* Graceful handling for inactive, unsupported, or incompatible MCP Adapter API contracts without fatal errors.
+* Release packaging publishes only the official versioned plugin ZIP, eliminating duplicate unversioned release archives.
+* Expanded test coverage for dependency-negative and transport-degraded scenarios.
+
 = 1.8.0 =
 * Major release: Safety layer with WAL mutations, encrypted checkpoints, lock fencing, audit logging, and Admin recovery console.
 * Pre-flight compatibility diagnostics with strict activation/deactivation guards.
@@ -167,6 +174,9 @@ No Composer dependencies, no build step. Drop the folder into `wp-content/plugin
 * Initial release with the legacy Elementor 3.x tool set.
 
 == Upgrade Notice ==
+
+= 1.8.1 =
+Corrective update classifying WordPress MCP Adapter as an optional transport dependency, adding graceful adapter fallback warnings, and streamlining release packaging. Fully backward compatible.
 
 = 1.8.0 =
 Safety update adding encrypted checkpoints, lock fencing, WAL mutation logging, recovery tools, and compatibility checks. Full backward compatibility with prior tool abilities.

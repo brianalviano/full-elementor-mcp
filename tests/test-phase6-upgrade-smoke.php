@@ -38,7 +38,10 @@ if ( ! defined( 'OBJECT' ) ) {
 }
 
 $repo_root = dirname( __DIR__ );
-$zip_file  = $repo_root . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . 'safe-elementor-mcp-1.8.0.zip';
+$main_content = (string) file_get_contents( $repo_root . '/full-elementor-mcp.php' );
+preg_match( "/define\(\s*'FULL_ELEMENTOR_MCP_VERSION',\s*'([^']+)'\s*\);/", $main_content, $m_ver );
+$current_ver = $m_ver[1] ?? '1.8.1';
+$zip_file  = $repo_root . DIRECTORY_SEPARATOR . 'dist' . DIRECTORY_SEPARATOR . "safe-elementor-mcp-{$current_ver}.zip";
 
 if ( ! file_exists( $zip_file ) ) {
 	echo "Building release package...\n";

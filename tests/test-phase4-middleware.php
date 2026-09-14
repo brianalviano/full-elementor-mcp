@@ -31,7 +31,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 if ( ! defined( 'FULL_ELEMENTOR_MCP_VERSION' ) ) {
-	define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.0' );
+	$main_file = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
+	if ( file_exists( $main_file ) && preg_match( "/define\(\s*'FULL_ELEMENTOR_MCP_VERSION',\s*'([^']+)'\s*\);/", (string) file_get_contents( $main_file ), $m_ver ) ) {
+		define( 'FULL_ELEMENTOR_MCP_VERSION', $m_ver[1] );
+	} else {
+		define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.1' );
+	}
 }
 
 if ( ! defined( 'ELEMENTOR_VERSION' ) ) {

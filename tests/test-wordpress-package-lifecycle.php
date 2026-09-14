@@ -56,12 +56,15 @@ register_shutdown_function( static function () {
 
 $repo_root = dirname( __DIR__ ) . DIRECTORY_SEPARATOR;
 $dist_dir  = $repo_root . 'dist' . DIRECTORY_SEPARATOR;
-$zip_file  = $dist_dir . 'safe-elementor-mcp-1.8.0.zip';
+$main_content = (string) file_get_contents( $repo_root . 'full-elementor-mcp.php' );
+preg_match( "/define\(\s*'FULL_ELEMENTOR_MCP_VERSION',\s*'([^']+)'\s*\);/", $main_content, $m_ver );
+$target_version = $m_ver[1] ?? '1.8.1';
+$zip_file  = $dist_dir . "safe-elementor-mcp-{$target_version}.zip";
 $manifest  = $dist_dir . 'manifest.json';
 
 // Build release ZIP once if not present
 if ( ! file_exists( $zip_file ) || ! file_exists( $manifest ) ) {
-	echo "Building dist/safe-elementor-mcp-1.8.0.zip...\n";
+	echo "Building dist/safe-elementor-mcp-{$target_version}.zip...\n";
 	exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo_root . 'scripts/build-release.php' ), $b_out, $b_code );
 	if ( 0 !== $b_code ) {
 		fwrite( STDERR, "FATAL: build-release.php failed with exit code {$b_code}\n" );
@@ -89,6 +92,12 @@ function run_test( string $name, callable $fn ): void {
 
 function assert_true( mixed $val, string $msg = 'Expected true' ): void {
 	if ( true !== $val ) {
+		throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
+	}
+}
+
+function assert_false( mixed $val, string $msg = 'Expected false' ): void {
+	if ( false !== $val ) {
 		throw new RuntimeException( $msg . ' (got: ' . var_export( $val, true ) . ')' );
 	}
 }
@@ -134,9 +143,10 @@ $db_port = defined( 'DB_PORT' ) ? DB_PORT : 3307;
  * Creates an isolated authentic real WordPress installation backed by its own unique MySQL database.
  *
  * @param string $site_name Identifier prefix.
+ * @param bool   $include_mcp_adapter Whether to include the WordPress MCP Adapter plugin.
  * @return array{site_path: string, db_name: string} Information about the isolated WordPress site.
  */
-function create_test_wordpress_site( string $site_name ): array {
+function create_test_wordpress_site( string $site_name, bool $include_mcp_adapter = true ): array {
 	global $base_wp_dir, $worker_file, $db_port, $active_temp_sites;
 
 	$db_name   = 'safelc_' . substr( md5( uniqid( (string) mt_rand(), true ) ), 0, 10 );
@@ -173,7 +183,7 @@ function create_test_wordpress_site( string $site_name ): array {
 		if ( is_dir( $base_wp_dir . '/wp-content/plugins/elementor' ) ) {
 			exec( 'cmd /c mklink /J ' . escapeshellarg( $temp_site . '/wp-content/plugins/elementor' ) . ' ' . escapeshellarg( $base_wp_dir . '/wp-content/plugins/elementor' ) );
 		}
-		if ( is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
+		if ( $include_mcp_adapter && is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
 			exec( 'cmd /c mklink /J ' . escapeshellarg( $temp_site . '/wp-content/plugins/mcp-adapter' ) . ' ' . escapeshellarg( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) );
 		}
 	} else {
@@ -182,7 +192,7 @@ function create_test_wordpress_site( string $site_name ): array {
 		if ( is_dir( $base_wp_dir . '/wp-content/plugins/elementor' ) ) {
 			@symlink( $base_wp_dir . '/wp-content/plugins/elementor', $temp_site . '/wp-content/plugins/elementor' );
 		}
-		if ( is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
+		if ( $include_mcp_adapter && is_dir( $base_wp_dir . '/wp-content/plugins/mcp-adapter' ) ) {
 			@symlink( $base_wp_dir . '/wp-content/plugins/mcp-adapter', $temp_site . '/wp-content/plugins/mcp-adapter' );
 		}
 	}
@@ -211,9 +221,10 @@ function create_test_wordpress_site( string $site_name ): array {
 		   "require_once __DIR__ . '/wp-settings.php';\n";
 	file_put_contents( $temp_site . '/wp-config.php', $cfg );
 
-	// 5. Initialize fresh WordPress core schema and activate Elementor + MCP Adapter
+	// 5. Initialize fresh WordPress core schema
 	$init_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
-				' --action=init-site --wp-path=' . escapeshellarg( $temp_site );
+				' --action=init-site --wp-path=' . escapeshellarg( $temp_site ) .
+				( $include_mcp_adapter ? '' : ' --skip-mcp-adapter' );
 	exec( $init_cmd, $init_out, $init_code );
 	if ( 0 !== $init_code ) {
 		fwrite( STDERR, "FATAL: Failed to initialize isolated WordPress site schema: " . implode( "\n", $init_out ) . "\n" );
@@ -290,13 +301,17 @@ function destroy_test_wordpress_site( array $site_info ): void {
 // TEST 1: Release ZIP & Manifest Artifact Existence & Checksums
 // ---------------------------------------------------------------------
 
-run_test( 'Test 1: Release ZIP artifact and SHA-256 manifest exist and match', function () use ( $zip_file, $manifest ) {
+run_test( 'Test 1: Release ZIP artifact and SHA-256 manifest exist and match', function () use ( $zip_file, $manifest, $target_version, $dist_dir ) {
 	assert_true( file_exists( $zip_file ), "Release ZIP must exist at {$zip_file}" );
 	assert_true( file_exists( $manifest ), "Release manifest must exist at {$manifest}" );
 
+	$zip_files = glob( $dist_dir . 'safe-elementor-mcp-*.zip' );
+	assert_equals( 1, count( $zip_files ), 'Exactly ONE versioned ZIP must exist in dist/' );
+	assert_true( ! file_exists( $dist_dir . 'safe-elementor-mcp.zip' ), 'Unversioned alias safe-elementor-mcp.zip must NOT exist' );
+
 	$manifest_data = json_decode( (string) file_get_contents( $manifest ), true );
 	assert_true( is_array( $manifest_data ), 'Manifest must be valid JSON' );
-	assert_equals( '1.8.0', $manifest_data['version'] ?? null, 'Manifest version must be 1.8.0' );
+	assert_equals( $target_version, $manifest_data['version'] ?? null, "Manifest version must be {$target_version}" );
 
 	$computed_hash = hash_file( 'sha256', $zip_file );
 	assert_equals( $manifest_data['zip_sha256'] ?? '', $computed_hash, 'ZIP SHA-256 must match manifest' );
@@ -334,11 +349,11 @@ run_test( 'Test 2: ZIP contains strictly single-root full-elementor-mcp/ directo
 } );
 
 // ---------------------------------------------------------------------
-// TEST 3: Authentic WordPress Clean Installation (Database-Isolated)
+// TEST 3: Authentic WordPress Clean Installation (Site A: with MCP Adapter)
 // ---------------------------------------------------------------------
 
-run_test( 'Test 3: Authentic WordPress clean installation in database-isolated site activates and boots', function () use ( $zip_file, $worker_file ) {
-	$clean_site_info = create_test_wordpress_site( 'safe_mcp_clean_install' );
+run_test( 'Test 3: Authentic WordPress clean installation (Site A: with MCP Adapter) activates with full MCP support', function () use ( $zip_file, $worker_file, $target_version ) {
+	$clean_site_info = create_test_wordpress_site( 'safe_mcp_clean_site_a', true );
 	try {
 		$clean_site = $clean_site_info['site_path'];
 
@@ -367,28 +382,88 @@ run_test( 'Test 3: Authentic WordPress clean installation in database-isolated s
 			assert_equals( 0, $install_code, 'Plugin_Upgrader::install failed: ' . implode( "\n", $install_out ) );
 		}
 
-		// 3. Verify in fresh child PHP process (schema created by authentic activation, zero manual install):
+		// 3. Verify in fresh child PHP process:
 		$verify_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
-					  ' --action=verify-clean-install --wp-path=' . escapeshellarg( $clean_site );
+					  ' --action=verify-clean-install --wp-path=' . escapeshellarg( $clean_site ) .
+					  ' --expected-version=' . escapeshellarg( $target_version );
 		exec( $verify_cmd, $verify_out, $verify_code );
 		assert_equals( 0, $verify_code, 'Clean install verification failed: ' . implode( "\n", $verify_out ) );
 
 		$verify_data = extract_last_json( $verify_out );
 		assert_true( is_array( $verify_data ) && true === ( $verify_data['success'] ?? false ), 'Clean install verification payload invalid: ' . implode( "\n", $verify_out ) );
-		assert_equals( '1.8.0', $verify_data['version'] ?? '' );
+		assert_equals( $target_version, $verify_data['version'] ?? '' );
 		assert_equals( 4, $verify_data['safety_tables'] ?? 0 );
 		assert_true( true === ( $verify_data['abilities_registered'] ?? false ), 'Abilities API must be registered' );
 		assert_true( true === ( $verify_data['mcp_server_registered'] ?? false ), 'MCP Adapter server registration must succeed' );
+		assert_true( true === ( $verify_data['adapter_active'] ?? false ), 'MCP Adapter must be active' );
+		assert_equals( 'healthy', $verify_data['diag_status'] ?? '' );
+		assert_true( true === ( $verify_data['transport_available'] ?? false ) );
 	} finally {
 		destroy_test_wordpress_site( $clean_site_info );
 	}
 } );
 
 // ---------------------------------------------------------------------
-// TEST 4: Authentic Frozen Phase 6 Runtime & Package Upgrade (Database-Isolated)
+// TEST 4: Authentic WordPress Clean Installation (Site B: NO MCP Adapter)
 // ---------------------------------------------------------------------
 
-run_test( 'Test 4: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8) in isolated database', function () use ( $zip_file, $worker_file ) {
+run_test( 'Test 4: Authentic WordPress clean installation (Site B: NO MCP Adapter) activates gracefully with Abilities', function () use ( $zip_file, $worker_file, $target_version ) {
+	$clean_site_info = create_test_wordpress_site( 'safe_mcp_clean_site_b', false );
+	try {
+		$clean_site = $clean_site_info['site_path'];
+
+		// 1. Explicitly assert pre-installation clean state:
+		$pre_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
+				   ' --action=assert-pre-install --wp-path=' . escapeshellarg( $clean_site );
+		exec( $pre_cmd, $pre_out, $pre_code );
+		assert_equals( 0, $pre_code, 'Pre-install clean state assertion failed: ' . implode( "\n", $pre_out ) );
+
+		// 2. Install exact built ZIP through user-facing WordPress installation path:
+		$has_wp_cli = false;
+		exec( 'wp --version 2>' . ( PHP_OS_FAMILY === 'Windows' ? 'nul' : '/dev/null' ), $wp_out, $wp_exit );
+		if ( 0 === $wp_exit ) {
+			$has_wp_cli = true;
+		}
+
+		if ( $has_wp_cli ) {
+			$cmd = 'wp plugin install ' . escapeshellarg( $zip_file ) . ' --activate --path=' . escapeshellarg( $clean_site );
+			exec( $cmd, $install_out, $install_code );
+			assert_equals( 0, $install_code, 'WP-CLI plugin install --activate failed: ' . implode( "\n", $install_out ) );
+		} else {
+			$cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
+				   ' --action=clean-install --wp-path=' . escapeshellarg( $clean_site ) .
+				   ' --zip-file=' . escapeshellarg( $zip_file );
+			exec( $cmd, $install_out, $install_code );
+			assert_equals( 0, $install_code, 'Plugin_Upgrader::install failed: ' . implode( "\n", $install_out ) );
+		}
+
+		// 3. Verify in fresh child PHP process without MCP Adapter:
+		$verify_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
+					  ' --action=verify-clean-install --wp-path=' . escapeshellarg( $clean_site ) .
+					  ' --expected-version=' . escapeshellarg( $target_version );
+		exec( $verify_cmd, $verify_out, $verify_code );
+		assert_equals( 0, $verify_code, 'Clean install verification without MCP Adapter failed: ' . implode( "\n", $verify_out ) );
+
+		$verify_data = extract_last_json( $verify_out );
+		assert_true( is_array( $verify_data ) && true === ( $verify_data['success'] ?? false ), 'Verification payload invalid: ' . implode( "\n", $verify_out ) );
+		assert_equals( $target_version, $verify_data['version'] ?? '' );
+		assert_equals( 4, $verify_data['safety_tables'] ?? 0, 'Safety tables must be created' );
+		assert_true( true === ( $verify_data['abilities_registered'] ?? false ), 'Abilities API must be registered even without MCP Adapter' );
+		assert_false( true === ( $verify_data['mcp_server_registered'] ?? false ), 'MCP server must NOT be registered when adapter is missing' );
+		assert_false( true === ( $verify_data['adapter_active'] ?? false ), 'MCP Adapter must be inactive' );
+		assert_equals( 'degraded', $verify_data['diag_status'] ?? '', 'Status should be degraded (transport unavailable)' );
+		assert_false( true === ( $verify_data['transport_available'] ?? false ) );
+		assert_true( ! empty( $verify_data['transport_warning'] ), 'Non-fatal transport warning must be produced' );
+	} finally {
+		destroy_test_wordpress_site( $clean_site_info );
+	}
+} );
+
+// ---------------------------------------------------------------------
+// TEST 5: Authentic Frozen Phase 6 Runtime & Package Upgrade (Database-Isolated)
+// ---------------------------------------------------------------------
+
+run_test( 'Test 5: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e38f3121a594f992bf81725cec8) in isolated database', function () use ( $zip_file, $worker_file, $target_version ) {
 	$upgrade_site_info = create_test_wordpress_site( 'safe_mcp_p6_upgrade' );
 	try {
 		$upgrade_site  = $upgrade_site_info['site_path'];
@@ -453,13 +528,14 @@ run_test( 'Test 4: In-place upgrade from frozen Phase 6 baseline (f21858ac9d853e
 		// 4. Process 3: Phase 7 post-upgrade verification in a fresh process
 		$verify_up_cmd = escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $worker_file ) .
 						 ' --action=verify-upgrade --wp-path=' . escapeshellarg( $upgrade_site ) .
-						 ' --seed-file=' . escapeshellarg( $seed_file );
+						 ' --seed-file=' . escapeshellarg( $seed_file ) .
+						 ' --expected-version=' . escapeshellarg( $target_version );
 		exec( $verify_up_cmd, $ver_out, $ver_code );
 		assert_equals( 0, $ver_code, 'Post-upgrade verification failed: ' . implode( "\n", $ver_out ) );
 
 		$ver_data = extract_last_json( $ver_out );
 		assert_true( is_array( $ver_data ) && true === ( $ver_data['success'] ?? false ), 'Post-upgrade verification payload invalid: ' . implode( "\n", $ver_out ) );
-		assert_equals( '1.8.0', $ver_data['version'] ?? '' );
+		assert_equals( $target_version, $ver_data['version'] ?? '' );
 		assert_equals( 4, $ver_data['safety_tables'] ?? 0 );
 		assert_true( true === ( $ver_data['decrypted'] ?? false ), 'Phase 6 checkpoint must decrypt under Phase 7 crypto' );
 		assert_true( true === ( $ver_data['abilities_registered'] ?? false ), 'Abilities API must be registered after upgrade' );

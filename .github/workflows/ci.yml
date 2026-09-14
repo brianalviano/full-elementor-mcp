@@ -282,8 +282,11 @@ jobs:
       - name: Verify Release Artifacts & Single Root full-elementor-mcp/
         run: |
           test -f dist/manifest.json || { echo "Missing manifest.json"; exit 1; }
-          test -f dist/safe-elementor-mcp-1.8.0.zip || { echo "Missing ZIP"; exit 1; }
-          test -f dist/safe-elementor-mcp-1.8.0.zip.sha256 || { echo "Missing SHA256"; exit 1; }
+          ZIP_COUNT=$(ls -1 dist/safe-elementor-mcp-*.zip 2>/dev/null | wc -l)
+          test "$ZIP_COUNT" -eq 1 || { echo "Expected exactly 1 versioned ZIP, found $ZIP_COUNT"; exit 1; }
+          test ! -f dist/safe-elementor-mcp.zip || { echo "Forbidden unversioned alias safe-elementor-mcp.zip found"; exit 1; }
+          SHA_COUNT=$(ls -1 dist/safe-elementor-mcp-*.zip.sha256 2>/dev/null | wc -l)
+          test "$SHA_COUNT" -eq 1 || { echo "Expected exactly 1 SHA256 file, found $SHA_COUNT"; exit 1; }
           ls -la dist/
           cat dist/manifest.json
 

@@ -3,7 +3,7 @@
  * Plugin Name:       Safe Elementor MCP
  * Plugin URI:        https://github.com/brianalviano/safe-elementor-mcp
  * Description:       A production-safe MCP server for AI-powered Elementor development. Deep page-building capabilities with snapshots, undo, scoped access, and safety guardrails.
- * Version:           1.8.0
+ * Version:           1.8.1
  * Requires at least: 6.9
  * Tested up to:      7.1
  * Requires PHP:      8.0
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Plugin constants.
-define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.0' );
+define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.1' );
 define( 'FULL_ELEMENTOR_MCP_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_URL', plugin_dir_url( __FILE__ ) );
 define( 'FULL_ELEMENTOR_MCP_BASENAME', plugin_basename( __FILE__ ) );
@@ -123,11 +123,11 @@ function full_elementor_mcp_register_ability( string $name, array $args ) {
  */
 function full_elementor_mcp_check_dependencies(): bool {
 	require_once FULL_ELEMENTOR_MCP_DIR . 'includes/class-compatibility-checker.php';
-	$missing = Full_Elementor_MCP_Compatibility_Checker::get_missing_dependencies();
+	$blocking = Full_Elementor_MCP_Compatibility_Checker::get_blocking_requirements();
 
-	if ( ! empty( $missing ) ) {
-		add_action( 'admin_notices', function () use ( $missing ) {
-			$list = implode( ', ', $missing );
+	if ( ! empty( $blocking ) ) {
+		add_action( 'admin_notices', function () use ( $blocking ) {
+			$list = implode( ', ', $blocking );
 			printf(
 				'<div class="notice notice-error"><p>%s</p></div>',
 				sprintf(
@@ -139,6 +139,17 @@ function full_elementor_mcp_check_dependencies(): bool {
 		} );
 
 		return false;
+	}
+
+	// If optional MCP Adapter transport is unavailable, register a non-fatal warning notice.
+	$transport_warning = Full_Elementor_MCP_Compatibility_Checker::get_transport_warning();
+	if ( ! empty( $transport_warning ) ) {
+		add_action( 'admin_notices', function () use ( $transport_warning ) {
+			printf(
+				'<div class="notice notice-warning"><p>%s</p></div>',
+				esc_html( $transport_warning )
+			);
+		} );
 	}
 
 	return true;

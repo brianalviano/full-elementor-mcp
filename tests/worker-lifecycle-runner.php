@@ -33,6 +33,8 @@ $options = getopt( '', array(
 	'zip-file::',
 	'seed-data::',
 	'seed-file::',
+	'skip-mcp-adapter::',
+	'expected-version::',
 ) );
 
 $action    = $options['action'] ?? null;
@@ -49,7 +51,7 @@ if ( ! empty( $options['seed-file'] ) && file_exists( $options['seed-file'] ) ) 
 }
 
 if ( ! $action || ! $wp_path || ! is_dir( $wp_path ) ) {
-	fwrite( STDERR, "Usage: worker-lifecycle-runner.php --action=<action> --wp-path=<path> [--zip-file=<zip>] [--seed-file=<file>]\n" );
+	fwrite( STDERR, "Usage: worker-lifecycle-runner.php --action=<action> --wp-path=<path> [--zip-file=<zip>] [--seed-file=<file>] [--skip-mcp-adapter] [--expected-version=<ver>]\n" );
 	exit( 2 );
 }
 
@@ -94,21 +96,22 @@ if ( 'init-site' === $action ) {
 		exit( 1 );
 	}
 
-	// 3. Activate required dependency: official WordPress MCP Adapter
-	$mcp_file = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'mcp-adapter/mcp-adapter.php';
-	if ( ! file_exists( $mcp_file ) ) {
-		fwrite( STDERR, "FATAL: MCP Adapter plugin not found at {$mcp_file}\n" );
-		exit( 1 );
-	}
+	// 3. Activate optional transport dependency: WordPress MCP Adapter (if present and not skipped)
+	$skip_mcp   = isset( $options['skip-mcp-adapter'] );
+	$mcp_active = false;
+	$mcp_file   = WP_PLUGIN_DIR . DIRECTORY_SEPARATOR . 'mcp-adapter/mcp-adapter.php';
 
-	$mcp_act = activate_plugin( 'mcp-adapter/mcp-adapter.php' );
-	if ( is_wp_error( $mcp_act ) ) {
-		fwrite( STDERR, "FATAL: MCP Adapter activation failed: " . $mcp_act->get_error_message() . "\n" );
-		exit( 1 );
-	}
-	if ( ! is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) ) {
-		fwrite( STDERR, "FATAL: MCP Adapter is not active after activate_plugin()\n" );
-		exit( 1 );
+	if ( ! $skip_mcp && file_exists( $mcp_file ) ) {
+		$mcp_act = activate_plugin( 'mcp-adapter/mcp-adapter.php' );
+		if ( is_wp_error( $mcp_act ) ) {
+			fwrite( STDERR, "FATAL: MCP Adapter activation failed: " . $mcp_act->get_error_message() . "\n" );
+			exit( 1 );
+		}
+		if ( ! is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) ) {
+			fwrite( STDERR, "FATAL: MCP Adapter is not active after activate_plugin()\n" );
+			exit( 1 );
+		}
+		$mcp_active = true;
 	}
 
 	// 4. Ensure admin user has full capabilities
@@ -117,7 +120,7 @@ if ( 'init-site' === $action ) {
 	echo json_encode( array(
 		'success'   => true,
 		'elementor' => true,
-		'mcp'       => true,
+		'mcp'       => $mcp_active,
 	) );
 	exit( 0 );
 }
@@ -226,8 +229,9 @@ if ( 'verify-clean-install' === $action ) {
 	}
 
 	$data = get_plugin_data( $installed_entry, false, false );
-	if ( '1.8.0' !== ( $data['Version'] ?? '' ) ) {
-		fwrite( STDERR, "FATAL: Plugin version is not 1.8.0 (got: " . ( $data['Version'] ?? 'none' ) . ")\n" );
+	$expected_ver = $options['expected-version'] ?? '1.8.1';
+	if ( $expected_ver !== ( $data['Version'] ?? '' ) ) {
+		fwrite( STDERR, "FATAL: Plugin version is not {$expected_ver} (got: " . ( $data['Version'] ?? 'none' ) . ")\n" );
 		exit( 1 );
 	}
 
@@ -256,30 +260,40 @@ if ( 'verify-clean-install' === $action ) {
 		exit( 1 );
 	}
 
-	// Verify MCP Adapter initialization and server registration
-	$adapter_instance = null;
-	if ( class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
-		$adapter_instance = method_exists( '\WP\MCP\Core\McpAdapter', 'instance' )
-			? \WP\MCP\Core\McpAdapter::instance()
-			: new \WP\MCP\Core\McpAdapter();
-	} elseif ( class_exists( 'WP_MCP_Adapter' ) ) {
-		$adapter_instance = new WP_MCP_Adapter();
+	// Verify MCP Adapter initialization and server registration (if adapter is active)
+	$has_adapter = is_plugin_active( 'mcp-adapter/mcp-adapter.php' ) && ( class_exists( '\WP\MCP\Core\McpAdapter' ) || class_exists( 'WP_MCP_Adapter' ) );
+	$server_registered = false;
+
+	if ( $has_adapter ) {
+		$adapter_instance = null;
+		if ( class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
+			$adapter_instance = method_exists( '\WP\MCP\Core\McpAdapter', 'instance' )
+				? \WP\MCP\Core\McpAdapter::instance()
+				: new \WP\MCP\Core\McpAdapter();
+		} elseif ( class_exists( 'WP_MCP_Adapter' ) ) {
+			$adapter_instance = new WP_MCP_Adapter();
+		}
+
+		if ( is_object( $adapter_instance ) ) {
+			do_action( 'mcp_adapter_init', $adapter_instance );
+			$server_registered = true;
+		}
 	}
 
-	if ( ! is_object( $adapter_instance ) ) {
-		fwrite( STDERR, "FATAL: McpAdapter class not found or could not instantiate\n" );
-		exit( 1 );
-	}
-
-	// Fire mcp_adapter_init hook to execute register_mcp_server
-	do_action( 'mcp_adapter_init', $adapter_instance );
+	require_once $installed_dir . DIRECTORY_SEPARATOR . 'includes/class-compatibility-checker.php';
+	$diag = \Full_Elementor_MCP_Compatibility_Checker::get_system_diagnostics();
+	$transport_status = \Full_Elementor_MCP_Compatibility_Checker::get_transport_status();
 
 	echo json_encode( array(
 		'success'                => true,
 		'version'                => $data['Version'],
 		'safety_tables'          => count( $safety_tables ),
 		'abilities_registered'   => true,
-		'mcp_server_registered'  => true,
+		'mcp_server_registered'  => $server_registered,
+		'adapter_active'         => $has_adapter,
+		'diag_status'            => $diag['status'],
+		'transport_available'    => $transport_status['available'],
+		'transport_warning'      => $transport_status['warning'],
 	) );
 	exit( 0 );
 }
@@ -495,10 +509,11 @@ if ( 'verify-upgrade' === $action ) {
 		exit( 1 );
 	}
 
-	// 2. Verify version is 1.8.0
+	// 2. Verify version
 	$data = get_plugin_data( $upgraded_main, false, false );
-	if ( '1.8.0' !== ( $data['Version'] ?? '' ) ) {
-		fwrite( STDERR, "FATAL: Upgraded plugin version is not 1.8.0 (got: " . ( $data['Version'] ?? 'none' ) . ")\n" );
+	$expected_ver = $options['expected-version'] ?? '1.8.1';
+	if ( $expected_ver !== ( $data['Version'] ?? '' ) ) {
+		fwrite( STDERR, "FATAL: Upgraded plugin version is not {$expected_ver} (got: " . ( $data['Version'] ?? 'none' ) . ")\n" );
 		exit( 1 );
 	}
 

@@ -52,11 +52,10 @@ php scripts/build-release.php
    - Runs `php -l` on all PHP files included in the build.
 2. **Deterministic Single-Root Assembly**:
    - Compiles distribution archive with internal single root directory: `full-elementor-mcp/`.
-   - The archive itself is named `safe-elementor-mcp-X.Y.Z.zip` (with `safe-elementor-mcp.zip` symlink/copy).
+   - The archive itself is named `safe-elementor-mcp-X.Y.Z.zip`.
    - Excludes VCS files (`.git/`), CI workflows (`.github/`), test suites (`tests/`), build scripts (`scripts/`), and scratch files.
 3. **Artifacts Output to `dist/`**:
    - `dist/safe-elementor-mcp-X.Y.Z.zip`
-   - `dist/safe-elementor-mcp.zip` (latest alias)
    - `dist/safe-elementor-mcp-X.Y.Z.zip.sha256`
    - `dist/manifest.json` containing build timestamp, file list, and per-file SHA-256 hashes.
 4. **Post-Build Validation**:

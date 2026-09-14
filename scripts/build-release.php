@@ -213,13 +213,12 @@ if ( ! is_dir( $dist_dir ) ) {
 
 $zip_filename   = "safe-elementor-mcp-{$version}.zip";
 $zip_path       = $dist_dir . DIRECTORY_SEPARATOR . $zip_filename;
-$alias_zip_path = $dist_dir . DIRECTORY_SEPARATOR . 'safe-elementor-mcp.zip';
 
-if ( file_exists( $zip_path ) ) {
-	unlink( $zip_path );
+foreach ( glob( $dist_dir . DIRECTORY_SEPARATOR . '*.zip' ) as $old_zip ) {
+	unlink( $old_zip );
 }
-if ( file_exists( $alias_zip_path ) ) {
-	unlink( $alias_zip_path );
+foreach ( glob( $dist_dir . DIRECTORY_SEPARATOR . '*.sha256' ) as $old_sha ) {
+	unlink( $old_sha );
 }
 
 $zip = new ZipArchive();
@@ -248,7 +247,6 @@ foreach ( $files_to_package as $norm_rel => $full_path ) {
 }
 
 $zip->close();
-copy( $zip_path, $alias_zip_path );
 
 echo "      Archive created: {$zip_filename} (" . round( filesize( $zip_path ) / 1024, 2 ) . " KB)\n";
 

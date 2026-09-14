@@ -16,7 +16,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 $full_elementor_mcp_endpoint      = rest_url( 'mcp/full-elementor-mcp-server' );
 $full_elementor_mcp_enabled_count = $this->get_enabled_tool_count();
 $full_elementor_mcp_total_count   = $this->get_total_tool_count();
-$full_elementor_mcp_has_adapter   = class_exists( '\WP\MCP\Core\McpAdapter' );
+require_once FULL_ELEMENTOR_MCP_DIR . 'includes/class-compatibility-checker.php';
+$full_elementor_mcp_transport     = Full_Elementor_MCP_Compatibility_Checker::get_transport_status();
+$full_elementor_mcp_has_adapter   = ! empty( $full_elementor_mcp_transport['available'] );
+$full_elementor_mcp_adapter_label = $full_elementor_mcp_has_adapter ? __( 'Active', 'full-elementor-mcp' ) : ( 'missing' === ( $full_elementor_mcp_transport['status'] ?? '' ) ? __( 'Not Active', 'full-elementor-mcp' ) : __( 'Incompatible', 'full-elementor-mcp' ) );
 ?>
 
 <div class="full-elementor-mcp-connection">
@@ -47,7 +50,7 @@ $full_elementor_mcp_has_adapter   = class_exists( '\WP\MCP\Core\McpAdapter' );
 				</span>
 				<span class="full-elementor-mcp-status-card-info">
 					<span class="full-elementor-mcp-status-card-label"><?php esc_html_e( 'MCP Adapter', 'full-elementor-mcp' ); ?></span>
-					<span class="full-elementor-mcp-status-card-value"><?php echo esc_html( $full_elementor_mcp_has_adapter ? __( 'Active', 'full-elementor-mcp' ) : __( 'Not Active', 'full-elementor-mcp' ) ); ?></span>
+					<span class="full-elementor-mcp-status-card-value"><?php echo esc_html( $full_elementor_mcp_adapter_label ); ?></span>
 				</span>
 			</div>
 

@@ -21,7 +21,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 	define( 'ABSPATH', dirname( __DIR__ ) . DIRECTORY_SEPARATOR );
 }
 if ( ! defined( 'FULL_ELEMENTOR_MCP_VERSION' ) ) {
-	define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.0' );
+	$main_file = dirname( __DIR__ ) . DIRECTORY_SEPARATOR . 'full-elementor-mcp.php';
+	if ( file_exists( $main_file ) && preg_match( "/define\(\s*'FULL_ELEMENTOR_MCP_VERSION',\s*'([^']+)'\s*\);/", (string) file_get_contents( $main_file ), $m_ver ) ) {
+		define( 'FULL_ELEMENTOR_MCP_VERSION', $m_ver[1] );
+	} else {
+		define( 'FULL_ELEMENTOR_MCP_VERSION', '1.8.1' );
+	}
 }
 if ( ! defined( 'FULL_ELEMENTOR_MCP_DIR' ) ) {
 	define( 'FULL_ELEMENTOR_MCP_DIR', dirname( __DIR__ ) . DIRECTORY_SEPARATOR );
@@ -792,16 +797,18 @@ run_test( 'Release Packaging: scripts/build-release.php produces valid single-ro
 	assert_equals( 0, $exit_code, 'scripts/build-release.php must exit with 0: ' . implode( "\n", $output ) );
 
 	$dist_dir = FULL_ELEMENTOR_MCP_DIR . 'dist';
-	$zip_path = $dist_dir . DIRECTORY_SEPARATOR . 'safe-elementor-mcp-1.8.0.zip';
+	$expected_ver = FULL_ELEMENTOR_MCP_VERSION;
+	$zip_path = $dist_dir . DIRECTORY_SEPARATOR . "safe-elementor-mcp-{$expected_ver}.zip";
 	$manifest_path = $dist_dir . DIRECTORY_SEPARATOR . 'manifest.json';
 
-	assert_true( file_exists( $zip_path ), 'Release ZIP file must exist' );
+	assert_true( file_exists( $zip_path ), "Release ZIP file must exist: {$zip_path}" );
 	assert_true( file_exists( $manifest_path ), 'Release manifest.json must exist' );
+	assert_true( ! file_exists( $dist_dir . DIRECTORY_SEPARATOR . 'safe-elementor-mcp.zip' ), 'Unversioned alias safe-elementor-mcp.zip must NOT exist' );
 
 	$manifest = json_decode( (string) file_get_contents( $manifest_path ), true );
 	assert_true( is_array( $manifest ), 'Manifest must be valid JSON' );
 	assert_equals( 'Safe Elementor MCP', $manifest['product_name'] );
-	assert_equals( '1.8.0', $manifest['version'] );
+	assert_equals( $expected_ver, $manifest['version'] );
 
 	$actual_zip_hash = hash_file( 'sha256', $zip_path );
 	assert_equals( $actual_zip_hash, $manifest['zip_sha256'], 'Manifest SHA-256 must match physical ZIP file' );
