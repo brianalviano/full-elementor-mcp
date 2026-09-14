@@ -102,7 +102,11 @@ jobs:
           wp core download --version=6.9 --path=/tmp/wordpress --force
           wp config create --path=/tmp/wordpress --dbname=safe_elementor_test --dbuser=root --dbpass=root --dbhost=127.0.0.1 --skip-check
           wp core install --path=/tmp/wordpress --url=http://localhost --title="Safe Elementor Test" --admin_user=admin --admin_password=adminpass123 --admin_email=admin@example.com
+          curl -fLo /tmp/mcp-adapter.zip https://github.com/WordPress/mcp-adapter/releases/download/v0.6.1/mcp-adapter.zip
+          wp plugin install /tmp/mcp-adapter.zip --activate --path=/tmp/wordpress
+          wp plugin is-active mcp-adapter --path=/tmp/wordpress || { echo "FATAL: MCP Adapter failed to activate"; exit 1; }
           wp plugin install elementor --activate --path=/tmp/wordpress
+          wp plugin is-active elementor --path=/tmp/wordpress || { echo "FATAL: Elementor failed to activate"; exit 1; }
 
       - name: Run Standalone Test Suite (Phases 1-7)
         run: |
@@ -137,7 +141,11 @@ jobs:
           test -f dist/manifest.json || { echo "Missing manifest.json"; exit 1; }
           test -f "dist/safe-elementor-mcp-${TARGET_VER}.zip" || { echo "Missing ZIP for ${TARGET_VER}"; exit 1; }
           test -f "dist/safe-elementor-mcp-${TARGET_VER}.zip.sha256" || { echo "Missing SHA256 for ${TARGET_VER}"; exit 1; }
-          test ! -f dist/safe-elementor-mcp.zip || { echo "Forbidden unversioned alias found"; exit 1; }
+          ZIP_COUNT=$(ls -1 dist/safe-elementor-mcp-*.zip 2>/dev/null | wc -l)
+          test "$ZIP_COUNT" -eq 1 || { echo "Expected exactly 1 versioned ZIP, found $ZIP_COUNT"; exit 1; }
+          test ! -f dist/safe-elementor-mcp.zip || { echo "Forbidden unversioned alias safe-elementor-mcp.zip found"; exit 1; }
+          SHA_COUNT=$(ls -1 dist/safe-elementor-mcp-*.zip.sha256 2>/dev/null | wc -l)
+          test "$SHA_COUNT" -eq 1 || { echo "Expected exactly 1 SHA256 file, found $SHA_COUNT"; exit 1; }
 
       - name: Execute Pre-Phase 7 Upgrade Smoke Test from Phase 6 Baseline
         env:
@@ -148,6 +156,16 @@ jobs:
           DB_PASSWORD: root
           DB_NAME: safe_elementor_test
         run: php tests/test-phase6-upgrade-smoke.php
+
+      - name: Execute WordPress Package Lifecycle Suite
+        env:
+          WP_PATH: /tmp/wordpress
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: root
+          DB_NAME: safe_elementor_test
+        run: php tests/test-wordpress-package-lifecycle.php
 
       - name: Create Draft Release on GitHub
         uses: softprops/action-gh-release@v2

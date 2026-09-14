@@ -31,6 +31,7 @@ Before building a release, verify the following:
     php tests/test-process-crash-recovery.php
     php tests/test-wordpress-integration.php
     php tests/test-phase6-upgrade-smoke.php
+    php tests/test-wordpress-package-lifecycle.php
     ```
 - [ ] **Syntax Lint**:
   - `find . -name "*.php" -exec php -l {} +` passes with zero errors on PHP 8.0 through 8.4.
@@ -61,6 +62,7 @@ php scripts/build-release.php
 4. **Post-Build Validation**:
    - Inspects the produced ZIP to verify single-root `full-elementor-mcp/` compliance and absence of excluded directories.
    - Executes `tests/test-phase6-upgrade-smoke.php` to verify in-place upgrade from earlier release baseline.
+   - Executes `tests/test-wordpress-package-lifecycle.php` to verify authentic clean installations across multi-adapter environments and baseline upgrade.
 
 ---
 
